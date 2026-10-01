@@ -11,3 +11,7 @@ Use the five canonical labels: `needs-triage`, `needs-info`, `ready-for-agent`, 
 ### Domain docs
 
 Use the single-context layout. See `docs/agents/domain.md`.
+
+### Notation research
+
+Dozenal music notation grammar, glyphs, staff layout, and mensural rhythm conventions. See `docs/research/dozenal-music-notation.md`.
