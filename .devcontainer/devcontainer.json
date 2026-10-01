@@ -10,6 +10,15 @@
         "extensions": [
             "rust-lang.rust-analyzer"
         ]
+      },
+      "codespaces": {
+        "repositories": {
+          "mwilsoncoding/dozenal-music-notation": {
+            "permissions": {
+              "contents": "read"
+            }
+          }
+        }
       }
     },
 
