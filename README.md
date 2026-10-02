@@ -1,6 +1,6 @@
-# dozenal-music-engraving-renderer
+# domunor (DOzenal MUsic NOtation Renderer)
 
-Music engraving software modeling dozenal notation
+Engraving software modeling DOzenal MUsic NOtation (domuno).
 
 This is an implementation of the ideas discussed in [the Dozenal Music Notation repository](https://github.com/mwilsoncoding/dozenal-music-notation)
 
