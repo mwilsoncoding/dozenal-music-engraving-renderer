@@ -32,6 +32,10 @@ _Avoid_: MIDI number, frequency, pitch class
 A three-line grid consisting of top, center, and bottom lines defining discrete octave lanes.
 _Avoid_: Five-line staff, chromatic staff, staves
 
+**System**:
+A horizontal row of one or more staves aligned across a score.
+_Avoid_: Page, staff
+
 **Octave Indicator**:
 A pair of vertically stacked dozenal digits flanking the center staff line at the start of a staff to establish register.
 _Avoid_: Clef, key signature, clef sign
@@ -53,7 +57,7 @@ A single dozenal digit glyph placed within an octave lane representing a sounded
 _Avoid_: Notehead, hollow notehead, oval
 
 **Stem**:
-A vertical line attached to a tonehead indicating a stemmed duration; both quarter and half notes use stems.
+A vertical line attached to a tonehead; every duration except a whole note uses a stem.
 _Avoid_: Tail, stick
 
 **Duration Dots**:
