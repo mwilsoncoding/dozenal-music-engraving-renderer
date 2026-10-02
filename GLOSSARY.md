@@ -53,7 +53,7 @@ A single dozenal digit glyph placed within an octave lane representing a sounded
 _Avoid_: Notehead, hollow notehead, oval
 
 **Stem**:
-A vertical line attached to a tonehead indicating a quarter-note or smaller rhythmic duration.
+A vertical line attached to a tonehead indicating a stemmed duration; both quarter and half notes use stems.
 _Avoid_: Tail, stick
 
 **Duration Dots**:
