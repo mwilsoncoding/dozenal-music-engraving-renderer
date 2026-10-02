@@ -40,6 +40,12 @@ _Avoid_: Clef, key signature, clef sign
 An extension line drawn above the top staff line or below the bottom staff line to support notes in extreme octaves.
 _Avoid_: Clef change, 8va, octave shift
 
+### Score Structure
+
+**Voice**:
+An independent sequence of musical events within a part; an event may contain one tone or simultaneous tones.
+_Avoid_: Part, chord
+
 ### Rhythm & Glyphs
 
 **Tonehead**:
