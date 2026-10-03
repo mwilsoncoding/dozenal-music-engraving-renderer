@@ -333,9 +333,24 @@
     .custom-sample path {
       fill: none;
       stroke: currentColor;
-      stroke-width: 1.3;
+      stroke-width: 2.2;
       stroke-linecap: round;
       stroke-linejoin: round;
+    }
+
+    .custom-sample.existing path { stroke-width: 1.3; }
+
+    .font-reference {
+      display: grid;
+      width: 54px;
+      height: 82px;
+      place-items: center;
+      color: #111;
+      font-family: "DejaVu Reference", sans-serif;
+      font-size: 54px;
+      font-weight: 700;
+      line-height: 1;
+      transform: rotate(180deg);
     }
 
     .custom-sample small {
@@ -499,16 +514,18 @@
 
     <section class="specimen-section">
       <div>
-        <h2 class="section-label">Custom dek and el</h2>
-        <p class="section-note">DejaVu has no U+218A/U+218B. Compare existing angular paths with rounded hand-drawn sketches.</p>
+        <h2 class="section-label">Turned Tonehead sketches</h2>
+        <p class="section-note">DejaVu Sans Bold 2 and 3 rotated 180° are the visual references for dek and el. Compare the current paths with heavier, softer hand-drawn forms.</p>
       </div>
       <div class="sample-area">
-        <p class="sample-caption">Current paths and rounded sketches</p>
+        <p class="sample-caption">2 → dek · 3 → el</p>
         <div class="custom-row">
-          <div class="custom-sample"><svg viewBox="0 0 12 20" aria-label="Current dek path"><path d="M10 16H2V9H10V2H2"/></svg><small>Current dek</small></div>
-          <div class="custom-sample"><svg viewBox="0 0 12 20" aria-label="Rounded dek sketch"><path d="M10 16H3Q2 16 2 15V10Q2 9 3 9H9Q10 9 10 8V3Q10 2 9 2H2"/></svg><small>Rounded dek</small></div>
-          <div class="custom-sample"><svg viewBox="0 0 12 20" aria-label="Current el path"><path d="M10 16H2V2H10M10 9H2"/></svg><small>Current el</small></div>
-          <div class="custom-sample"><svg viewBox="0 0 12 20" aria-label="Rounded el sketch"><path d="M9 16H3Q2 16 2 15V3Q2 2 3 2H9M9 9H3"/></svg><small>Rounded el</small></div>
+          <div class="custom-sample"><span class="font-reference" aria-label="DejaVu Sans Bold 2 rotated 180 degrees">2</span><small>DejaVu 2 · rotated</small></div>
+          <div class="custom-sample existing"><svg viewBox="0 0 12 20" aria-label="Current dek path"><path d="M10 16H2V9H10V2H2"/></svg><small>Current dek</small></div>
+          <div class="custom-sample"><svg viewBox="0 0 12 20" aria-label="Thicker dek path"><path d="M9.5 15.5H3Q2 15.5 2 14.5V10Q2 9 3 9H9Q10 9 10 8V3Q10 2 9 2H2.5"/></svg><small>Thicker dek</small></div>
+          <div class="custom-sample"><span class="font-reference" aria-label="DejaVu Sans Bold 3 rotated 180 degrees">3</span><small>DejaVu 3 · rotated</small></div>
+          <div class="custom-sample existing"><svg viewBox="0 0 12 20" aria-label="Current el path"><path d="M10 16H2V2H10M10 9H2"/></svg><small>Current el</small></div>
+          <div class="custom-sample"><svg viewBox="0 0 12 20" aria-label="Thicker el path"><path d="M9.5 15.5H3Q2 15.5 2 14.5V3.5Q2 2 3 2H9.5M9.5 9H3"/></svg><small>Thicker el</small></div>
         </div>
       </div>
     </section>
@@ -521,7 +538,7 @@
       <div class="sample-area">
         <div class="weights">
           <div class="weight-sample"><strong>0123456789</strong><small>DejaVu Sans Bold 700</small></div>
-          <div class="weight-sample"><strong>↊↋</strong><small>Hand-drawn candidates</small></div>
+          <div class="weight-sample"><strong><span class="font-reference">2</span><span class="font-reference">3</span></strong><small>Rotated forms used as custom-glyph references</small></div>
         </div>
       </div>
     </section>
