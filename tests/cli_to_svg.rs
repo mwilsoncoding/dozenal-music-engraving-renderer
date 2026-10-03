@@ -10,6 +10,39 @@ fn scratch_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("domunor-cli-{}-{nonce}", std::process::id()))
 }
 
+fn assert_measure_barline_layout(svg: &str) {
+    let barlines = svg
+        .lines()
+        .filter(|line| line.contains("id=\"barline-"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        barlines.len(),
+        9,
+        "expected one barline per 4/4 measure: {svg}"
+    );
+    assert!(
+        barlines.iter().all(|line| line.contains(" 28V108")),
+        "measure barlines should span only the three staff lines: {svg}"
+    );
+    let final_barline_x = barlines[8]
+        .split(" d=\"M")
+        .nth(1)
+        .and_then(|value| value.split(' ').next())
+        .and_then(|value| value.parse::<i32>().ok())
+        .expect("final barline x position");
+    let staff_end_x = svg
+        .lines()
+        .find(|line| line.contains("id=\"staff-line-1\""))
+        .and_then(|line| line.split('H').nth(1))
+        .and_then(|value| value.split('\"').next())
+        .and_then(|value| value.parse::<i32>().ok())
+        .expect("staff end x position");
+    assert_eq!(
+        final_barline_x, staff_end_x,
+        "final barline must meet the staff ends: {svg}"
+    );
+}
+
 fn utf16_bytes(source: &str, little_endian: bool) -> Vec<u8> {
     let mut bytes = if little_endian {
         vec![0xff, 0xfe]
@@ -480,21 +513,13 @@ fn canonical_score_covers_supported_mvp_content_in_self_contained_svg() {
     );
     let svg = fs::read_to_string(directory.join("canonical.svg")).expect("read SVG");
     assert_eq!(svg.matches("id=\"staff-line-").count(), 3, "{svg}");
-    let measure_barlines = svg
-        .lines()
-        .filter(|line| line.contains("id=\"barline-"))
-        .collect::<Vec<_>>();
-    assert_eq!(measure_barlines.len(), 2, "one barline per measure: {svg}");
-    assert!(
-        measure_barlines.iter().all(|line| line.contains(" 28V108")),
-        "measure barlines should span only the three staff lines: {svg}"
-    );
+    assert_measure_barline_layout(&svg);
     assert!(svg.contains("id=\"octave-4\""), "{svg}");
     assert!(svg.contains("id=\"octave-5\""), "{svg}");
     assert!(svg.contains("id=\"meter-numerator\""), "{svg}");
     assert!(svg.contains("id=\"meter-denominator\""), "{svg}");
     assert_eq!(svg.matches("class=\"tonehead\"").count(), 24, "{svg}");
-    assert_eq!(svg.matches("class=\"rest\"").count(), 1, "{svg}");
+    assert_eq!(svg.matches("class=\"rest\"").count(), 11, "{svg}");
     assert_eq!(svg.matches("class=\"stem\"").count(), 21, "{svg}");
     assert_eq!(svg.matches("class=\"duration-mark\"").count(), 6, "{svg}");
     assert_eq!(svg.matches("class=\"flag\"").count(), 7, "{svg}");
@@ -535,7 +560,7 @@ fn canonical_score_covers_supported_mvp_content_in_self_contained_svg() {
 
     let first_chord_tones = svg
         .lines()
-        .filter(|line| line.contains("class=\"tonehead\"") && line.contains("data-event=\"21\""))
+        .filter(|line| line.contains("class=\"tonehead\"") && line.contains("data-event=\"28\""))
         .collect::<Vec<_>>();
     assert_eq!(first_chord_tones.len(), 2, "{svg}");
     let transforms = first_chord_tones
@@ -582,6 +607,29 @@ fn canonical_score_covers_supported_mvp_content_in_self_contained_svg() {
         !svg.contains("<image") && !svg.contains("href="),
         "SVG must be self-contained paths"
     );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_no_transposition_fixture_with_correct_measure_barlines() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("no-transposition.musicxml");
+    fs::write(&input, include_str!("fixtures/no-transposition.musicxml"))
+        .expect("write no-transposition fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "no-transposition score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("no-transposition.svg")).expect("read SVG");
+    assert_measure_barline_layout(&svg);
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
