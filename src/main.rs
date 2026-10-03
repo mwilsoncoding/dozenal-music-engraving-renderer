@@ -1689,6 +1689,7 @@ fn render_svg(score: &Score) -> String {
     let mut meter_index = 0;
     let mut pending_tie_paths: Vec<(Tone, i32, i32)> = Vec::new();
     let mut active_beams = [None; 5];
+    let mut final_barline_x = 0;
     for (measure_index, measure) in score.measures.iter().enumerate() {
         let mut previous_event_geometry = None;
         if let Some(meter) = measure.meter {
@@ -2072,6 +2073,7 @@ fn render_svg(score: &Score) -> String {
             Vec::new(),
             PathGeometry::new(None, format!("M{barline_x} 28V108"), PathStyle::StaffLine),
         );
+        final_barline_x = barline_x;
         right = right.max(barline_x + 12);
         x = barline_x + 3;
     }
@@ -2080,9 +2082,9 @@ fn render_svg(score: &Score) -> String {
     scene.view_width = view_width;
     scene.view_height = view_bottom - view_top;
     for (id, path_data) in [
-        ("staff-line-1", format!("M12 28H{}", view_width - 12)),
-        ("staff-line-2", format!("M12 68H{}", view_width - 12)),
-        ("staff-line-3", format!("M12 108H{}", view_width - 12)),
+        ("staff-line-1", format!("M12 28H{final_barline_x}")),
+        ("staff-line-2", format!("M12 68H{final_barline_x}")),
+        ("staff-line-3", format!("M12 108H{final_barline_x}")),
     ] {
         scene.add_path(
             DrawLayer::Staff,
@@ -2144,5 +2146,44 @@ fn glyph_path(value: u8) -> &'static str {
         10 => "M10 16H2V9H10V2H2",
         11 => "M10 16H2V2H10M10 9H2",
         _ => unreachable!("tone values are reduced to one dozenal digit"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_score, Meter};
+
+    #[test]
+    fn canonical_fixtures_have_complete_four_four_measures() {
+        for (name, source) in [
+            (
+                "canonical",
+                include_bytes!("../tests/fixtures/canonical.musicxml").as_slice(),
+            ),
+            (
+                "no-transposition",
+                include_bytes!("../tests/fixtures/no-transposition.musicxml").as_slice(),
+            ),
+        ] {
+            let score = parse_score(source).expect("fixture should parse");
+            assert_eq!(score.measures.len(), 9, "{name} measure count");
+            for (index, measure) in score.measures.iter().enumerate() {
+                assert!(
+                    measure.meter
+                        == Some(Meter {
+                            beats: 4,
+                            beat_type: 4
+                        }),
+                    "{name} measure {} meter",
+                    index + 1
+                );
+                let duration_units = measure
+                    .events
+                    .iter()
+                    .map(|event| event.duration_units)
+                    .sum::<u32>();
+                assert_eq!(duration_units, 64, "{name} measure {} duration", index + 1);
+            }
+        }
     }
 }
