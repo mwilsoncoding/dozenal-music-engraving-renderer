@@ -19,8 +19,8 @@
     <measure number="3">
       <note><pitch><step>D</step><octave>4</octave></pitch><duration>8</duration><voice>1</voice><type>eighth</type><beam>begin</beam></note>
       <note><pitch><step>D</step><alter>1</alter><octave>4</octave></pitch><duration>8</duration><voice>1</voice><type>eighth</type><beam>end</beam></note>
-      <note><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><type>16th</type><beam>forward hook</beam></note>
-      <note><pitch><step>F</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>32nd</type><beam number="2">backward hook</beam></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><type>16th</type><beam number="1">begin</beam><beam number="2">begin</beam></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>32nd</type><beam number="1">end</beam><beam number="2">end</beam><beam number="3">backward hook</beam></note>
       <note><pitch><step>F</step><alter>1</alter><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>64th</type></note>
       <note><rest/><duration>32</duration><voice>1</voice><type>half</type></note>
       <note><rest/><duration>8</duration><voice>1</voice><type>eighth</type></note>

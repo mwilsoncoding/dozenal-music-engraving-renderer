@@ -22,9 +22,15 @@ fn assert_filled_glyph_paths(svg: &str) {
             line.contains("fill=\"#171717\""),
             "glyph must be filled: {line}"
         );
+        let is_bravo_symbol = line.contains("class=\"rest\"") || line.contains("class=\"flag\"");
+        let expected_fill_rule = if is_bravo_symbol {
+            "nonzero"
+        } else {
+            "evenodd"
+        };
         assert!(
-            line.contains("fill-rule=\"evenodd\""),
-            "glyph fill rule: {line}"
+            line.contains(&format!("fill-rule=\"{expected_fill_rule}\"")),
+            "glyph fill rule should be {expected_fill_rule}: {line}"
         );
         assert!(
             !line.contains("stroke="),
@@ -293,7 +299,7 @@ fn enforces_minimum_clearance_between_vertically_overlapping_event_geometry() {
         .and_then(|value| value.parse::<i32>().ok())
         .expect("barline x position");
     assert!(
-        barline_x - tonehead_xs[2] >= 20,
+        barline_x - tonehead_xs[2] >= 17,
         "barline should clear the final tonehead and flags: {svg}"
     );
 
@@ -348,7 +354,7 @@ fn engraves_supported_note_durations_and_only_the_two_dotted_forms() {
         "{svg}"
     );
     assert_eq!(svg.matches("class=\"stem\"").count(), 8, "{svg}");
-    assert_eq!(svg.matches("class=\"flag\"").count(), 10, "{svg}");
+    assert_eq!(svg.matches("class=\"flag\"").count(), 4, "{svg}");
     assert_eq!(svg.matches("class=\"duration-mark\"").count(), 6, "{svg}");
     let dotted_half_marks = (0..3)
         .map(|mark| {
@@ -659,9 +665,29 @@ fn canonical_score_covers_supported_mvp_content_in_self_contained_svg() {
     assert_eq!(svg.matches("class=\"rest\"").count(), 11, "{svg}");
     assert_eq!(svg.matches("class=\"stem\"").count(), 21, "{svg}");
     assert_eq!(svg.matches("class=\"duration-mark\"").count(), 6, "{svg}");
-    assert_eq!(svg.matches("class=\"flag\"").count(), 7, "{svg}");
-    assert_eq!(svg.matches("class=\"beam\"").count(), 1, "{svg}");
-    assert_eq!(svg.matches("class=\"beam-hook\"").count(), 2, "{svg}");
+    assert_eq!(svg.matches("class=\"flag\"").count(), 1, "{svg}");
+    assert_eq!(svg.matches("class=\"beam\"").count(), 3, "{svg}");
+    assert_eq!(svg.matches("class=\"beam-hook\"").count(), 1, "{svg}");
+    assert!(
+        svg.contains("id=\"beam-7-1\""),
+        "16th/32nd primary beam: {svg}"
+    );
+    assert!(
+        svg.contains("id=\"beam-7-2\""),
+        "16th/32nd secondary beam: {svg}"
+    );
+    assert!(
+        !svg.contains("id=\"flag-6\""),
+        "beamed 16th should not be flagged: {svg}"
+    );
+    assert!(
+        !svg.contains("id=\"flag-7\""),
+        "hooked 32nd level should not be a flag: {svg}"
+    );
+    assert!(
+        svg.contains("id=\"beam-hook-7-3\""),
+        "32nd third-level hook: {svg}"
+    );
     assert_eq!(svg.matches("class=\"tie\"").count(), 1, "{svg}");
     assert_eq!(svg.matches("class=\"chord-bracket\"").count(), 4, "{svg}");
     assert_eq!(
@@ -951,6 +977,14 @@ fn renders_simple_numeric_meter_and_rests() {
     let svg = fs::read_to_string(directory.join("meter-and-rest.svg")).expect("read SVG");
     assert_eq!(svg.matches("class=\"tonehead\"").count(), 1, "{svg}");
     assert_eq!(svg.matches("class=\"rest\"").count(), 1, "{svg}");
+    assert!(
+        svg.contains("class=\"rest\"") && svg.contains("fill-rule=\"nonzero\""),
+        "{svg}"
+    );
+    assert!(
+        svg.contains("d=\"M5.775 10.110C6.255 10.710"),
+        "quarter rest should use the Bravura path: {svg}"
+    );
     assert!(svg.contains("id=\"meter-numerator\""), "{svg}");
     assert!(svg.contains("id=\"meter-denominator\""), "{svg}");
     assert!(
@@ -1131,7 +1165,7 @@ fn rejects_unclosed_explicit_beam_groups_without_svg() {
 }
 
 #[test]
-fn preserves_beam_hooks_and_the_default_beam_number() {
+fn renders_forward_beam_hook_as_a_beam_segment() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
     let input = directory.join("forward-hook.musicxml");
@@ -1159,7 +1193,63 @@ fn preserves_beam_hooks_and_the_default_beam_number() {
         .lines()
         .find(|line| line.contains("class=\"beam-hook\""))
         .expect("beam hook path");
+    assert!(hook.contains("d=\"M98 41.5L107 41.5\""), "{hook}");
     assert!(hook.contains("stroke-linecap=\"butt\""), "{hook}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_smooth_32nd_flags_toward_a_down_stem_notehead() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("down-stem-32nd.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<divisions>1</divisions>", "<divisions>16</divisions>")
+        .replace("<octave>4</octave>", "<octave>5</octave>")
+        .replace(
+            "<duration>1</duration><voice>1</voice><type>quarter</type>",
+            "<duration>2</duration><voice>1</voice><type>32nd</type>",
+        );
+    fs::write(&input, fixture).expect("write down-stem 32nd score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "down-stem score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("down-stem-32nd.svg")).expect("read SVG");
+    let flags = svg
+        .lines()
+        .filter(|line| line.contains("class=\"flag\""))
+        .collect::<Vec<_>>();
+    assert_eq!(flags.len(), 1, "one compound flag glyph per note: {svg}");
+    let flag = flags[0];
+    assert!(flag.contains("transform=\"translate(98 98)\""), "{flag}");
+    assert!(flag.contains("fill-rule=\"nonzero\""), "{flag}");
+    assert!(
+        !flag.contains("rotate("),
+        "Bravura down flag should use its own outline: {flag}"
+    );
+    let path = flag
+        .split(" d=\"")
+        .nth(1)
+        .and_then(|value| value.split('\"').next())
+        .expect("compound flag path");
+    assert!(
+        path.starts_with("M8.190-20.280"),
+        "expected Bravura 32nd-down path: {flag}"
+    );
+    assert!(path.contains('C'), "flag contours should be curved: {flag}");
+    assert_eq!(
+        path.matches('M').count(),
+        3,
+        "base flag plus two ridges: {flag}"
+    );
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }

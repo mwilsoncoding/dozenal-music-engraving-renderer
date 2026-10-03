@@ -4,6 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process;
 
+mod bravura_glyphs;
 mod xml;
 use xml::Element;
 
@@ -117,7 +118,6 @@ fn parse_args() -> Result<(PathBuf, PathBuf), String> {
     });
     Ok((input, output))
 }
-
 fn parse_score(source: &[u8]) -> Result<Score, String> {
     let elements = xml::parse(source).map_err(|error| error.to_string())?;
     let root = root_element(&elements)?;
@@ -1238,6 +1238,7 @@ enum PathStyle {
     MediumStroke,
     MediumOutline,
     FilledGlyph,
+    BravuraGlyph,
     Beam,
     Solid,
 }
@@ -1252,7 +1253,7 @@ struct DrawCommand {
 
 struct PathGeometry {
     transform: Option<(i32, i32)>,
-    scale: u8,
+    scale: f64,
     rotation: Option<(i32, i32, i32)>,
     path_data: String,
     style: PathStyle,
@@ -1262,21 +1263,25 @@ impl PathGeometry {
     fn new(transform: Option<(i32, i32)>, path_data: impl Into<String>, style: PathStyle) -> Self {
         Self {
             transform,
-            scale: 1,
+            scale: 1.0,
             rotation: None,
             path_data: path_data.into(),
             style,
         }
     }
 
-    fn scaled(mut self, scale: u8) -> Self {
+    fn scaled(mut self, scale: f64) -> Self {
         self.scale = scale;
         self
     }
 
-    fn rotated_180_if(mut self, condition: bool) -> Self {
+    fn rotated_180_if(self, condition: bool) -> Self {
+        self.rotated_180_about_if(condition, 6, 9)
+    }
+
+    fn rotated_180_about_if(mut self, condition: bool, x: i32, y: i32) -> Self {
         if condition {
-            self.rotation = Some((180, 6, 9));
+            self.rotation = Some((180, x, y));
         }
         self
     }
@@ -1335,18 +1340,12 @@ fn event_geometry(
     let mut primary = Vec::new();
     let mut incoming = Vec::new();
     if event.tones.is_empty() {
-        let (left, top, right, bottom) = match event.duration_name {
-            "whole" => (2.0, 5.0, 10.0, 8.0),
-            "half" => (2.0, 8.0, 10.0, 11.0),
-            "quarter" | "eighth" | "16th" | "32nd" => (3.0, 1.0, 12.0, 17.0),
-            "64th" => (3.0, 1.0, 12.0, 18.0),
-            _ => unreachable!("rest duration was validated while parsing"),
-        };
+        let glyph = bravura_glyphs::rest(event.duration_name);
         primary.push(ComponentBounds::filled(
-            f64::from(x) + left,
-            40.0 + top,
-            f64::from(x) + right,
-            40.0 + bottom,
+            f64::from(x) + glyph.bounds.0,
+            40.0 + glyph.bounds.1,
+            f64::from(x) + glyph.bounds.2,
+            40.0 + glyph.bounds.3,
         ));
         return EventGeometry { primary, incoming };
     }
@@ -1389,25 +1388,14 @@ fn event_geometry(
             f64::from(stem_start),
             1.5,
         ));
-        let flag_count = match event.duration_name {
-            "eighth" => 1,
-            "16th" => 2,
-            "32nd" => 3,
-            "64th" => 4,
-            _ => 0,
-        };
-        for flag in 0..flag_count {
-            let level = (flag + 1) as u8;
-            if event.beams.iter().any(|beam| beam.level == level) {
-                continue;
-            }
-            let flag_y = stem_end + flag * 3;
-            primary.push(ComponentBounds::stroked(
-                f64::from(stem_x),
-                f64::from(flag_y),
-                f64::from(stem_x + 12),
-                f64::from(flag_y + 11),
-                1.5,
+        let flag_levels = unbeamed_flag_levels(event);
+        if !flag_levels.is_empty() {
+            let glyph = bravura_glyphs::flag(flag_level_count(event.duration_name), stems_up);
+            primary.push(ComponentBounds::filled(
+                f64::from(stem_x) + glyph.bounds.0,
+                f64::from(stem_end) + glyph.bounds.1,
+                f64::from(stem_x) + glyph.bounds.2,
+                f64::from(stem_end) + glyph.bounds.3,
             ));
         }
     }
@@ -1415,7 +1403,7 @@ fn event_geometry(
     let beam_direction = if stems_up { 1 } else { -1 };
     for beam in &event.beams {
         let level = usize::from(beam.level);
-        let offset = i32::from(beam.level - 1) * 4 * beam_direction;
+        let offset = i32::from(beam.level - 1) * 5 * beam_direction;
         let beam_y = stem_end + offset;
         let beam_center_shift = f64::from(beam_direction) * 1.5;
         match beam.state {
@@ -1438,12 +1426,12 @@ fn event_geometry(
                     -1
                 };
                 let end_x = stem_x + direction * 9;
-                let end_y = beam_y + 4 * beam_direction;
+                let beam_center_y = f64::from(beam_y) + beam_center_shift;
                 primary.push(ComponentBounds::stroked(
                     f64::from(stem_x.min(end_x)),
-                    f64::from(beam_y.min(end_y)),
+                    beam_center_y,
                     f64::from(stem_x.max(end_x)),
-                    f64::from(beam_y.max(end_y)),
+                    beam_center_y,
                     3.0,
                 ));
             }
@@ -1651,7 +1639,7 @@ impl Scene {
         if let Some((x, y)) = command.geometry.transform {
             write!(transforms, "translate({x} {y})").expect("writing to a String cannot fail");
         }
-        if command.geometry.scale != 1 {
+        if command.geometry.scale != 1.0 {
             if !transforms.is_empty() {
                 transforms.push(' ');
             }
@@ -1680,6 +1668,7 @@ impl Scene {
                 svg.push_str(" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"")
             }
             PathStyle::FilledGlyph => svg.push_str(" fill=\"#171717\" fill-rule=\"evenodd\""),
+            PathStyle::BravuraGlyph => svg.push_str(" fill=\"#171717\" fill-rule=\"nonzero\""),
             PathStyle::Beam => svg.push_str(
                 " fill=\"none\" stroke=\"#171717\" stroke-width=\"3\" stroke-linecap=\"butt\"",
             ),
@@ -1726,7 +1715,7 @@ fn render_svg(score: &Score) -> String {
                         time_signature_glyph_path(meter.beats),
                         PathStyle::FilledGlyph,
                     )
-                    .scaled(2)
+                    .scaled(2.0)
                     .rotated_180_if(meter.beats == 10),
                 );
                 scene.add_path(
@@ -1739,7 +1728,7 @@ fn render_svg(score: &Score) -> String {
                         time_signature_glyph_path(meter.beat_type),
                         PathStyle::FilledGlyph,
                     )
-                    .scaled(2)
+                    .scaled(2.0)
                     .rotated_180_if(meter.beat_type == 10),
                 );
                 x += 28;
@@ -1770,8 +1759,8 @@ fn render_svg(score: &Score) -> String {
                     vec![PathMetadata::Duration(event.duration_name)],
                     PathGeometry::new(
                         Some((x, 40)),
-                        rest_glyph_path(event.duration_name),
-                        PathStyle::FilledGlyph,
+                        bravura_glyphs::rest(event.duration_name).path,
+                        PathStyle::BravuraGlyph,
                     ),
                 );
                 right = right.max(x + 24);
@@ -1819,35 +1808,27 @@ fn render_svg(score: &Score) -> String {
                         PathStyle::MediumStroke,
                     ),
                 );
-                let flag_count = match event.duration_name {
-                    "eighth" => 1,
-                    "16th" => 2,
-                    "32nd" => 3,
-                    "64th" => 4,
-                    _ => 0,
-                };
-                for flag in 0..flag_count {
-                    let level = (flag + 1) as u8;
-                    if event.beams.iter().any(|beam| beam.level == level) {
-                        continue;
-                    }
-                    let flag_y = stem_end + flag * 3;
+                let flag_levels = unbeamed_flag_levels(event);
+                if !flag_levels.is_empty() {
+                    let flag_count = flag_level_count(event.duration_name);
+                    let flag_path =
+                        bravura_glyphs::flag_contours(flag_count, stems_up, &flag_levels);
                     scene.add_path(
                         DrawLayer::Event,
-                        format!("flag-{index}-{flag}"),
+                        format!("flag-{index}"),
                         Some(PathClass::Flag),
                         Vec::new(),
                         PathGeometry::new(
-                            Some((stem_x, flag_y)),
-                            flag_glyph_path(),
-                            PathStyle::FilledGlyph,
+                            Some((stem_x, stem_end)),
+                            flag_path,
+                            PathStyle::BravuraGlyph,
                         ),
                     );
                 }
             }
             for beam in &event.beams {
                 let level = usize::from(beam.level);
-                let offset = i32::from(beam.level - 1) * 4 * beam_direction;
+                let offset = i32::from(beam.level - 1) * 5 * beam_direction;
                 let beam_y = stem_end + offset;
                 match beam.state {
                     BeamState::Begin => active_beams[level] = Some((stem_x, beam_y)),
@@ -1878,7 +1859,7 @@ fn render_svg(score: &Score) -> String {
                             -1
                         };
                         let end_x = stem_x + direction * 9;
-                        let end_y = beam_y + 4 * beam_direction;
+                        let beam_center_y = f64::from(beam_y) + f64::from(beam_direction) * 1.5;
                         scene.add_path(
                             DrawLayer::Beam,
                             format!("beam-hook-{index}-{level}"),
@@ -1886,7 +1867,7 @@ fn render_svg(score: &Score) -> String {
                             vec![PathMetadata::BeamLevel(beam.level)],
                             PathGeometry::new(
                                 None,
-                                format!("M{stem_x} {beam_y}L{end_x} {end_y}"),
+                                format!("M{stem_x} {beam_center_y:.1}L{end_x} {beam_center_y:.1}"),
                                 PathStyle::Beam,
                             ),
                         );
@@ -2116,21 +2097,21 @@ fn render_svg(score: &Score) -> String {
     scene.to_svg()
 }
 
-fn rest_glyph_path(duration_name: &str) -> &'static str {
-    match duration_name {
-        "whole" => "M2 5H10V8H2Z",
-        "half" => "M2 8H10V11H2Z",
-        "quarter" => "M4 1C6 2 9 3 10 5L6 8L9 11L7 15C6.4 16.1 5.3 16.8 3.8 17L3 15C5 13.5 5.2 12.3 3.2 10L6.5 7L3 4Z",
-        "eighth" => "M4 1C6 2 9 3 10 5L6 8L9 11L7 15C6.4 16.1 5.3 16.8 3.8 17L3 15C5 13.5 5.2 12.3 3.2 10L6.5 7L3 4ZM7 10C9 10.8 11 11.8 11.5 13L10 15C9.3 13.4 8.2 12.7 6.5 12Z",
-        "16th" => "M4 1C6 2 9 3 10 5L6 8L9 11L7 15C6.4 16.1 5.3 16.8 3.8 17L3 15C5 13.5 5.2 12.3 3.2 10L6.5 7L3 4ZM6.5 8C8.5 8.8 10.5 9.8 11 11L9.5 13C8.8 11.4 7.7 10.7 6 10ZM7 12C9 12.8 11 13.8 11.5 15L10 17C9.3 15.4 8.2 14.7 6.5 14Z",
-        "32nd" => "M4 1C6 2 9 3 10 5L6 8L9 11L7 15C6.4 16.1 5.3 16.8 3.8 17L3 15C5 13.5 5.2 12.3 3.2 10L6.5 7L3 4ZM6 6C8 6.8 10 7.8 10.5 9L9 11C8.3 9.4 7.2 8.7 5.5 8ZM6.5 9C8.5 9.8 10.5 10.8 11 12L9.5 14C8.8 12.4 7.7 11.7 6 11ZM7 12C9 12.8 11 13.8 11.5 15L10 17C9.3 15.4 8.2 14.7 6.5 14Z",
-        "64th" => "M4 1C6 2 9 3 10 5L6 8L9 11L7 15C6.4 16.1 5.3 16.8 3.8 17L3 15C5 13.5 5.2 12.3 3.2 10L6.5 7L3 4ZM5.5 4C7.5 4.8 9.5 5.8 10 7L8.5 9C7.8 7.4 6.7 6.7 5 6ZM6 7C8 7.8 10 8.8 10.5 10L9 12C8.3 10.4 7.2 9.7 5.5 9ZM6.5 10C8.5 10.8 10.5 11.8 11 13L9.5 15C8.8 13.4 7.7 12.7 6 12ZM7 13C9 13.8 11 14.8 11.5 16L10 18C9.3 16.4 8.2 15.7 6.5 15Z",
-        _ => unreachable!("duration was validated while parsing"),
-    }
+fn unbeamed_flag_levels(event: &Event) -> Vec<u8> {
+    let flag_count = flag_level_count(event.duration_name);
+    (1..=flag_count)
+        .filter(|level| !event.beams.iter().any(|beam| beam.level == *level))
+        .collect()
 }
 
-fn flag_glyph_path() -> &'static str {
-    "M0 0C3 0.7 7.7 1.7 9.4 3.6C11 5.4 9.8 8.2 6.8 10.5L4.4 8.8C6.4 6.9 7.1 5.5 6.1 4.5C5.2 3.6 2.7 3 0 2.5Z"
+fn flag_level_count(duration_name: &str) -> u8 {
+    match duration_name {
+        "eighth" => 1,
+        "16th" => 2,
+        "32nd" => 3,
+        "64th" => 4,
+        _ => 0,
+    }
 }
 
 fn lane_y(octave: u8) -> i32 {
@@ -2255,6 +2236,43 @@ mod tests {
 
         assert!(dek.contains(&format!("d=\"{}\"", glyph_path(2))), "{dek}");
         assert!(dek.contains("rotate(180 6 9)"), "{dek}");
+    }
+
+    #[test]
+    fn mixed_duration_beams_render_a_partial_third_level_hook() {
+        let score = parse_score(include_bytes!(
+            "../tests/fixtures/no-transposition.musicxml"
+        ))
+        .expect("canonical beaming fixture should parse");
+        let svg = render_svg(&score);
+        assert!(
+            svg.lines().any(|line| {
+                line.contains("id=\"beam-7-1\"")
+                    && line.contains("d=\"M491.25 41.50L506.75 41.50\"")
+            }),
+            "primary mixed-duration beam: {svg}"
+        );
+        assert!(
+            svg.lines().any(|line| {
+                line.contains("id=\"beam-7-2\"")
+                    && line.contains("d=\"M491.25 46.50L506.75 46.50\"")
+            }),
+            "secondary beam should keep a 2-unit gap: {svg}"
+        );
+        assert!(
+            !svg.contains("id=\"flag-6\""),
+            "beamed 16th should not be flagged: {svg}"
+        );
+        assert!(
+            !svg.contains("id=\"flag-7\""),
+            "hooked 32nd level should not be a flag: {svg}"
+        );
+        assert!(
+            svg.lines().any(|line| {
+                line.contains("id=\"beam-hook-7-3\"") && line.contains("d=\"M506 51.5L497 51.5\"")
+            }),
+            "partial hook should stay parallel with the same gap: {svg}"
+        );
     }
 
     #[test]
