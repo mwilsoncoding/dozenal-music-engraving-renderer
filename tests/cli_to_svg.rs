@@ -440,7 +440,12 @@ fn engraves_supported_note_durations_and_only_the_two_dotted_forms() {
         dotted_half_marks[2].1, dotted_half_marks[1].1,
         "the dotted-half period must align with the lower colon dot"
     );
-    assert!(dotted_half_marks[2].0 > dotted_half_marks[1].0);
+    let horizontal_gap = dotted_half_marks[2].0 - dotted_half_marks[1].0;
+    let vertical_gap = dotted_half_marks[1].1 - dotted_half_marks[0].1;
+    assert_eq!(
+        horizontal_gap, vertical_gap,
+        "horizontal period spacing should match the vertical colon-dot spacing"
+    );
     let dotted_quarter_mark = svg
         .lines()
         .find(|line| line.contains("id=\"duration-mark-7-0\""))
