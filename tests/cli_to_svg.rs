@@ -1344,7 +1344,7 @@ fn renders_multi_octave_beaming_fixture_geometry() {
     let mut behavior_mismatches = Vec::new();
     for (beam_id, expected_path) in [
         ("beam-1-1", "M96.19 96.69L117.69 75.19"),
-        ("beam-3-1", "M140.19 116.69L161.19 95.19"),
+        ("beam-3-1", "M140.19 116.69L161.69 95.19"),
         ("beam-5-1", "M186.31 95.19L207.81 116.69"),
         ("beam-7-1", "M227.83 138.78L249.33 74.28"),
         ("beam-9-1", "M271.94 -1.64L295.44 41.09"),

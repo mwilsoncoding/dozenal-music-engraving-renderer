@@ -1350,6 +1350,7 @@ fn event_geometry(
     x: i32,
     active_beams: &[Option<(i32, i32)>; 5],
     pending_ties: &[(Tone, i32, i32)],
+    stems_up: bool,
 ) -> EventGeometry {
     let mut primary = Vec::new();
     let mut incoming = Vec::new();
@@ -1390,7 +1391,6 @@ fn event_geometry(
         ));
     }
 
-    let stems_up = stem_direction_is_up(&event.tones);
     let stem_tone_index = stem_tone_index(event, stems_up);
     let stem_octave_y = lane_y(event.tones[stem_tone_index].tone.octave);
     let (stem_start, stem_end) = stem_endpoints(stem_octave_y, stems_up);
@@ -1728,6 +1728,7 @@ fn rest_origin_y(duration_name: &str, bounds: (f64, f64, f64, f64)) -> f64 {
 
 fn render_svg(score: &Score) -> String {
     let mut scene = Scene::new(0, 0, 0);
+    let group_stem_directions = beamed_group_stem_directions(score);
     let mut x = 92;
     let mut right = 128;
     let mut view_top = 0;
@@ -1784,17 +1785,24 @@ fn render_svg(score: &Score) -> String {
             }
             active_meter = Some(meter);
         }
-        for event in &measure.events {
+        for (measure_event_index, event) in measure.events.iter().enumerate() {
+            let stems_up = group_stem_directions[measure_index][measure_event_index]
+                .unwrap_or_else(|| stem_direction_is_up(&event.tones));
             let preferred_x = x;
-            let preferred_geometry =
-                event_geometry(event, preferred_x, &active_beams, &pending_tie_paths);
+            let preferred_geometry = event_geometry(
+                event,
+                preferred_x,
+                &active_beams,
+                &pending_tie_paths,
+                stems_up,
+            );
             if let Some(previous) = &previous_event_geometry {
                 x = next_event_x(preferred_x, previous, &preferred_geometry);
             }
             let geometry = if x == preferred_x {
                 preferred_geometry
             } else {
-                event_geometry(event, x, &active_beams, &pending_tie_paths)
+                event_geometry(event, x, &active_beams, &pending_tie_paths, stems_up)
             };
             for component in geometry.all() {
                 right = right.max(component.right.ceil() as i32);
@@ -1831,7 +1839,6 @@ fn render_svg(score: &Score) -> String {
                 .collect::<Vec<_>>();
             let leftmost_tone_x = *tone_xs.iter().min().expect("event has tones");
             let rightmost_tone_x = *tone_xs.iter().max().expect("event has tones");
-            let stems_up = stem_direction_is_up(&event.tones);
             let stem_tone_index = stem_tone_index(event, stems_up);
             let stem_octave_y = lane_y(event.tones[stem_tone_index].tone.octave);
             let (stem_start, stem_end) = stem_endpoints(stem_octave_y, stems_up);
@@ -2171,14 +2178,66 @@ fn lane_y(octave: u8) -> i32 {
 }
 
 fn stem_direction_is_up(tones: &[ToneEvent]) -> bool {
-    let (above, below) = tones.iter().fold((0, 0), |(above, below), tone| {
+    let (above, below) = stem_direction_counts(tones.iter());
+    below >= above
+}
+
+fn stem_direction_counts<'a>(tones: impl Iterator<Item = &'a ToneEvent>) -> (usize, usize) {
+    tones.fold((0, 0), |(above, below), tone| {
         if lane_y(tone.tone.octave) + 9 < 68 {
             (above + 1, below)
         } else {
             (above, below + 1)
         }
-    });
-    below >= above
+    })
+}
+
+fn beamed_group_stem_directions(score: &Score) -> Vec<Vec<Option<bool>>> {
+    let mut directions = score
+        .measures
+        .iter()
+        .map(|measure| vec![None; measure.events.len()])
+        .collect::<Vec<_>>();
+    let mut group_events = Vec::new();
+
+    for (measure_index, measure) in score.measures.iter().enumerate() {
+        for (event_index, event) in measure.events.iter().enumerate() {
+            let Some(primary_beam) = event.beams.iter().find(|beam| beam.level == 1) else {
+                continue;
+            };
+            let position = (measure_index, event_index);
+            match primary_beam.state {
+                BeamState::Begin => {
+                    group_events.clear();
+                    group_events.push(position);
+                }
+                BeamState::Continue => {
+                    if !group_events.is_empty() {
+                        group_events.push(position);
+                    }
+                }
+                BeamState::End => {
+                    if !group_events.is_empty() {
+                        group_events.push(position);
+                        let (above, below) = stem_direction_counts(group_events.iter().flat_map(
+                            |(measure_index, event_index)| {
+                                score.measures[*measure_index].events[*event_index]
+                                    .tones
+                                    .iter()
+                            },
+                        ));
+                        let stems_up = below > above;
+                        for (measure_index, event_index) in group_events.drain(..) {
+                            directions[measure_index][event_index] = Some(stems_up);
+                        }
+                    }
+                }
+                BeamState::ForwardHook | BeamState::BackwardHook => {}
+            }
+        }
+    }
+
+    directions
 }
 
 fn stem_tone_index(event: &Event, stems_up: bool) -> usize {
