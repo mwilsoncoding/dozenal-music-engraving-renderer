@@ -10,6 +10,29 @@ fn scratch_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("domunor-cli-{}-{nonce}", std::process::id()))
 }
 
+fn assert_filled_glyph_paths(svg: &str) {
+    for line in svg.lines().filter(|line| {
+        line.contains("class=\"tonehead\"")
+            || line.contains("class=\"rest\"")
+            || line.contains("class=\"flag\"")
+            || line.contains("id=\"meter-")
+            || line.contains("id=\"octave-")
+    }) {
+        assert!(
+            line.contains("fill=\"#171717\""),
+            "glyph must be filled: {line}"
+        );
+        assert!(
+            line.contains("fill-rule=\"evenodd\""),
+            "glyph fill rule: {line}"
+        );
+        assert!(
+            !line.contains("stroke="),
+            "glyph must not use strokes: {line}"
+        );
+    }
+}
+
 fn assert_measure_barline_layout(svg: &str) {
     let barlines = svg
         .lines()
@@ -100,7 +123,7 @@ fn renders_fixture_to_default_and_explicit_svg_paths() {
     assert!(svg.contains("id=\"octave-4\""));
     assert!(svg.contains("id=\"octave-5\""));
     assert!(svg.contains("id=\"tonehead\""));
-    assert!(svg.contains("d=\"M6 2C1 2 1 16 6 16C11 16 11 2 6 2Z\""));
+    assert_filled_glyph_paths(&svg);
     assert!(!svg.contains("<text"), "SVG glyphs must not rely on fonts");
 
     let explicit = directory.join("chosen.svg");
@@ -517,7 +540,9 @@ fn canonical_score_covers_supported_mvp_content_in_self_contained_svg() {
     assert!(svg.contains("id=\"octave-4\""), "{svg}");
     assert!(svg.contains("id=\"octave-5\""), "{svg}");
     assert!(svg.contains("id=\"meter-numerator\""), "{svg}");
+    assert_filled_glyph_paths(&svg);
     assert!(svg.contains("id=\"meter-denominator\""), "{svg}");
+    assert_filled_glyph_paths(&svg);
     assert_eq!(svg.matches("class=\"tonehead\"").count(), 24, "{svg}");
     assert_eq!(svg.matches("class=\"rest\"").count(), 11, "{svg}");
     assert_eq!(svg.matches("class=\"stem\"").count(), 21, "{svg}");

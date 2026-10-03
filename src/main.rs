@@ -1237,7 +1237,7 @@ enum PathStyle {
     StaffLine,
     MediumStroke,
     MediumOutline,
-    GlyphOutline,
+    FilledGlyph,
     Beam,
     Solid,
 }
@@ -1329,17 +1329,15 @@ fn event_geometry(
         let (left, top, right, bottom) = match event.duration_name {
             "whole" => (2.0, 5.0, 10.0, 8.0),
             "half" => (2.0, 8.0, 10.0, 11.0),
-            "quarter" => (4.0, 1.0, 9.0, 15.0),
-            "eighth" | "16th" | "32nd" => (4.0, 1.0, 11.0, 15.0),
-            "64th" => (4.0, 1.0, 11.0, 16.0),
+            "quarter" | "eighth" | "16th" | "32nd" => (3.0, 1.0, 12.0, 17.0),
+            "64th" => (3.0, 1.0, 12.0, 18.0),
             _ => unreachable!("rest duration was validated while parsing"),
         };
-        primary.push(ComponentBounds::stroked(
+        primary.push(ComponentBounds::filled(
             f64::from(x) + left,
             40.0 + top,
             f64::from(x) + right,
             40.0 + bottom,
-            1.8,
         ));
         return EventGeometry { primary, incoming };
     }
@@ -1358,11 +1356,7 @@ fn event_geometry(
     let leftmost_tone_x = *tone_xs.iter().min().expect("event has tones");
     let rightmost_tone_x = *tone_xs.iter().max().expect("event has tones");
     for (tone_index, tone_event) in event.tones.iter().enumerate() {
-        let (left, right) = match tone_event.tone.value {
-            0 => (1.0, 11.0),
-            1 => (4.0, 8.0),
-            _ => (2.0, 10.0),
-        };
+        let (left, right) = (1.0, 11.0);
         let tone_y = lane_y(tone_event.tone.octave);
         primary.push(ComponentBounds::stroked(
             f64::from(tone_xs[tone_index]) + left,
@@ -1408,8 +1402,8 @@ fn event_geometry(
             primary.push(ComponentBounds::stroked(
                 f64::from(stem_x),
                 f64::from(flag_y),
-                f64::from(stem_x + 10),
-                f64::from(flag_y + 10),
+                f64::from(stem_x + 12),
+                f64::from(flag_y + 11),
                 1.5,
             ));
         }
@@ -1660,15 +1654,11 @@ impl Scene {
             .expect("writing to a String cannot fail");
         match command.geometry.style {
             PathStyle::StaffLine => svg.push_str(" stroke=\"#171717\""),
-            PathStyle::MediumStroke => {
-                svg.push_str(" stroke=\"#171717\" stroke-width=\"1.5\"")
-            }
+            PathStyle::MediumStroke => svg.push_str(" stroke=\"#171717\" stroke-width=\"1.5\""),
             PathStyle::MediumOutline => {
                 svg.push_str(" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"")
             }
-            PathStyle::GlyphOutline => svg.push_str(
-                " fill=\"none\" stroke=\"#171717\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"",
-            ),
+            PathStyle::FilledGlyph => svg.push_str(" fill=\"#171717\" fill-rule=\"evenodd\""),
             PathStyle::Beam => svg.push_str(
                 " fill=\"none\" stroke=\"#171717\" stroke-width=\"3\" stroke-linecap=\"square\"",
             ),
@@ -1712,8 +1702,8 @@ fn render_svg(score: &Score) -> String {
                     Vec::new(),
                     PathGeometry::new(
                         Some((meter_x, 31)),
-                        glyph_path(meter.beats),
-                        PathStyle::MediumOutline,
+                        time_signature_glyph_path(meter.beats),
+                        PathStyle::FilledGlyph,
                     )
                     .scaled(2),
                 );
@@ -1724,8 +1714,8 @@ fn render_svg(score: &Score) -> String {
                     Vec::new(),
                     PathGeometry::new(
                         Some((meter_x, 71)),
-                        glyph_path(meter.beat_type),
-                        PathStyle::MediumOutline,
+                        time_signature_glyph_path(meter.beat_type),
+                        PathStyle::FilledGlyph,
                     )
                     .scaled(2),
                 );
@@ -1758,7 +1748,7 @@ fn render_svg(score: &Score) -> String {
                     PathGeometry::new(
                         Some((x, 40)),
                         rest_glyph_path(event.duration_name),
-                        PathStyle::GlyphOutline,
+                        PathStyle::FilledGlyph,
                     ),
                 );
                 right = right.max(x + 24);
@@ -1823,21 +1813,16 @@ fn render_svg(score: &Score) -> String {
                         continue;
                     }
                     let flag_y = stem_end + flag * 3;
-                    let path = format!(
-                        "M{stem_x} {flag_y}C{} {} {} {} {} {}",
-                        stem_x + 9,
-                        flag_y + 2,
-                        stem_x + 10,
-                        flag_y + 7,
-                        stem_x + 5,
-                        flag_y + 10
-                    );
                     scene.add_path(
                         DrawLayer::Event,
                         format!("flag-{index}-{flag}"),
                         Some(PathClass::Flag),
                         Vec::new(),
-                        PathGeometry::new(None, path, PathStyle::MediumOutline),
+                        PathGeometry::new(
+                            Some((stem_x, flag_y)),
+                            flag_glyph_path(),
+                            PathStyle::FilledGlyph,
+                        ),
                     );
                 }
             }
@@ -2015,7 +2000,7 @@ fn render_svg(score: &Score) -> String {
                     PathGeometry::new(
                         Some((tone_x, octave_y)),
                         glyph_path(tone.value),
-                        PathStyle::GlyphOutline,
+                        PathStyle::FilledGlyph,
                     ),
                 );
                 let tie_y = octave_y + 18;
@@ -2099,14 +2084,14 @@ fn render_svg(score: &Score) -> String {
         "octave-5",
         None,
         Vec::new(),
-        PathGeometry::new(Some((26, 50)), glyph_path(5), PathStyle::MediumOutline),
+        PathGeometry::new(Some((26, 50)), glyph_path(5), PathStyle::FilledGlyph),
     );
     scene.add_path(
         DrawLayer::Staff,
         "octave-4",
         None,
         Vec::new(),
-        PathGeometry::new(Some((26, 70)), glyph_path(4), PathStyle::MediumOutline),
+        PathGeometry::new(Some((26, 70)), glyph_path(4), PathStyle::FilledGlyph),
     );
     scene.to_svg()
 }
@@ -2115,13 +2100,17 @@ fn rest_glyph_path(duration_name: &str) -> &'static str {
     match duration_name {
         "whole" => "M2 5H10V8H2Z",
         "half" => "M2 8H10V11H2Z",
-        "quarter" => "M5 1L9 4L4 8L8 11L5 15",
-        "eighth" => "M5 1L9 4L4 8L8 11L5 15M8 11L11 13",
-        "16th" => "M5 1L9 4L4 8L8 11L5 15M8 9L11 11M8 12L11 14",
-        "32nd" => "M5 1L9 4L4 8L8 11L5 15M8 7L11 9M8 10L11 12M8 13L11 15",
-        "64th" => "M5 1L9 4L4 8L8 11L5 15M8 5L11 7M8 8L11 10M8 11L11 13M8 14L11 16",
+        "quarter" => "M4 1C6 2 9 3 10 5L6 8L9 11L7 15C6.4 16.1 5.3 16.8 3.8 17L3 15C5 13.5 5.2 12.3 3.2 10L6.5 7L3 4Z",
+        "eighth" => "M4 1C6 2 9 3 10 5L6 8L9 11L7 15C6.4 16.1 5.3 16.8 3.8 17L3 15C5 13.5 5.2 12.3 3.2 10L6.5 7L3 4ZM7 10C9 10.8 11 11.8 11.5 13L10 15C9.3 13.4 8.2 12.7 6.5 12Z",
+        "16th" => "M4 1C6 2 9 3 10 5L6 8L9 11L7 15C6.4 16.1 5.3 16.8 3.8 17L3 15C5 13.5 5.2 12.3 3.2 10L6.5 7L3 4ZM6.5 8C8.5 8.8 10.5 9.8 11 11L9.5 13C8.8 11.4 7.7 10.7 6 10ZM7 12C9 12.8 11 13.8 11.5 15L10 17C9.3 15.4 8.2 14.7 6.5 14Z",
+        "32nd" => "M4 1C6 2 9 3 10 5L6 8L9 11L7 15C6.4 16.1 5.3 16.8 3.8 17L3 15C5 13.5 5.2 12.3 3.2 10L6.5 7L3 4ZM6 6C8 6.8 10 7.8 10.5 9L9 11C8.3 9.4 7.2 8.7 5.5 8ZM6.5 9C8.5 9.8 10.5 10.8 11 12L9.5 14C8.8 12.4 7.7 11.7 6 11ZM7 12C9 12.8 11 13.8 11.5 15L10 17C9.3 15.4 8.2 14.7 6.5 14Z",
+        "64th" => "M4 1C6 2 9 3 10 5L6 8L9 11L7 15C6.4 16.1 5.3 16.8 3.8 17L3 15C5 13.5 5.2 12.3 3.2 10L6.5 7L3 4ZM5.5 4C7.5 4.8 9.5 5.8 10 7L8.5 9C7.8 7.4 6.7 6.7 5 6ZM6 7C8 7.8 10 8.8 10.5 10L9 12C8.3 10.4 7.2 9.7 5.5 9ZM6.5 10C8.5 10.8 10.5 11.8 11 13L9.5 15C8.8 13.4 7.7 12.7 6 12ZM7 13C9 13.8 11 14.8 11.5 16L10 18C9.3 16.4 8.2 15.7 6.5 15Z",
         _ => unreachable!("duration was validated while parsing"),
     }
+}
+
+fn flag_glyph_path() -> &'static str {
+    "M0 0C3 0.7 7.7 1.7 9.4 3.6C11 5.4 9.8 8.2 6.8 10.5L4.4 8.8C6.4 6.9 7.1 5.5 6.1 4.5C5.2 3.6 2.7 3 0 2.5Z"
 }
 
 fn lane_y(octave: u8) -> i32 {
@@ -2133,25 +2122,48 @@ fn lane_y(octave: u8) -> i32 {
 
 fn glyph_path(value: u8) -> &'static str {
     match value {
-        0 => "M6 2C1 2 1 16 6 16C11 16 11 2 6 2Z",
-        1 => "M4 5L8 2V16",
-        2 => "M2 2H10V9H2V16H10",
-        3 => "M2 2H10V16H2M2 9H10",
-        4 => "M2 2V9H10M10 2V16",
-        5 => "M10 2H2V9H10V16H2",
-        6 => "M10 2H2V16H10V9H2",
-        7 => "M2 2H10L4 16",
-        8 => "M2 2H10V16H2ZM2 9H10",
-        9 => "M10 9H2V2H10V16H2",
-        10 => "M10 16H2V9H10V2H2",
-        11 => "M10 16H2V2H10M10 9H2",
+        0 => "M6 1C2.8 1 1 3.5 1 9S2.8 17 6 17 11 14.5 11 9 9.2 1 6 1ZM6 3.5C7.7 3.5 8.4 5.2 8.4 9S7.7 14.5 6 14.5 3.6 12.8 3.6 9 4.3 3.5 6 3.5Z",
+        1 => "M2 5.1L6.1 1.5H8.8V16.5H5.9V5.1L3.3 7.2Z",
+        2 => "M2 4.7C2 2.6 3.8 1 6.2 1S10.5 2.4 10.5 4.8C10.5 7.2 9.2 8.8 7.2 10.7L4.7 14.2H10.8V16.5H1.2V14.6L5.5 9.7C7.2 7.8 8 6.5 8 4.9 8 3.8 7.3 3.3 6.2 3.3S4.4 4 4.4 5.2V6H2Z",
+        3 => "M2 3.1C3 1.7 4.3 1 6.3 1 9 1 10.6 2.4 10.6 4.7 10.6 6.3 9.8 7.4 8.4 8 10 8.5 11 9.8 11 11.8 11 14.8 9 17 6 17 4 17 2.6 16.1 1.4 14.5L3.2 13C3.9 14 4.8 14.5 6 14.5 7.6 14.5 8.4 13.6 8.4 11.8 8.4 10.1 7.6 9.3 5.7 9.3H4.5V7H5.8C7.4 7 8.1 6.3 8.1 4.9 8.1 3.7 7.5 3.3 6.2 3.3 5.2 3.3 4.4 3.7 3.8 4.6Z",
+        4 => "M7.2 1H9.8V10.4H11V12.8H9.8V16.5H7.1V12.8H1V10.4ZM7.1 5.2L3.6 10.4H7.1Z",
+        5 => "M2.1 1.5H10.7V3.9H4.4V6.9C5.1 6.4 6 6.1 7 6.1 9.6 6.1 11 8 11 11.2 11 14.8 9.2 17 6.2 17 4.2 17 2.8 16.2 1.6 14.7L3.4 13.1C4.1 14 5 14.5 6.2 14.5 7.7 14.5 8.4 13.4 8.4 11.3 8.4 9.3 7.8 8.4 6.5 8.4 5.6 8.4 4.9 8.8 4.4 9.5H2.1Z",
+        6 => "M8.9 1.3L10.3 3.2C8.4 4.4 6.7 5.8 5.4 7.5 6 7.1 6.8 6.9 7.5 6.9 9.8 6.9 11 8.7 11 11.5 11 14.9 9.1 17 6.1 17 3 17 1 14.9 1 11.5 1 7.2 4.2 3.4 8.9 1.3ZM6.1 9.2C4.5 9.2 3.6 10.1 3.6 11.9 3.6 13.7 4.4 14.6 6.1 14.6 7.7 14.6 8.4 13.7 8.4 11.9 8.4 10.1 7.7 9.2 6.1 9.2Z",
+        7 => "M1.5 1.5H11V3.6L5.6 16.5H2.7L8 3.9H1.5Z",
+        8 => "M6 1C9 1 10.7 2.4 10.7 4.8 10.7 6.3 9.9 7.4 8.6 8 10.2 8.6 11 9.8 11 11.8 11 15.1 9.2 17 6 17 2.8 17 1 15.1 1 11.8 1 9.8 1.8 8.6 3.4 8 2.1 7.4 1.3 6.3 1.3 4.8 1.3 2.4 3 1 6 1ZM6 3.3C4.7 3.3 4 3.9 4 5.1 4 6.3 4.7 7 6 7S8 6.3 8 5.1C8 3.9 7.3 3.3 6 3.3ZM6 9.3C4.4 9.3 3.6 10.1 3.6 11.9 3.6 13.7 4.4 14.6 6 14.6S8.4 13.7 8.4 11.9C8.4 10.1 7.6 9.3 6 9.3Z",
+        9 => "M3.1 16.7L1.7 14.8C3.6 13.6 5.3 12.2 6.6 10.5 6 10.9 5.2 11.1 4.5 11.1 2.2 11.1 1 9.3 1 6.5 1 3.1 2.9 1 5.9 1 9 1 11 3.1 11 6.5 11 10.8 7.8 14.6 3.1 16.7ZM5.9 8.8C7.5 8.8 8.4 7.9 8.4 6.1 8.4 4.3 7.6 3.4 5.9 3.4 4.3 3.4 3.6 4.3 3.6 6.1 3.6 7.9 4.3 8.8 5.9 8.8Z",
+        10 => "M10.5 14.5V8.5C10.5 7.7 9.8 7 9 7H4V4H9C9.6 4 10.5 3.9 10.5 3V1H2V3H8.5V6H3C1.9 6 1 6.9 1 8V14.5C1 15.6 1.9 16.5 3 16.5H10.5V14.5Z",
+        11 => "M10 3.1C9 1.7 7.7 1 5.7 1 3 1 1.4 2.4 1.4 4.7 1.4 6.3 2.2 7.4 3.6 8 2 8.5 1 9.8 1 11.8 1 14.8 3 17 6 17 8 17 9.4 16.1 10.6 14.5L8.8 13C8.1 14 7.2 14.5 6 14.5 4.4 14.5 3.6 13.6 3.6 11.8 3.6 10.1 4.4 9.3 6.3 9.3H7.5V7H6.2C4.6 7 3.9 6.3 3.9 4.9 3.9 3.7 4.5 3.3 5.8 3.3 6.8 3.3 7.6 3.7 8.2 4.6Z",
         _ => unreachable!("tone values are reduced to one dozenal digit"),
+    }
+}
+
+fn time_signature_glyph_path(value: u8) -> &'static str {
+    match value {
+        0 => "M6 1C2.7 1 1 3.5 1 9S2.7 17 6 17 11 14.5 11 9 9.3 1 6 1ZM6 3.8C7.4 3.8 8.1 5.4 8.1 9S7.4 14.2 6 14.2 3.9 12.6 3.9 9 4.6 3.8 6 3.8Z",
+        1 => "M2 4L6 1H9V14.5H11V17H1V14.5H4V5.1L2 6.4Z",
+        2 => "M1.2 4.8C1.2 2.4 3.1 1 6.1 1 9.2 1 10.8 2.4 10.8 4.8 10.8 7.3 9.3 9.1 7.2 11.1L4.4 14.3H11V17H1V14.8L5.2 10C7.1 7.9 8 6.5 8 4.9 8 3.7 7.3 3.3 6.1 3.3 4.8 3.3 4.1 3.9 4.1 5.2V6H1.2Z",
+        3 => "M1.5 3.3C2.6 1.7 4.1 1 6.3 1 9.1 1 10.7 2.4 10.7 4.7 10.7 6.3 9.9 7.4 8.4 8 10.1 8.6 11 9.9 11 11.9 11 15.1 9.2 17 6.1 17 4 17 2.5 16.2 1.2 14.5L3.3 12.9C4 13.9 4.9 14.4 6.1 14.4 7.7 14.4 8.4 13.6 8.4 11.9 8.4 10.2 7.7 9.3 5.8 9.3H4.6V7H5.8C7.4 7 8.1 6.3 8.1 4.9 8.1 3.8 7.5 3.4 6.3 3.4 5.2 3.4 4.5 3.8 3.8 4.8Z",
+        4 => "M7.3 1H10V10.2H11.5V12.8H10V17H7.2V12.8H0.8V10.3ZM7.2 5.2L3.7 10.2H7.2Z",
+        5 => "M1.4 1.5H10.8V4.1H4.2V7C5 6.4 5.9 6.1 7 6.1 9.6 6.1 11 8 11 11.4 11 15 9.2 17 6.1 17 4 17 2.5 16.2 1.2 14.6L3.3 12.9C4 13.9 4.9 14.4 6.1 14.4 7.6 14.4 8.4 13.4 8.4 11.4 8.4 9.4 7.8 8.5 6.5 8.5 5.6 8.5 4.8 8.9 4.3 9.7H1.4Z",
+        6 => "M8.9 1.2L10.8 3.2C8.5 4.8 6.6 6.5 5.2 8.1 5.8 7.6 6.7 7.3 7.6 7.3 9.8 7.3 11 9.1 11 11.8 11 15.1 9.2 17 6.1 17 2.9 17 1 15 1 11.6 1 7.1 4.1 3.3 8.9 1.2ZM6.1 9.5C4.5 9.5 3.7 10.4 3.7 12 3.7 13.7 4.5 14.5 6.1 14.5 7.6 14.5 8.4 13.7 8.4 12 8.4 10.4 7.6 9.5 6.1 9.5Z",
+        7 => "M0.8 1.5H11V4L5.4 17H2.3L7.9 4.1H0.8Z",
+        8 => "M6 1C9.1 1 10.8 2.4 10.8 4.8 10.8 6.3 10 7.4 8.6 8 10.2 8.6 11 9.9 11 11.9 11 15.1 9.2 17 6 17S1 15.1 1 11.9C1 9.9 1.8 8.6 3.4 8 2 7.4 1.2 6.3 1.2 4.8 1.2 2.4 2.9 1 6 1ZM6 3.4C4.7 3.4 4 4 4 5.2S4.7 7 6 7 8 6.4 8 5.2 7.3 3.4 6 3.4ZM6 9.4C4.4 9.4 3.6 10.2 3.6 12S4.4 14.5 6 14.5 8.4 13.7 8.4 12 7.6 9.4 6 9.4Z",
+        9 => "M3.1 16.8L1.2 14.8C3.5 13.2 5.4 11.5 6.8 9.9 6.2 10.4 5.3 10.7 4.4 10.7 2.2 10.7 1 8.9 1 6.2 1 3 2.9 1 6 1 9.2 1 11 3.1 11 6.5 11 10.9 7.9 14.7 3.1 16.8ZM6 8.3C7.6 8.3 8.4 7.4 8.4 5.9 8.4 4.3 7.6 3.5 6 3.5 4.4 3.5 3.6 4.3 3.6 5.9 3.6 7.4 4.4 8.3 6 8.3Z",
+        10 => glyph_path(10),
+        11 => glyph_path(11),
+        _ => unreachable!("time signatures are validated before rendering"),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_score, Meter};
+    use super::{glyph_path, parse_score, Meter};
+
+    #[test]
+    fn tonehead_one_has_no_projecting_foot() {
+        assert_eq!(glyph_path(1), "M2 5.1L6.1 1.5H8.8V16.5H5.9V5.1L3.3 7.2Z");
+    }
 
     #[test]
     fn canonical_fixtures_have_complete_four_four_measures() {
