@@ -1612,11 +1612,12 @@ fn render_svg(score: &Score) -> String {
             }
             for mark in 0..event.dots {
                 let (mark_x, mark_y) = match (event.duration_name, event.dots, mark) {
+                    ("quarter", 1, _) => (x + 14, lane_y(first_tone.octave) + 12),
                     ("half", 2, _) => (x + 14, lane_y(first_tone.octave) + 5 + i32::from(mark) * 7),
                     ("half", 3, 0..=1) => {
                         (x + 14, lane_y(first_tone.octave) + 5 + i32::from(mark) * 7)
                     }
-                    ("half", 3, _) => (x + 19, lane_y(first_tone.octave) + 8),
+                    ("half", 3, _) => (x + 19, lane_y(first_tone.octave) + 12),
                     _ => (x + 14, lane_y(first_tone.octave) + 9),
                 };
                 scene.add_path(

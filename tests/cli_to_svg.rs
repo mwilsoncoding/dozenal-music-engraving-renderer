@@ -234,6 +234,48 @@ fn engraves_supported_note_durations_and_only_the_two_dotted_forms() {
     assert_eq!(svg.matches("class=\"stem\"").count(), 8, "{svg}");
     assert_eq!(svg.matches("class=\"flag\"").count(), 10, "{svg}");
     assert_eq!(svg.matches("class=\"duration-mark\"").count(), 6, "{svg}");
+    let dotted_half_marks = (0..3)
+        .map(|mark| {
+            let id = format!("id=\"duration-mark-8-{mark}\"");
+            let path = svg
+                .lines()
+                .find(|line| line.contains(&id))
+                .expect("dotted-half duration mark");
+            let coordinates = path
+                .split(" d=\"M")
+                .nth(1)
+                .and_then(|value| value.split('a').next())
+                .expect("duration-mark path coordinates");
+            let (x, y) = coordinates
+                .split_once(' ')
+                .expect("duration-mark x/y coordinates");
+            (
+                x.parse::<i32>().expect("dot x"),
+                y.parse::<i32>().expect("dot y"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(dotted_half_marks[0].0, dotted_half_marks[1].0);
+    assert_eq!(
+        dotted_half_marks[2].1, dotted_half_marks[1].1,
+        "the dotted-half period must align with the lower colon dot"
+    );
+    assert!(dotted_half_marks[2].0 > dotted_half_marks[1].0);
+    let dotted_quarter_mark = svg
+        .lines()
+        .find(|line| line.contains("id=\"duration-mark-7-0\""))
+        .expect("dotted-quarter duration mark");
+    let dotted_quarter_y = dotted_quarter_mark
+        .split(" d=\"M")
+        .nth(1)
+        .and_then(|value| value.split('a').next())
+        .and_then(|coordinates| coordinates.split_once(' ').map(|(_, y)| y))
+        .and_then(|value| value.parse::<i32>().ok())
+        .expect("dotted-quarter dot y position");
+    assert_eq!(
+        dotted_quarter_y, dotted_half_marks[1].1,
+        "dotted-quarter dot must align with the lower colon dot"
+    );
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
