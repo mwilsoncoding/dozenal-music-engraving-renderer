@@ -168,6 +168,305 @@ fn engraves_supported_note_durations_and_only_the_two_dotted_forms() {
 }
 
 #[test]
+fn engraves_stacked_chord_tones_as_one_event_with_shared_rhythm_geometry() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("stacked-chord.musicxml");
+    let source = include_str!("fixtures/minimal.musicxml");
+    let first_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let chord = "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>half</type></note>\n      <note><chord/><pitch><step>G</step><octave>5</octave></pitch><duration>2</duration><voice>1</voice><type>half</type></note>";
+    let fixture = source.replace(first_note, chord);
+    fs::write(&input, fixture).expect("write stacked chord score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "stacked chord failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("stacked-chord.svg")).expect("read SVG");
+    let tonehead_transforms = svg
+        .lines()
+        .filter(|line| line.contains("class=\"tonehead\"") && line.contains("duration=\"half\""))
+        .map(|line| {
+            let start = line.find("translate(").expect("tonehead transform") + 10;
+            let end = line[start..].find(')').expect("transform end") + start;
+            line[start..end].to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tonehead_transforms.len(), 2, "{svg}");
+    assert_eq!(
+        tonehead_transforms[0].split_whitespace().next(),
+        tonehead_transforms[1].split_whitespace().next()
+    );
+    assert_eq!(svg.matches("class=\"stem\"").count(), 1, "{svg}");
+    assert_eq!(svg.matches("class=\"duration-mark\"").count(), 2, "{svg}");
+    assert_eq!(svg.matches("class=\"chord-bracket\"").count(), 2, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn canonical_score_covers_supported_mvp_content_in_self_contained_svg() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("canonical.musicxml");
+    fs::write(&input, include_str!("fixtures/canonical.musicxml")).expect("write canonical score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "canonical score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("canonical.svg")).expect("read SVG");
+    assert_eq!(svg.matches("id=\"staff-line-").count(), 3, "{svg}");
+    assert!(svg.contains("id=\"octave-4\""), "{svg}");
+    assert!(svg.contains("id=\"octave-5\""), "{svg}");
+    assert!(svg.contains("id=\"meter-numerator\""), "{svg}");
+    assert!(svg.contains("id=\"meter-denominator\""), "{svg}");
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 24, "{svg}");
+    assert_eq!(svg.matches("class=\"rest\"").count(), 1, "{svg}");
+    assert_eq!(svg.matches("class=\"stem\"").count(), 21, "{svg}");
+    assert_eq!(svg.matches("class=\"duration-mark\"").count(), 6, "{svg}");
+    assert_eq!(svg.matches("class=\"flag\"").count(), 7, "{svg}");
+    assert_eq!(svg.matches("class=\"beam\"").count(), 1, "{svg}");
+    assert_eq!(svg.matches("class=\"beam-hook\"").count(), 2, "{svg}");
+    assert_eq!(svg.matches("class=\"tie\"").count(), 1, "{svg}");
+    assert_eq!(svg.matches("class=\"chord-bracket\"").count(), 4, "{svg}");
+    assert_eq!(svg.matches("id=\"ledger-line-octave-").count(), 20, "{svg}");
+    for value in 0..=11 {
+        assert!(
+            svg.contains(&format!("data-tone=\"{value}\"")),
+            "missing Tone {value}: {svg}"
+        );
+    }
+    for duration in ["whole", "half", "quarter", "eighth", "16th", "32nd", "64th"] {
+        assert!(
+            svg.contains(&format!("data-duration=\"{duration}\"")),
+            "missing {duration}: {svg}"
+        );
+    }
+    assert!(svg.contains("data-tone=\"1\" data-octave=\"0\""), "{svg}");
+    assert!(svg.contains("data-tone=\"10\" data-octave=\"9\""), "{svg}");
+    for octave in 0..=9 {
+        assert!(
+            svg.contains(&format!("data-octave=\"{octave}\"")),
+            "missing octave {octave}: {svg}"
+        );
+    }
+
+    let first_chord_tones = svg
+        .lines()
+        .filter(|line| line.contains("class=\"tonehead\"") && line.contains("data-event=\"21\""))
+        .collect::<Vec<_>>();
+    assert_eq!(first_chord_tones.len(), 2, "{svg}");
+    let transforms = first_chord_tones
+        .iter()
+        .map(|line| {
+            let start = line
+                .find("transform=\"translate(")
+                .expect("tonehead transform")
+                + 19;
+            let end = line[start..].find(')').expect("transform end") + start;
+            line[start..end].to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        transforms[0].split_whitespace().next(),
+        transforms[1].split_whitespace().next()
+    );
+    assert_ne!(
+        transforms[0].split_whitespace().nth(1),
+        transforms[1].split_whitespace().nth(1)
+    );
+
+    let view_box = svg
+        .split("viewBox=\"0 ")
+        .nth(1)
+        .and_then(|value| value.split('"').next())
+        .expect("viewBox")
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    let view_width = view_box[1].parse::<i32>().expect("viewBox width");
+    let staff_end = svg
+        .lines()
+        .find(|line| line.contains("id=\"staff-line-1\""))
+        .and_then(|line| line.split('H').nth(1))
+        .and_then(|value| value.split('"').next())
+        .and_then(|value| value.parse::<i32>().ok())
+        .expect("staff width");
+    assert!(
+        view_width > staff_end,
+        "viewBox must contain the full staff width: {svg}"
+    );
+    assert!(!svg.contains("<text"), "SVG glyphs must not rely on fonts");
+    assert!(
+        !svg.contains("<image") && !svg.contains("href="),
+        "SVG must be self-contained paths"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_malformed_chord_structures_and_mismatched_event_semantics() {
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let cases = [
+        (
+            "chord-without-predecessor",
+            "<note><chord/><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>",
+            1,
+            "preceding pitched event",
+        ),
+        (
+            "rest-chord",
+            "<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>\n      <note><chord/><rest/><duration>1</duration><voice>1</voice><type>quarter</type></note>",
+            1,
+            "rest chords are unsupported",
+        ),
+        (
+            "chord-after-rest",
+            "<note><rest/><duration>1</duration><voice>1</voice><type>quarter</type></note>\n      <note><chord/><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>",
+            1,
+            "preceding pitched event",
+        ),
+        (
+            "mismatched-chord-duration",
+            "<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>\n      <note><chord/><pitch><step>D</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>half</type></note>",
+            1,
+            "duration must match",
+        ),
+        (
+            "mismatched-chord-beams",
+            "<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>eighth</type><beam>forward hook</beam></note>\n      <note><chord/><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>eighth</type></note>",
+            2,
+            "beam declarations must match",
+        ),
+        (
+            "mismatched-chord-voice",
+            "<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>\n      <note><chord/><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>2</voice><type>quarter</type></note>",
+            1,
+            "voice",
+        ),
+        (
+            "chord-tie-stop-without-start",
+            "<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>\n      <note><chord/><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><tie type=\"stop\"/><voice>1</voice><type>quarter</type></note>",
+            1,
+            "tie stop has no preceding tie start",
+        ),
+    ];
+
+    for (name, notes, divisions, expected_diagnostic) in cases {
+        let directory = scratch_dir();
+        fs::create_dir_all(&directory).expect("create test directory");
+        let input = directory.join(format!("{name}.musicxml"));
+        let fixture = include_str!("fixtures/minimal.musicxml")
+            .replace(original_note, notes)
+            .replace(
+                "<divisions>1</divisions>",
+                &format!("<divisions>{divisions}</divisions>"),
+            );
+        fs::write(&input, fixture).expect("write malformed chord score");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(!output.status.success(), "{name} was accepted");
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            diagnostic.contains(expected_diagnostic),
+            "{name}: {diagnostic}"
+        );
+        assert!(diagnostic.contains("XML path"), "{name}: {diagnostic}");
+        assert!(
+            !directory.join(format!("{name}.svg")).exists(),
+            "{name} emitted partial SVG"
+        );
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+}
+
+#[test]
+fn separates_same_octave_chord_tones_and_clears_the_preceding_event() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("same-octave-chord.musicxml");
+    let source = include_str!("fixtures/minimal.musicxml");
+    let first_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let notes = "<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>eighth</type></note>\n      <note><pitch><step>D</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>quarter</type></note>\n      <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>quarter</type></note>";
+    let fixture = source
+        .replace(first_note, notes)
+        .replace("<divisions>1</divisions>", "<divisions>2</divisions>");
+    fs::write(&input, fixture).expect("write same-octave chord score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "same-octave chord failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("same-octave-chord.svg")).expect("read SVG");
+    let chord_tones = svg
+        .lines()
+        .filter(|line| line.contains("class=\"tonehead\"") && line.contains("data-event=\"1\""))
+        .collect::<Vec<_>>();
+    assert_eq!(chord_tones.len(), 2, "{svg}");
+    let transforms = chord_tones
+        .iter()
+        .map(|line| {
+            let marker = "transform=\"translate(";
+            let start = line.find(marker).expect("tonehead transform") + marker.len();
+            let end = line[start..].find(')').expect("transform end") + start;
+            line[start..end]
+                .split_whitespace()
+                .map(|value| value.parse::<i32>().expect("transform coordinate"))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_ne!(
+        transforms[0][0], transforms[1][0],
+        "same-lane heads must not overlap: {svg}"
+    );
+    assert_eq!(transforms[1][0] - transforms[0][0], 12, "{svg}");
+    assert_eq!(
+        transforms[0][1], transforms[1][1],
+        "same octave lane: {svg}"
+    );
+    let first_event_x = svg
+        .lines()
+        .find(|line| line.contains("class=\"tonehead\"") && line.contains("data-event=\"0\""))
+        .and_then(|line| line.split("translate(").nth(1))
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse::<i32>().ok())
+        .expect("preceding event x coordinate");
+    let bracket_left_x = svg
+        .lines()
+        .find(|line| line.contains("class=\"chord-bracket\"") && line.contains("left"))
+        .and_then(|line| line.split("d=\"M").nth(1))
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse::<i32>().ok())
+        .expect("chord bracket x coordinate");
+    assert!(
+        bracket_left_x > first_event_x + 10,
+        "chord bracket must clear the preceding event: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn renders_simple_numeric_meter_and_rests() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");

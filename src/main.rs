@@ -13,13 +13,22 @@ struct Tone {
 }
 
 struct Event {
-    tone: Option<Tone>,
+    tones: Vec<ToneEvent>,
     duration_units: u32,
     duration_name: &'static str,
     dots: u8,
+    beams: Vec<BeamMark>,
+}
+
+struct ToneEvent {
+    tone: Tone,
     tie_start: bool,
     tie_stop: bool,
-    beams: Vec<BeamMark>,
+}
+
+struct ParsedNote {
+    event: Event,
+    chord_marker: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,7 +166,7 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
     let mut divisions = None;
     let mut transposition = 0;
     let mut active_meter = None;
-    let mut pending_tie: Option<Tone> = None;
+    let mut pending_ties = Vec::new();
     let mut active_beams = [false; 5];
     let mut measures = Vec::new();
     for measure_id in &elements[part].children {
@@ -170,7 +179,9 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
         }
         required_attribute(measure_element, "number")?;
         require_container_text(measure_element)?;
-        let mut events = Vec::new();
+        let mut events: Vec<Event> = Vec::new();
+        let mut event_sources = Vec::new();
+        let mut chord_target = None;
         for child in &measure_element.children {
             let element = &elements[*child];
             match element.name.as_str() {
@@ -228,37 +239,57 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
                                 .to_owned(),
                         )
                     })?;
-                    let event = parse_note(&elements, *child, divisions, transposition)?;
-                    validate_beam_group(element, &event, &mut active_beams)?;
-                    if let Some(tied_tone) = pending_tie.take() {
-                        if !event.tie_stop {
+                    let parsed = parse_note(&elements, *child, divisions, transposition)?;
+                    if let Some(chord_marker) = parsed.chord_marker {
+                        let Some(target) = chord_target else {
                             return Err(element_diagnostic(
-                                element,
-                                "tie start must connect to the next equal concert pitch".to_owned(),
+                                &elements[chord_marker],
+                                "<chord/> marker requires a preceding pitched event".to_owned(),
+                            ));
+                        };
+                        let event: &mut Event = &mut events[target];
+                        if event.duration_units != parsed.event.duration_units
+                            || event.duration_name != parsed.event.duration_name
+                            || event.dots != parsed.event.dots
+                        {
+                            return Err(element_diagnostic(
+                                &elements[chord_marker],
+                                "chord tone duration must match the preceding event".to_owned(),
                             ));
                         }
-                        if event.tone.as_ref() != Some(&tied_tone) {
+                        if !same_beams(&event.beams, &parsed.event.beams) {
                             return Err(element_diagnostic(
-                                element,
-                                "tie stop must match the preceding concert pitch".to_owned(),
+                                &elements[chord_marker],
+                                "chord tone beam declarations must match the preceding event"
+                                    .to_owned(),
                             ));
                         }
-                    } else if event.tie_stop {
-                        return Err(element_diagnostic(
-                            element,
-                            "tie stop has no preceding tie start".to_owned(),
-                        ));
+                        let mut chord_tones = parsed.event.tones;
+                        let tone = chord_tones.pop().ok_or_else(|| {
+                            element_diagnostic(
+                                &elements[chord_marker],
+                                "rest chords are unsupported".to_owned(),
+                            )
+                        })?;
+                        if event
+                            .tones
+                            .iter()
+                            .any(|existing| existing.tone == tone.tone)
+                        {
+                            return Err(element_diagnostic(
+                                &elements[chord_marker],
+                                "chord contains a duplicate concert pitch".to_owned(),
+                            ));
+                        }
+                        event.tones.push(tone);
+                    } else {
+                        events.push(parsed.event);
+                        event_sources.push(*child);
+                        chord_target = events
+                            .last()
+                            .filter(|event| !event.tones.is_empty())
+                            .map(|_| events.len() - 1);
                     }
-                    if event.tie_start {
-                        pending_tie = event.tone;
-                        if pending_tie.is_none() {
-                            return Err(element_diagnostic(
-                                element,
-                                "ties may connect only pitched events".to_owned(),
-                            ));
-                        }
-                    }
-                    events.push(event);
                 }
                 _ => {
                     return Err(element_diagnostic(
@@ -274,6 +305,10 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
                 "unsupported score: a measure must contain at least one event".to_owned(),
             ));
         }
+        for (event, source) in events.iter().zip(event_sources) {
+            validate_beam_group(&elements[source], event, &mut active_beams)?;
+            validate_event_ties(&elements[source], event, &mut pending_ties)?;
+        }
         measures.push(Measure {
             events,
             meter: active_meter,
@@ -285,7 +320,7 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
             "unsupported score: <part> must contain at least one measure".to_owned(),
         ));
     }
-    if pending_tie.is_some() {
+    if !pending_ties.is_empty() {
         return Err(element_diagnostic(
             &elements[part],
             "tie start has no matching tie stop".to_owned(),
@@ -383,34 +418,53 @@ fn parse_note(
     note: usize,
     divisions: u32,
     transposition: i32,
-) -> Result<Event, String> {
+) -> Result<ParsedNote, String> {
     let note_element = &elements[note];
     require_no_attributes(note_element)?;
     require_container_text(note_element)?;
-    if note_element
-        .children
+    let children = &note_element.children;
+    let chord_marker = children
+        .first()
+        .filter(|child| elements[**child].name == "chord")
+        .copied();
+    if let Some(chord) = chord_marker {
+        require_no_attributes(&elements[chord])?;
+        require_container_text(&elements[chord])?;
+        if !elements[chord].children.is_empty() {
+            return Err(element_diagnostic(
+                &elements[chord],
+                "<chord/> must be empty".to_owned(),
+            ));
+        }
+    } else if let Some(chord) = children
         .iter()
-        .any(|child| elements[*child].name == "chord")
+        .find(|child| elements[**child].name == "chord")
     {
         return Err(element_diagnostic(
-            note_element,
-            "chords are unsupported until task 26".to_owned(),
+            &elements[*chord],
+            "<chord/> must precede <pitch>".to_owned(),
         ));
     }
-    let children = &note_element.children;
-    let is_rest = children
-        .first()
-        .is_some_and(|child| elements[*child].name == "rest");
-    let event_element = children.first().copied().ok_or_else(|| {
+    let pitch_position = usize::from(chord_marker.is_some());
+    let event_element = children.get(pitch_position).copied().ok_or_else(|| {
         element_diagnostic(note_element, "unsupported empty note event".to_owned())
     })?;
-    if elements[event_element].name != if is_rest { "rest" } else { "pitch" } {
+    let is_rest = elements[event_element].name == "rest";
+    if elements[event_element].name != "pitch" && !is_rest {
         return Err(element_diagnostic(
             note_element,
             "unsupported note shape; expected <pitch> or <rest> first".to_owned(),
         ));
     }
-    let mut position = 1;
+    if is_rest {
+        if let Some(chord) = chord_marker {
+            return Err(element_diagnostic(
+                &elements[chord],
+                "rest chords are unsupported".to_owned(),
+            ));
+        }
+    }
+    let mut position = pitch_position + 1;
     let duration = *children.get(position).ok_or_else(|| {
         element_diagnostic(note_element, "note event requires <duration>".to_owned())
     })?;
@@ -584,6 +638,12 @@ fn parse_note(
             "beams on rests are unsupported".to_owned(),
         ));
     }
+    if is_rest && (tie_start || tie_stop) {
+        return Err(element_diagnostic(
+            note_element,
+            "ties may connect only pitched events".to_owned(),
+        ));
+    }
     let maximum_beam_level = match duration_name {
         "eighth" => 1,
         "16th" => 2,
@@ -630,20 +690,65 @@ fn parse_note(
             format!("duration {duration_ticks} does not match <type> at divisions {divisions}"),
         ));
     }
-    let tone = if is_rest {
-        None
+    let tones = if is_rest {
+        Vec::new()
     } else {
-        Some(parse_pitch(elements, event_element, transposition)?)
+        vec![ToneEvent {
+            tone: parse_pitch(elements, event_element, transposition)?,
+            tie_start,
+            tie_stop,
+        }]
     };
-    Ok(Event {
-        tone,
-        duration_units,
-        duration_name,
-        dots: duration_marks,
-        tie_start,
-        tie_stop,
-        beams,
+    Ok(ParsedNote {
+        event: Event {
+            tones,
+            duration_units,
+            duration_name,
+            dots: duration_marks,
+            beams,
+        },
+        chord_marker,
     })
+}
+
+fn same_beams(left: &[BeamMark], right: &[BeamMark]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .all(|beam| right.iter().any(|candidate| candidate == beam))
+}
+
+fn validate_event_ties(
+    note: &Element,
+    event: &Event,
+    pending_ties: &mut Vec<Tone>,
+) -> Result<(), String> {
+    let mut unmatched = std::mem::take(pending_ties);
+    for tone in event.tones.iter().filter(|tone| tone.tie_stop) {
+        let Some(position) = unmatched.iter().position(|expected| expected == &tone.tone) else {
+            let message = if unmatched.is_empty() {
+                "tie stop has no preceding tie start"
+            } else {
+                "tie stop must match a preceding concert pitch"
+            };
+            return Err(element_diagnostic(note, message.to_owned()));
+        };
+        unmatched.remove(position);
+    }
+    if !unmatched.is_empty() {
+        return Err(element_diagnostic(
+            note,
+            "tie start must connect to the next equal concert pitch".to_owned(),
+        ));
+    }
+    pending_ties.extend(
+        event
+            .tones
+            .iter()
+            .filter(|tone| tone.tie_start)
+            .map(|tone| tone.tone),
+    );
+    Ok(())
 }
 
 fn parse_pitch(elements: &[Element], pitch: usize, transposition: i32) -> Result<Tone, String> {
@@ -1081,7 +1186,7 @@ fn render_svg(score: &Score) -> String {
     let mut index = 0;
     let mut active_meter = None;
     let mut meter_index = 0;
-    let mut pending_tie_path: Option<(i32, i32)> = None;
+    let mut pending_tie_paths: Vec<(Tone, i32, i32)> = Vec::new();
     let mut active_beams = [None; 5];
     for measure in &score.measures {
         if let Some(meter) = measure.meter {
@@ -1109,7 +1214,7 @@ fn render_svg(score: &Score) -> String {
             active_meter = Some(meter);
         }
         for event in &measure.events {
-            let Some(tone) = event.tone.as_ref() else {
+            if event.tones.is_empty() {
                 event_markup.push_str(&format!(
                     "<path id=\"rest-{index}\" class=\"rest\" data-duration=\"{}\" transform=\"translate({x} 40)\" d=\"{}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n",
                     event.duration_name,
@@ -1119,20 +1224,52 @@ fn render_svg(score: &Score) -> String {
                 x += (event.duration_units * 5).div_ceil(2).max(12) as i32;
                 index += 1;
                 continue;
-            };
-            let octave_y = lane_y(tone.octave);
-            let note_y = octave_y + 9;
-            let stem_end = if tone.octave < 5 {
-                octave_y - 20
+            }
+            let first_tone = &event.tones[0].tone;
+            let mut lane_offsets = [0i32; 10];
+            let tone_xs = event
+                .tones
+                .iter()
+                .map(|tone| {
+                    let octave = usize::from(tone.tone.octave);
+                    let tone_x = x + lane_offsets[octave];
+                    lane_offsets[octave] += 12;
+                    tone_x
+                })
+                .collect::<Vec<_>>();
+            let leftmost_tone_x = *tone_xs.iter().min().expect("event has tones");
+            let rightmost_tone_x = *tone_xs.iter().max().expect("event has tones");
+            let stem_up = first_tone.octave < 5;
+            let stem_tone = if stem_up {
+                event
+                    .tones
+                    .iter()
+                    .min_by_key(|tone| lane_y(tone.tone.octave))
+                    .expect("pitched event has a tone")
             } else {
-                octave_y + 37
+                event
+                    .tones
+                    .iter()
+                    .max_by_key(|tone| lane_y(tone.tone.octave))
+                    .expect("pitched event has a tone")
+            };
+            let stem_octave_y = lane_y(stem_tone.tone.octave);
+            let note_y = stem_octave_y + 9;
+            let stem_end = if stem_up {
+                stem_octave_y - 20
+            } else {
+                stem_octave_y + 37
             };
             let stem_id = if index == 0 {
                 "stem".to_owned()
             } else {
                 format!("stem-{index}")
             };
-            let stem_x = x + if tone.octave < 5 { 10 } else { 0 };
+            let stem_x = if stem_up {
+                rightmost_tone_x + 10
+            } else {
+                leftmost_tone_x
+            };
             if event.duration_name != "whole" {
                 event_markup.push_str(&format!(
                     "<path id=\"{stem_id}\" class=\"stem\" d=\"M{stem_x} {note_y}V{stem_end}\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n"
@@ -1149,12 +1286,12 @@ fn render_svg(score: &Score) -> String {
                     if event.beams.iter().any(|beam| beam.level == level) {
                         continue;
                     }
-                    let flag_y = if tone.octave < 5 {
+                    let flag_y = if stem_up {
                         stem_end + flag * 3
                     } else {
                         stem_end - flag * 3
                     };
-                    let path = if tone.octave < 5 {
+                    let path = if stem_up {
                         format!(
                             "M{stem_x} {flag_y}C{} {} {} {} {} {}",
                             stem_x + 9,
@@ -1183,7 +1320,7 @@ fn render_svg(score: &Score) -> String {
             for beam in &event.beams {
                 let level = usize::from(beam.level);
                 let offset = i32::from(beam.level - 1) * 4;
-                let beam_y = if tone.octave < 5 {
+                let beam_y = if stem_up {
                     stem_end + offset
                 } else {
                     stem_end - offset
@@ -1209,11 +1346,7 @@ fn render_svg(score: &Score) -> String {
                             -1
                         };
                         let end_x = stem_x + direction * 9;
-                        let end_y = if tone.octave < 5 {
-                            beam_y + 4
-                        } else {
-                            beam_y - 4
-                        };
+                        let end_y = if stem_up { beam_y + 4 } else { beam_y - 4 };
                         beam_markup.push_str(&format!(
                             "<path id=\"beam-hook-{index}-{level}\" class=\"beam-hook\" data-level=\"{level}\" d=\"M{stem_x} {beam_y}L{end_x} {end_y}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"3\" stroke-linecap=\"square\"/>\n"
                         ));
@@ -1222,62 +1355,120 @@ fn render_svg(score: &Score) -> String {
             }
             for mark in 0..event.dots {
                 let (mark_x, mark_y) = match (event.duration_name, event.dots, mark) {
-                    ("half", 2, _) => (x + 14, octave_y + 5 + i32::from(mark) * 7),
-                    ("half", 3, 0..=1) => (x + 14, octave_y + 5 + i32::from(mark) * 7),
-                    ("half", 3, _) => (x + 19, octave_y + 8),
-                    _ => (x + 14, note_y),
+                    ("half", 2, _) => (x + 14, lane_y(first_tone.octave) + 5 + i32::from(mark) * 7),
+                    ("half", 3, 0..=1) => {
+                        (x + 14, lane_y(first_tone.octave) + 5 + i32::from(mark) * 7)
+                    }
+                    ("half", 3, _) => (x + 19, lane_y(first_tone.octave) + 8),
+                    _ => (x + 14, lane_y(first_tone.octave) + 9),
                 };
                 event_markup.push_str(&format!(
                     "<path id=\"duration-mark-{index}-{mark}\" class=\"duration-mark\" d=\"M{mark_x} {mark_y}a1.2 1.2 0 1 0 2.4 0a1.2 1.2 0 1 0 -2.4 0\" fill=\"#171717\"/>\n"
                 ));
             }
-            let ledger_octaves: Vec<u8> = if tone.octave < 4 {
-                (tone.octave..=3).rev().collect()
-            } else if tone.octave > 5 {
-                (6..=tone.octave).collect()
-            } else {
-                Vec::new()
-            };
+            let mut ledger_octaves = event
+                .tones
+                .iter()
+                .flat_map(|tone| {
+                    if tone.tone.octave < 4 {
+                        (tone.tone.octave..=3).rev().collect::<Vec<_>>()
+                    } else if tone.tone.octave > 5 {
+                        (6..=tone.tone.octave).collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .collect::<Vec<_>>();
+            ledger_octaves.sort_unstable();
+            ledger_octaves.dedup();
             for octave in ledger_octaves {
                 let ledger_y = lane_y(octave) + 9;
                 event_markup.push_str(&format!(
                     "<path id=\"ledger-line-octave-{octave}-event-{index}\" d=\"M{} {ledger_y}H{}\" stroke=\"#171717\"/>\n",
-                    x - 8,
-                    x + 20
+                    leftmost_tone_x - 8,
+                    rightmost_tone_x + 20
                 ));
             }
-            let tonehead_id = if index == 0 {
-                "tonehead".to_owned()
-            } else {
-                format!("tonehead-{index}")
-            };
-            event_markup.push_str(&format!(
-                "<path id=\"{tonehead_id}\" class=\"tonehead\" data-tone=\"{}\" data-octave=\"{}\" data-duration=\"{}\" transform=\"translate({x} {octave_y})\" d=\"{}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n",
-                tone.value,
-                tone.octave,
-                event.duration_name,
-                glyph_path(tone.value)
-            ));
-            if event.tie_stop {
-                if let Some((start_x, tie_y)) = pending_tie_path.take() {
-                    let end_x = x + 5;
-                    tie_markup.push_str(&format!(
-                        "<path id=\"tie-{index}\" class=\"tie\" d=\"M{start_x} {tie_y}C{} {} {} {} {end_x} {tie_y}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n",
-                        start_x + 10,
-                        tie_y + 9,
-                        end_x - 10,
-                        tie_y + 9
-                    ));
-                    view_bottom = view_bottom.max(tie_y + 10);
+            if event.tones.len() > 1 {
+                let top = event
+                    .tones
+                    .iter()
+                    .map(|tone| lane_y(tone.tone.octave))
+                    .min()
+                    .expect("chord has a tone");
+                let bottom = event
+                    .tones
+                    .iter()
+                    .map(|tone| lane_y(tone.tone.octave) + 18)
+                    .max()
+                    .expect("chord has a tone");
+                event_markup.push_str(&format!(
+                    "<path id=\"chord-bracket-left-{index}\" class=\"chord-bracket\" data-event=\"{index}\" d=\"M{} {top}C{} {} {} {} {} {bottom}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n<path id=\"chord-bracket-right-{index}\" class=\"chord-bracket\" data-event=\"{index}\" d=\"M{} {top}C{} {} {} {} {} {bottom}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n",
+                    leftmost_tone_x - 3,
+                    leftmost_tone_x - 9,
+                    top + 3,
+                    leftmost_tone_x - 9,
+                    bottom - 3,
+                    leftmost_tone_x - 3,
+                    rightmost_tone_x + 13,
+                    rightmost_tone_x + 19,
+                    top + 3,
+                    rightmost_tone_x + 19,
+                    bottom - 3,
+                    rightmost_tone_x + 13
+                ));
+                right = right.max(rightmost_tone_x + 22);
+            }
+            for (tone_index, tone_event) in event.tones.iter().enumerate() {
+                let tone = tone_event.tone;
+                let octave_y = lane_y(tone.octave);
+                let tone_x = tone_xs[tone_index];
+                let tonehead_id = if tone_index == 0 && index == 0 {
+                    "tonehead".to_owned()
+                } else if tone_index == 0 {
+                    format!("tonehead-{index}")
+                } else {
+                    format!("tonehead-{index}-{tone_index}")
+                };
+                event_markup.push_str(&format!(
+                    "<path id=\"{tonehead_id}\" class=\"tonehead\" data-event=\"{index}\" data-tone-index=\"{tone_index}\" data-tone=\"{}\" data-octave=\"{}\" data-duration=\"{}\" transform=\"translate({tone_x} {octave_y})\" d=\"{}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n",
+                    tone.value,
+                    tone.octave,
+                    event.duration_name,
+                    glyph_path(tone.value)
+                ));
+                let tie_y = octave_y + 18;
+                if tone_event.tie_stop {
+                    if let Some(position) = pending_tie_paths
+                        .iter()
+                        .position(|(pending_tone, _, _)| *pending_tone == tone)
+                    {
+                        let (_, start_x, start_y) = pending_tie_paths.remove(position);
+                        let end_x = x + 5;
+                        tie_markup.push_str(&format!(
+                            "<path id=\"tie-{index}-{tone_index}\" class=\"tie\" d=\"M{start_x} {start_y}C{} {} {} {} {end_x} {start_y}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n",
+                            start_x + 10,
+                            start_y + 9,
+                            end_x - 10,
+                            start_y + 9
+                        ));
+                        view_bottom = view_bottom.max(start_y + 10);
+                    }
                 }
+                if tone_event.tie_start {
+                    pending_tie_paths.push((tone, tone_x + 8, tie_y));
+                }
+                view_top = view_top.min(octave_y - 20);
+                view_bottom = view_bottom.max(octave_y + 37);
             }
-            if event.tie_start {
-                pending_tie_path = Some((x + 8, octave_y + 18));
-            }
-            view_top = view_top.min(octave_y - 20);
-            view_bottom = view_bottom.max(octave_y + 37);
             right = right.max(x + 28);
-            x += (event.duration_units * 5).div_ceil(2).max(12) as i32;
+            let minimum_advance = if event.tones.len() > 1 {
+                rightmost_tone_x - x + 28
+            } else {
+                12
+            };
+            let duration_advance = (event.duration_units * 5).div_ceil(2) as i32;
+            x += duration_advance.max(minimum_advance);
             index += 1;
         }
     }
