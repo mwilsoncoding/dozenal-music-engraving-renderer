@@ -311,7 +311,16 @@ fn canonical_score_covers_supported_mvp_content_in_self_contained_svg() {
     assert_eq!(svg.matches("class=\"beam-hook\"").count(), 2, "{svg}");
     assert_eq!(svg.matches("class=\"tie\"").count(), 1, "{svg}");
     assert_eq!(svg.matches("class=\"chord-bracket\"").count(), 4, "{svg}");
-    assert_eq!(svg.matches("id=\"ledger-line-octave-").count(), 20, "{svg}");
+    assert_eq!(
+        svg.matches("id=\"ledger-line-below-event-").count(),
+        2,
+        "{svg}"
+    );
+    assert_eq!(
+        svg.matches("id=\"ledger-line-above-event-").count(),
+        2,
+        "{svg}"
+    );
     for value in 0..=11 {
         assert!(
             svg.contains(&format!("data-tone=\"{value}\"")),
@@ -783,7 +792,7 @@ fn applies_chromatic_transposition_before_mapping_pitch() {
         "C4 + 2 semitones should map to Tone 2"
     );
     assert!(
-        svg.contains("transform=\"translate(92 49)\""),
+        svg.contains("transform=\"translate(92 70)\""),
         "result remains in octave 4"
     );
 
@@ -907,6 +916,7 @@ fn maps_enharmonic_alterations_across_octave_boundaries() {
 
 #[test]
 fn renders_all_ten_octave_lanes_with_ledger_lines_and_fitting_viewbox() {
+    let expected_lane_y = [150, 130, 110, 90, 70, 50, 30, 10, -10, -30];
     for octave in 0..=9 {
         let directory = scratch_dir();
         fs::create_dir_all(&directory).expect("create test directory");
@@ -927,17 +937,64 @@ fn renders_all_ten_octave_lanes_with_ledger_lines_and_fitting_viewbox() {
         let svg =
             fs::read_to_string(directory.join(format!("octave-{octave}.svg"))).expect("read SVG");
         assert!(svg.contains(&format!("data-octave=\"{octave}\"")), "{svg}");
-        let expected_ledger_lines = if octave < 4 {
-            (4 - octave) as usize
-        } else if octave > 5 {
-            (octave - 5) as usize
+        let tonehead = svg
+            .lines()
+            .find(|line| line.contains(&format!("data-octave=\"{octave}\"")))
+            .expect("tonehead path");
+        let lane_y = tonehead
+            .split("transform=\"translate(")
+            .nth(1)
+            .and_then(|value| value.split(')').next())
+            .and_then(|value| value.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<i32>().ok())
+            .expect("tonehead y position");
+        assert_eq!(lane_y, expected_lane_y[octave as usize], "octave {octave}");
+        for staff_line_y in [28, 68, 108] {
+            assert!(
+                svg.contains(&format!("d=\"M12 {staff_line_y}H")),
+                "missing staff line at y={staff_line_y}: {svg}"
+            );
+        }
+        assert!(
+            svg.contains("id=\"octave-4\" transform=\"translate(26 70)\"")
+                && svg.contains("id=\"octave-5\" transform=\"translate(26 50)\""),
+            "octave 4/5 lane positions must match the left-side indicators: {svg}"
+        );
+
+        let expected_ledger_y = if octave <= 1 {
+            Some(148)
+        } else if octave >= 8 {
+            Some(-12)
         } else {
-            0
+            None
         };
+        let ledger_lines = svg
+            .lines()
+            .filter(|line| line.contains("id=\"ledger-line-"))
+            .collect::<Vec<_>>();
         assert_eq!(
-            svg.matches("id=\"ledger-line-octave-").count(),
-            expected_ledger_lines,
+            ledger_lines.len(),
+            usize::from(expected_ledger_y.is_some()),
             "octave {octave}: {svg}"
+        );
+        if let Some(ledger_y) = expected_ledger_y {
+            assert!(
+                ledger_lines[0].contains(&format!(" {ledger_y}H")),
+                "octave {octave} ledger line should be at y={ledger_y}: {}",
+                ledger_lines[0]
+            );
+        }
+        let adjacent_line_y = match octave {
+            0..=1 => 148,
+            2..=3 => 108,
+            4..=5 => 68,
+            6..=7 => 28,
+            8..=9 => -12,
+            _ => unreachable!(),
+        };
+        assert!(
+            lane_y + 16 < adjacent_line_y || lane_y + 2 > adjacent_line_y,
+            "octave {octave} C glyph intersects line at y={adjacent_line_y}"
         );
         assert!(svg.contains("viewBox=\"0 "), "missing viewBox: {svg}");
 

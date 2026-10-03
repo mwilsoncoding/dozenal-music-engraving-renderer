@@ -1389,7 +1389,7 @@ fn render_svg(score: &Score) -> String {
     let mut x = 92;
     let mut right = 128;
     let mut view_top = 0;
-    let mut view_bottom = 88;
+    let mut view_bottom = 128;
     let mut index = 0;
     let mut active_meter = None;
     let mut meter_index = 0;
@@ -1415,7 +1415,7 @@ fn render_svg(score: &Score) -> String {
                     None,
                     Vec::new(),
                     PathGeometry::new(
-                        Some((meter_x, 30)),
+                        Some((meter_x, 50)),
                         glyph_path(meter.beats),
                         PathStyle::MediumOutline,
                     ),
@@ -1426,7 +1426,7 @@ fn render_svg(score: &Score) -> String {
                     None,
                     Vec::new(),
                     PathGeometry::new(
-                        Some((meter_x, 50)),
+                        Some((meter_x, 70)),
                         glyph_path(meter.beat_type),
                         PathStyle::MediumOutline,
                     ),
@@ -1631,35 +1631,28 @@ fn render_svg(score: &Score) -> String {
                     ),
                 );
             }
-            let mut ledger_octaves = event
-                .tones
-                .iter()
-                .flat_map(|tone| {
-                    if tone.tone.octave < 4 {
-                        (tone.tone.octave..=3).rev().collect::<Vec<_>>()
-                    } else if tone.tone.octave > 5 {
-                        (6..=tone.tone.octave).collect::<Vec<_>>()
-                    } else {
-                        Vec::new()
-                    }
-                })
-                .collect::<Vec<_>>();
-            ledger_octaves.sort_unstable();
-            ledger_octaves.dedup();
-            for octave in ledger_octaves {
-                let ledger_y = lane_y(octave) + 9;
+            if event.tones.iter().any(|tone| tone.tone.octave <= 1) {
                 scene.add_path(
                     DrawLayer::Event,
-                    format!("ledger-line-octave-{octave}-event-{index}"),
+                    format!("ledger-line-below-event-{index}"),
                     None,
                     Vec::new(),
                     PathGeometry::new(
                         None,
-                        format!(
-                            "M{} {ledger_y}H{}",
-                            leftmost_tone_x - 8,
-                            rightmost_tone_x + 20
-                        ),
+                        format!("M{} 148H{}", leftmost_tone_x - 8, rightmost_tone_x + 20),
+                        PathStyle::StaffLine,
+                    ),
+                );
+            }
+            if event.tones.iter().any(|tone| tone.tone.octave >= 8) {
+                scene.add_path(
+                    DrawLayer::Event,
+                    format!("ledger-line-above-event-{index}"),
+                    None,
+                    Vec::new(),
+                    PathGeometry::new(
+                        None,
+                        format!("M{} -12H{}", leftmost_tone_x - 8, rightmost_tone_x + 20),
                         PathStyle::StaffLine,
                     ),
                 );
@@ -1796,8 +1789,8 @@ fn render_svg(score: &Score) -> String {
     scene.view_height = view_bottom - view_top;
     for (id, path_data) in [
         ("staff-line-1", format!("M12 28H{}", view_width - 12)),
-        ("staff-line-2", format!("M12 48H{}", view_width - 12)),
-        ("staff-line-3", format!("M12 68H{}", view_width - 12)),
+        ("staff-line-2", format!("M12 68H{}", view_width - 12)),
+        ("staff-line-3", format!("M12 108H{}", view_width - 12)),
     ] {
         scene.add_path(
             DrawLayer::Staff,
@@ -1812,14 +1805,14 @@ fn render_svg(score: &Score) -> String {
         "octave-5",
         None,
         Vec::new(),
-        PathGeometry::new(Some((26, 30)), glyph_path(5), PathStyle::MediumOutline),
+        PathGeometry::new(Some((26, 50)), glyph_path(5), PathStyle::MediumOutline),
     );
     scene.add_path(
         DrawLayer::Staff,
         "octave-4",
         None,
         Vec::new(),
-        PathGeometry::new(Some((26, 50)), glyph_path(4), PathStyle::MediumOutline),
+        PathGeometry::new(Some((26, 70)), glyph_path(4), PathStyle::MediumOutline),
     );
     scene.to_svg()
 }
@@ -1838,7 +1831,10 @@ fn rest_glyph_path(duration_name: &str) -> &'static str {
 }
 
 fn lane_y(octave: u8) -> i32 {
-    29 + (5 - i32::from(octave)) * 20
+    match octave {
+        0..=4 => 70 + (4 - i32::from(octave)) * 20,
+        _ => 50 - (i32::from(octave) - 5) * 20,
+    }
 }
 
 fn glyph_path(value: u8) -> &'static str {
