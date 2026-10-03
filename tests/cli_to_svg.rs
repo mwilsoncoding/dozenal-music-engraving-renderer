@@ -299,7 +299,7 @@ fn enforces_minimum_clearance_between_vertically_overlapping_event_geometry() {
         .and_then(|value| value.parse::<i32>().ok())
         .expect("barline x position");
     assert!(
-        barline_x - tonehead_xs[2] >= 17,
+        barline_x - tonehead_xs[2] >= 16,
         "barline should clear the final tonehead and flags: {svg}"
     );
 
@@ -1229,7 +1229,7 @@ fn renders_smooth_32nd_flags_toward_a_down_stem_notehead() {
         .collect::<Vec<_>>();
     assert_eq!(flags.len(), 1, "one compound flag glyph per note: {svg}");
     let flag = flags[0];
-    assert!(flag.contains("transform=\"translate(98 98)\""), "{flag}");
+    assert!(flag.contains("transform=\"translate(97.25 98)\""), "{flag}");
     assert!(flag.contains("fill-rule=\"nonzero\""), "{flag}");
     assert!(
         !flag.contains("rotate("),

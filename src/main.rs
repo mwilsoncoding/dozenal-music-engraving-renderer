@@ -1253,6 +1253,7 @@ struct DrawCommand {
 
 struct PathGeometry {
     transform: Option<(i32, i32)>,
+    x_offset: f64,
     scale: f64,
     rotation: Option<(i32, i32, i32)>,
     path_data: String,
@@ -1263,6 +1264,7 @@ impl PathGeometry {
     fn new(transform: Option<(i32, i32)>, path_data: impl Into<String>, style: PathStyle) -> Self {
         Self {
             transform,
+            x_offset: 0.0,
             scale: 1.0,
             rotation: None,
             path_data: path_data.into(),
@@ -1272,6 +1274,11 @@ impl PathGeometry {
 
     fn scaled(mut self, scale: f64) -> Self {
         self.scale = scale;
+        self
+    }
+
+    fn offset_x(mut self, offset: f64) -> Self {
+        self.x_offset = offset;
         self
     }
 
@@ -1392,9 +1399,9 @@ fn event_geometry(
         if !flag_levels.is_empty() {
             let glyph = bravura_glyphs::flag(flag_level_count(event.duration_name), stems_up);
             primary.push(ComponentBounds::filled(
-                f64::from(stem_x) + glyph.bounds.0,
+                f64::from(stem_x) + glyph.bounds.0 - 0.75,
                 f64::from(stem_end) + glyph.bounds.1,
-                f64::from(stem_x) + glyph.bounds.2,
+                f64::from(stem_x) + glyph.bounds.2 - 0.75,
                 f64::from(stem_end) + glyph.bounds.3,
             ));
         }
@@ -1637,7 +1644,16 @@ impl Scene {
         }
         let mut transforms = String::new();
         if let Some((x, y)) = command.geometry.transform {
-            write!(transforms, "translate({x} {y})").expect("writing to a String cannot fail");
+            if command.geometry.x_offset == 0.0 {
+                write!(transforms, "translate({x} {y})")
+            } else {
+                write!(
+                    transforms,
+                    "translate({:.2} {y})",
+                    f64::from(x) + command.geometry.x_offset
+                )
+            }
+            .expect("writing to a String cannot fail");
         }
         if command.geometry.scale != 1.0 {
             if !transforms.is_empty() {
@@ -1822,7 +1838,8 @@ fn render_svg(score: &Score) -> String {
                             Some((stem_x, stem_end)),
                             flag_path,
                             PathStyle::BravuraGlyph,
-                        ),
+                        )
+                        .offset_x(-0.75),
                     );
                 }
             }
