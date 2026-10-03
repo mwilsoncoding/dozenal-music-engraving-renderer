@@ -1,0 +1,8 @@
+[package]
+name = "domunor"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "domunor"
+path = "src/main.rs"
