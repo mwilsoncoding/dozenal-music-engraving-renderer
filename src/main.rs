@@ -1376,16 +1376,10 @@ fn event_geometry(
         ));
     }
 
-    let stem_tone_index = event
-        .tones
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, tone)| lane_y(tone.tone.octave))
-        .map(|(tone_index, _)| tone_index)
-        .expect("pitched event has a tone");
+    let stems_up = stem_direction_is_up(&event.tones);
+    let stem_tone_index = stem_tone_index(event, stems_up);
     let stem_octave_y = lane_y(event.tones[stem_tone_index].tone.octave);
-    let stem_start = stem_octave_y - 1;
-    let stem_end = stem_octave_y - 30;
+    let (stem_start, stem_end) = stem_endpoints(stem_octave_y, stems_up);
     let stem_x = tone_xs[stem_tone_index] + 6;
     if event.duration_name != "whole" {
         primary.push(ComponentBounds::stroked(
@@ -1418,9 +1412,10 @@ fn event_geometry(
         }
     }
 
+    let beam_direction = if stems_up { 1 } else { -1 };
     for beam in &event.beams {
         let level = usize::from(beam.level);
-        let offset = i32::from(beam.level - 1) * 4;
+        let offset = i32::from(beam.level - 1) * 4 * beam_direction;
         let beam_y = stem_end + offset;
         match beam.state {
             BeamState::Begin => {}
@@ -1442,11 +1437,12 @@ fn event_geometry(
                     -1
                 };
                 let end_x = stem_x + direction * 9;
+                let end_y = beam_y + 4 * beam_direction;
                 primary.push(ComponentBounds::stroked(
                     f64::from(stem_x.min(end_x)),
-                    f64::from(beam_y),
+                    f64::from(beam_y.min(end_y)),
                     f64::from(stem_x.max(end_x)),
-                    f64::from(beam_y + 4),
+                    f64::from(beam_y.max(end_y)),
                     3.0,
                 ));
             }
@@ -1797,16 +1793,11 @@ fn render_svg(score: &Score) -> String {
                 .collect::<Vec<_>>();
             let leftmost_tone_x = *tone_xs.iter().min().expect("event has tones");
             let rightmost_tone_x = *tone_xs.iter().max().expect("event has tones");
-            let stem_tone_index = event
-                .tones
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, tone)| lane_y(tone.tone.octave))
-                .map(|(tone_index, _)| tone_index)
-                .expect("pitched event has a tone");
+            let stems_up = stem_direction_is_up(&event.tones);
+            let stem_tone_index = stem_tone_index(event, stems_up);
             let stem_octave_y = lane_y(event.tones[stem_tone_index].tone.octave);
-            let stem_start = stem_octave_y - 1;
-            let stem_end = stem_octave_y - 30;
+            let (stem_start, stem_end) = stem_endpoints(stem_octave_y, stems_up);
+            let beam_direction = if stems_up { 1 } else { -1 };
             let stem_id = if index == 0 {
                 "stem".to_owned()
             } else {
@@ -1814,7 +1805,8 @@ fn render_svg(score: &Score) -> String {
             };
             let stem_x = tone_xs[stem_tone_index] + 6;
             if event.duration_name != "whole" {
-                view_top = view_top.min(stem_end);
+                view_top = view_top.min(stem_start.min(stem_end));
+                view_bottom = view_bottom.max(stem_start.max(stem_end));
                 scene.add_path(
                     DrawLayer::Event,
                     stem_id,
@@ -1854,7 +1846,7 @@ fn render_svg(score: &Score) -> String {
             }
             for beam in &event.beams {
                 let level = usize::from(beam.level);
-                let offset = i32::from(beam.level - 1) * 4;
+                let offset = i32::from(beam.level - 1) * 4 * beam_direction;
                 let beam_y = stem_end + offset;
                 match beam.state {
                     BeamState::Begin => active_beams[level] = Some((stem_x, beam_y)),
@@ -1885,7 +1877,7 @@ fn render_svg(score: &Score) -> String {
                             -1
                         };
                         let end_x = stem_x + direction * 9;
-                        let end_y = beam_y + 4;
+                        let end_y = beam_y + 4 * beam_direction;
                         scene.add_path(
                             DrawLayer::Beam,
                             format!("beam-hook-{index}-{level}"),
@@ -2144,6 +2136,39 @@ fn lane_y(octave: u8) -> i32 {
     match octave {
         0..=4 => 70 + (4 - i32::from(octave)) * 20,
         _ => 50 - (i32::from(octave) - 5) * 20,
+    }
+}
+
+fn stem_direction_is_up(tones: &[ToneEvent]) -> bool {
+    let (above, below) = tones.iter().fold((0, 0), |(above, below), tone| {
+        if lane_y(tone.tone.octave) + 9 < 68 {
+            (above + 1, below)
+        } else {
+            (above, below + 1)
+        }
+    });
+    below >= above
+}
+
+fn stem_tone_index(event: &Event, stems_up: bool) -> usize {
+    let tones = event.tones.iter().enumerate();
+    if stems_up {
+        tones
+            .min_by_key(|(_, tone)| lane_y(tone.tone.octave))
+            .map(|(tone_index, _)| tone_index)
+    } else {
+        tones
+            .max_by_key(|(_, tone)| lane_y(tone.tone.octave))
+            .map(|(tone_index, _)| tone_index)
+    }
+    .expect("pitched event has a tone")
+}
+
+fn stem_endpoints(tonehead_y: i32, stems_up: bool) -> (i32, i32) {
+    if stems_up {
+        (tonehead_y - 1, tonehead_y - 30)
+    } else {
+        (tonehead_y + 19, tonehead_y + 48)
     }
 }
 

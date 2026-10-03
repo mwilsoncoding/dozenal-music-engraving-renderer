@@ -397,7 +397,7 @@ fn engraves_supported_note_durations_and_only_the_two_dotted_forms() {
 }
 
 #[test]
-fn centers_stems_above_toneheads_with_a_vertical_gap() {
+fn stems_extend_away_from_the_center_staff_line() {
     for octave in [4, 5, 9] {
         let directory = scratch_dir();
         fs::create_dir_all(&directory).expect("create test directory");
@@ -451,15 +451,33 @@ fn centers_stems_above_toneheads_with_a_vertical_gap() {
             (stem_start[0] - tonehead_position[0] - 6).abs() == 0,
             "octave {octave} stem should be centered over its tonehead: {svg}"
         );
+        let (expected_start_y, should_extend_up) = if octave <= 4 {
+            (tonehead_position[1] - 1, true)
+        } else {
+            (tonehead_position[1] + 19, false)
+        };
         assert_eq!(
-            stem_start[1],
-            tonehead_position[1] - 1,
-            "octave {octave} stem should start just above its tonehead: {svg}"
+            stem_start[1], expected_start_y,
+            "octave {octave} stem should attach on the correct side of its tonehead: {svg}"
         );
-        assert!(
+        assert_eq!(
             stem_end_y < stem_start[1],
-            "stem should extend upward: {svg}"
+            should_extend_up,
+            "octave {octave} stem should extend away from the center staff line: {svg}"
         );
+        let tonehead_top = f64::from(tonehead_position[1] + 1);
+        let tonehead_bottom = f64::from(tonehead_position[1] + 17);
+        let stem_edge = if should_extend_up {
+            f64::from(stem_start[1]) + 0.75
+        } else {
+            f64::from(stem_start[1]) - 0.75
+        };
+        let stem_gap = if should_extend_up {
+            tonehead_top - stem_edge
+        } else {
+            stem_edge - tonehead_bottom
+        };
+        assert_eq!(stem_gap, 1.25, "stem gap should match on both sides: {svg}");
         let view_top = svg
             .lines()
             .next()
@@ -471,6 +489,100 @@ fn centers_stems_above_toneheads_with_a_vertical_gap() {
             view_top <= stem_end_y,
             "octave {octave} stem must fit in the viewBox: {svg}"
         );
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+}
+
+#[test]
+fn chord_stem_direction_follows_the_majority_side_of_the_center_line() {
+    for (octaves, should_extend_up, attachment_octave) in [
+        (&[5, 6, 4][..], false, 4),
+        (&[4, 3, 5][..], true, 5),
+        (&[5, 4][..], true, 5),
+    ] {
+        let directory = scratch_dir();
+        fs::create_dir_all(&directory).expect("create test directory");
+        let input = directory.join("chord-stem-direction.musicxml");
+        let steps = ["C", "C", "C"];
+        let notes = octaves
+            .iter()
+            .zip(steps)
+            .enumerate()
+            .map(|(index, (octave, step))| {
+                let chord_marker = if index == 0 { "" } else { "<chord/>" };
+                format!(
+                    "      <note>{chord_marker}<pitch><step>{step}</step><octave>{octave}</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let first_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+        let fixture = include_str!("fixtures/minimal.musicxml").replace(first_note, &notes);
+        fs::write(&input, fixture).expect("write chord score");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(
+            output.status.success(),
+            "chord {octaves:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let svg = fs::read_to_string(directory.join("chord-stem-direction.svg")).expect("read SVG");
+        let tonehead_y = svg
+            .lines()
+            .filter(|line| line.contains("class=\"tonehead\""))
+            .filter_map(|line| {
+                let octave = line
+                    .split("data-octave=\"")
+                    .nth(1)?
+                    .split('\"')
+                    .next()?
+                    .parse::<u8>()
+                    .ok()?;
+                let y = line
+                    .split("transform=\"translate(")
+                    .nth(1)?
+                    .split_whitespace()
+                    .nth(1)?
+                    .split(')')
+                    .next()?
+                    .parse::<i32>()
+                    .ok()?;
+                Some((octave, y))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tonehead_y.len(), octaves.len(), "{svg}");
+        let anchor_y = tonehead_y
+            .iter()
+            .find(|(octave, _)| *octave == attachment_octave)
+            .map(|(_, y)| *y)
+            .expect("outer tonehead for stem attachment");
+        let stem = svg
+            .lines()
+            .find(|line| line.contains("id=\"stem\""))
+            .expect("chord stem");
+        let stem_geometry = stem
+            .split(" d=\"M")
+            .nth(1)
+            .and_then(|value| value.split('\"').next())
+            .expect("stem geometry");
+        let (stem_start, stem_end) = stem_geometry.split_once('V').expect("stem endpoint");
+        let stem_start_y = stem_start
+            .split_whitespace()
+            .nth(1)
+            .and_then(|value| value.parse::<i32>().ok())
+            .expect("stem start y");
+        let stem_end_y = stem_end.parse::<i32>().expect("stem end y");
+        let expected_start_y = if should_extend_up {
+            anchor_y - 1
+        } else {
+            anchor_y + 19
+        };
+        assert_eq!(stem_start_y, expected_start_y, "{svg}");
+        assert_eq!(stem_end_y < stem_start_y, should_extend_up, "{svg}");
 
         fs::remove_dir_all(directory).expect("remove test directory");
     }
