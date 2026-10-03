@@ -185,6 +185,66 @@ fn spaces_sequential_notes_according_to_duration() {
 }
 
 #[test]
+fn enforces_minimum_clearance_between_vertically_overlapping_event_geometry() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("collision-spacing.musicxml");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let notes = "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>64th</type></note>\n      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>64th</type></note>\n      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>64th</type></note>";
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace(original_note, notes)
+        .replace("<divisions>1</divisions>", "<divisions>16</divisions>");
+    fs::write(&input, fixture).expect("write collision-spacing score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "collision-spacing score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("collision-spacing.svg")).expect("read SVG");
+    let tonehead_xs = svg
+        .lines()
+        .filter(|line| line.contains("class=\"tonehead\""))
+        .map(|line| {
+            line.split("transform=\"translate(")
+                .nth(1)
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse::<i32>().ok())
+                .expect("tonehead x position")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tonehead_xs.len(), 3, "{svg}");
+    assert!(
+        tonehead_xs.windows(2).all(|pair| pair[1] - pair[0] >= 14),
+        "overlapping C-tone bounds must have a 2-unit gap after stroke extents: {tonehead_xs:?}\n{svg}"
+    );
+    let barline = svg
+        .lines()
+        .find(|line| line.contains("id=\"barline-1\""))
+        .expect("final measure barline");
+    assert!(
+        barline.contains(" 28V108"),
+        "barline must span the staff only: {barline}"
+    );
+    let barline_x = barline
+        .split(" d=\"M")
+        .nth(1)
+        .and_then(|value| value.split(' ').next())
+        .and_then(|value| value.parse::<i32>().ok())
+        .expect("barline x position");
+    assert!(
+        barline_x - tonehead_xs[2] >= 20,
+        "barline should clear the final tonehead and flags: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn engraves_supported_note_durations_and_only_the_two_dotted_forms() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
@@ -420,6 +480,15 @@ fn canonical_score_covers_supported_mvp_content_in_self_contained_svg() {
     );
     let svg = fs::read_to_string(directory.join("canonical.svg")).expect("read SVG");
     assert_eq!(svg.matches("id=\"staff-line-").count(), 3, "{svg}");
+    let measure_barlines = svg
+        .lines()
+        .filter(|line| line.contains("id=\"barline-"))
+        .collect::<Vec<_>>();
+    assert_eq!(measure_barlines.len(), 2, "one barline per measure: {svg}");
+    assert!(
+        measure_barlines.iter().all(|line| line.contains(" 28V108")),
+        "measure barlines should span only the three staff lines: {svg}"
+    );
     assert!(svg.contains("id=\"octave-4\""), "{svg}");
     assert!(svg.contains("id=\"octave-5\""), "{svg}");
     assert!(svg.contains("id=\"meter-numerator\""), "{svg}");
