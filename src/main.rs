@@ -1468,38 +1468,24 @@ fn render_svg(score: &Score) -> String {
                 .collect::<Vec<_>>();
             let leftmost_tone_x = *tone_xs.iter().min().expect("event has tones");
             let rightmost_tone_x = *tone_xs.iter().max().expect("event has tones");
-            let stem_up = first_tone.octave < 5;
-            let stem_tone = if stem_up {
-                event
-                    .tones
-                    .iter()
-                    .min_by_key(|tone| lane_y(tone.tone.octave))
-                    .expect("pitched event has a tone")
-            } else {
-                event
-                    .tones
-                    .iter()
-                    .max_by_key(|tone| lane_y(tone.tone.octave))
-                    .expect("pitched event has a tone")
-            };
-            let stem_octave_y = lane_y(stem_tone.tone.octave);
-            let note_y = stem_octave_y + 9;
-            let stem_end = if stem_up {
-                stem_octave_y - 20
-            } else {
-                stem_octave_y + 37
-            };
+            let stem_tone_index = event
+                .tones
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, tone)| lane_y(tone.tone.octave))
+                .map(|(tone_index, _)| tone_index)
+                .expect("pitched event has a tone");
+            let stem_octave_y = lane_y(event.tones[stem_tone_index].tone.octave);
+            let stem_start = stem_octave_y - 1;
+            let stem_end = stem_octave_y - 30;
             let stem_id = if index == 0 {
                 "stem".to_owned()
             } else {
                 format!("stem-{index}")
             };
-            let stem_x = if stem_up {
-                rightmost_tone_x + 10
-            } else {
-                leftmost_tone_x
-            };
+            let stem_x = tone_xs[stem_tone_index] + 6;
             if event.duration_name != "whole" {
+                view_top = view_top.min(stem_end);
                 scene.add_path(
                     DrawLayer::Event,
                     stem_id,
@@ -1507,7 +1493,7 @@ fn render_svg(score: &Score) -> String {
                     Vec::new(),
                     PathGeometry::new(
                         None,
-                        format!("M{stem_x} {note_y}V{stem_end}"),
+                        format!("M{stem_x} {stem_start}V{stem_end}"),
                         PathStyle::MediumStroke,
                     ),
                 );
@@ -1523,32 +1509,16 @@ fn render_svg(score: &Score) -> String {
                     if event.beams.iter().any(|beam| beam.level == level) {
                         continue;
                     }
-                    let flag_y = if stem_up {
-                        stem_end + flag * 3
-                    } else {
-                        stem_end - flag * 3
-                    };
-                    let path = if stem_up {
-                        format!(
-                            "M{stem_x} {flag_y}C{} {} {} {} {} {}",
-                            stem_x + 9,
-                            flag_y + 2,
-                            stem_x + 10,
-                            flag_y + 7,
-                            stem_x + 5,
-                            flag_y + 10
-                        )
-                    } else {
-                        format!(
-                            "M{stem_x} {flag_y}C{} {} {} {} {} {}",
-                            stem_x - 9,
-                            flag_y + 2,
-                            stem_x - 10,
-                            flag_y + 7,
-                            stem_x - 5,
-                            flag_y + 10
-                        )
-                    };
+                    let flag_y = stem_end + flag * 3;
+                    let path = format!(
+                        "M{stem_x} {flag_y}C{} {} {} {} {} {}",
+                        stem_x + 9,
+                        flag_y + 2,
+                        stem_x + 10,
+                        flag_y + 7,
+                        stem_x + 5,
+                        flag_y + 10
+                    );
                     scene.add_path(
                         DrawLayer::Event,
                         format!("flag-{index}-{flag}"),
@@ -1561,11 +1531,7 @@ fn render_svg(score: &Score) -> String {
             for beam in &event.beams {
                 let level = usize::from(beam.level);
                 let offset = i32::from(beam.level - 1) * 4;
-                let beam_y = if stem_up {
-                    stem_end + offset
-                } else {
-                    stem_end - offset
-                };
+                let beam_y = stem_end + offset;
                 match beam.state {
                     BeamState::Begin => active_beams[level] = Some((stem_x, beam_y)),
                     BeamState::Continue | BeamState::End => {
@@ -1595,7 +1561,7 @@ fn render_svg(score: &Score) -> String {
                             -1
                         };
                         let end_x = stem_x + direction * 9;
-                        let end_y = if stem_up { beam_y + 4 } else { beam_y - 4 };
+                        let end_y = beam_y + 4;
                         scene.add_path(
                             DrawLayer::Beam,
                             format!("beam-hook-{index}-{level}"),

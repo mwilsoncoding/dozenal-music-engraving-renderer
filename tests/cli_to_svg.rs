@@ -281,6 +281,86 @@ fn engraves_supported_note_durations_and_only_the_two_dotted_forms() {
 }
 
 #[test]
+fn centers_stems_above_toneheads_with_a_vertical_gap() {
+    for octave in [4, 5, 9] {
+        let directory = scratch_dir();
+        fs::create_dir_all(&directory).expect("create test directory");
+        let input = directory.join(format!("centered-stem-{octave}.musicxml"));
+        let fixture = include_str!("fixtures/minimal.musicxml")
+            .replace("<octave>4</octave>", &format!("<octave>{octave}</octave>"));
+        fs::write(&input, fixture).expect("write centered-stem score");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(
+            output.status.success(),
+            "octave {octave} score failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let svg = fs::read_to_string(directory.join(format!("centered-stem-{octave}.svg")))
+            .expect("read SVG");
+        let tonehead = svg
+            .lines()
+            .find(|line| line.contains("id=\"tonehead\""))
+            .expect("tonehead path");
+        let tonehead_position = tonehead
+            .split("transform=\"translate(")
+            .nth(1)
+            .and_then(|value| value.split(')').next())
+            .map(|value| {
+                value
+                    .split_whitespace()
+                    .map(|coordinate| coordinate.parse::<i32>().expect("tonehead coordinate"))
+                    .collect::<Vec<_>>()
+            })
+            .expect("tonehead position");
+        let stem = svg
+            .lines()
+            .find(|line| line.contains("id=\"stem\""))
+            .expect("stem path");
+        let stem_geometry = stem
+            .split(" d=\"M")
+            .nth(1)
+            .and_then(|value| value.split('"').next())
+            .expect("stem geometry");
+        let (stem_start, stem_end) = stem_geometry.split_once('V').expect("stem endpoint");
+        let stem_start = stem_start
+            .split_whitespace()
+            .map(|coordinate| coordinate.parse::<i32>().expect("stem start coordinate"))
+            .collect::<Vec<_>>();
+        let stem_end_y = stem_end.parse::<i32>().expect("stem end y");
+        assert!(
+            (stem_start[0] - tonehead_position[0] - 6).abs() == 0,
+            "octave {octave} stem should be centered over its tonehead: {svg}"
+        );
+        assert_eq!(
+            stem_start[1],
+            tonehead_position[1] - 1,
+            "octave {octave} stem should start just above its tonehead: {svg}"
+        );
+        assert!(
+            stem_end_y < stem_start[1],
+            "stem should extend upward: {svg}"
+        );
+        let view_top = svg
+            .lines()
+            .next()
+            .and_then(|line| line.split("viewBox=\"0 ").nth(1))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<i32>().ok())
+            .expect("viewBox top");
+        assert!(
+            view_top <= stem_end_y,
+            "octave {octave} stem must fit in the viewBox: {svg}"
+        );
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+}
+
+#[test]
 fn engraves_stacked_chord_tones_as_one_event_with_shared_rhythm_geometry() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
