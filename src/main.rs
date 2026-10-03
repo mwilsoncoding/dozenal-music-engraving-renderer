@@ -1253,6 +1253,7 @@ struct DrawCommand {
 struct PathGeometry {
     transform: Option<(i32, i32)>,
     scale: u8,
+    rotation: Option<(i32, i32, i32)>,
     path_data: String,
     style: PathStyle,
 }
@@ -1262,6 +1263,7 @@ impl PathGeometry {
         Self {
             transform,
             scale: 1,
+            rotation: None,
             path_data: path_data.into(),
             style,
         }
@@ -1269,6 +1271,13 @@ impl PathGeometry {
 
     fn scaled(mut self, scale: u8) -> Self {
         self.scale = scale;
+        self
+    }
+
+    fn rotated_180_if(mut self, condition: bool) -> Self {
+        if condition {
+            self.rotation = Some((180, 6, 9));
+        }
         self
     }
 }
@@ -1641,13 +1650,28 @@ impl Scene {
             }
             .expect("writing to a String cannot fail");
         }
-        match (command.geometry.transform, command.geometry.scale) {
-            (Some((x, y)), 1) => write!(svg, " transform=\"translate({x} {y})\""),
-            (Some((x, y)), scale) => {
-                write!(svg, " transform=\"translate({x} {y}) scale({scale})\"")
+        let mut transforms = String::new();
+        if let Some((x, y)) = command.geometry.transform {
+            write!(transforms, "translate({x} {y})").expect("writing to a String cannot fail");
+        }
+        if command.geometry.scale != 1 {
+            if !transforms.is_empty() {
+                transforms.push(' ');
             }
-            (None, 1) => Ok(()),
-            (None, scale) => write!(svg, " transform=\"scale({scale})\""),
+            write!(transforms, "scale({})", command.geometry.scale)
+                .expect("writing to a String cannot fail");
+        }
+        if let Some((degrees, x, y)) = command.geometry.rotation {
+            if !transforms.is_empty() {
+                transforms.push(' ');
+            }
+            write!(transforms, "rotate({degrees} {x} {y})")
+                .expect("writing to a String cannot fail");
+        }
+        if !transforms.is_empty() {
+            write!(svg, " transform=\"{transforms}\"")
+        } else {
+            Ok(())
         }
         .expect("writing to a String cannot fail");
         write!(svg, " d=\"{}\"", command.geometry.path_data)
@@ -1705,7 +1729,8 @@ fn render_svg(score: &Score) -> String {
                         time_signature_glyph_path(meter.beats),
                         PathStyle::FilledGlyph,
                     )
-                    .scaled(2),
+                    .scaled(2)
+                    .rotated_180_if(meter.beats == 10),
                 );
                 scene.add_path(
                     DrawLayer::Event,
@@ -1717,7 +1742,8 @@ fn render_svg(score: &Score) -> String {
                         time_signature_glyph_path(meter.beat_type),
                         PathStyle::FilledGlyph,
                     )
-                    .scaled(2),
+                    .scaled(2)
+                    .rotated_180_if(meter.beat_type == 10),
                 );
                 x += 28;
                 meter_index += 1;
@@ -2001,7 +2027,8 @@ fn render_svg(score: &Score) -> String {
                         Some((tone_x, octave_y)),
                         glyph_path(tone.value),
                         PathStyle::FilledGlyph,
-                    ),
+                    )
+                    .rotated_180_if(tone.value == 10),
                 );
                 let tie_y = octave_y + 18;
                 if tone_event.tie_stop {
@@ -2132,7 +2159,7 @@ fn glyph_path(value: u8) -> &'static str {
         7 => "M1.5 1.5H11V3.6L5.6 16.5H2.7L8 3.9H1.5Z",
         8 => "M6 1C9 1 10.7 2.4 10.7 4.8 10.7 6.3 9.9 7.4 8.6 8 10.2 8.6 11 9.8 11 11.8 11 15.1 9.2 17 6 17 2.8 17 1 15.1 1 11.8 1 9.8 1.8 8.6 3.4 8 2.1 7.4 1.3 6.3 1.3 4.8 1.3 2.4 3 1 6 1ZM6 3.3C4.7 3.3 4 3.9 4 5.1 4 6.3 4.7 7 6 7S8 6.3 8 5.1C8 3.9 7.3 3.3 6 3.3ZM6 9.3C4.4 9.3 3.6 10.1 3.6 11.9 3.6 13.7 4.4 14.6 6 14.6S8.4 13.7 8.4 11.9C8.4 10.1 7.6 9.3 6 9.3Z",
         9 => "M3.1 16.7L1.7 14.8C3.6 13.6 5.3 12.2 6.6 10.5 6 10.9 5.2 11.1 4.5 11.1 2.2 11.1 1 9.3 1 6.5 1 3.1 2.9 1 5.9 1 9 1 11 3.1 11 6.5 11 10.8 7.8 14.6 3.1 16.7ZM5.9 8.8C7.5 8.8 8.4 7.9 8.4 6.1 8.4 4.3 7.6 3.4 5.9 3.4 4.3 3.4 3.6 4.3 3.6 6.1 3.6 7.9 4.3 8.8 5.9 8.8Z",
-        10 => "M10.5 14.5V8.5C10.5 7.7 9.8 7 9 7H4V4H9C9.6 4 10.5 3.9 10.5 3V1H2V3H8.5V6H3C1.9 6 1 6.9 1 8V14.5C1 15.6 1.9 16.5 3 16.5H10.5V14.5Z",
+        10 => glyph_path(2),
         11 => "M10 3.1C9 1.7 7.7 1 5.7 1 3 1 1.4 2.4 1.4 4.7 1.4 6.3 2.2 7.4 3.6 8 2 8.5 1 9.8 1 11.8 1 14.8 3 17 6 17 8 17 9.4 16.1 10.6 14.5L8.8 13C8.1 14 7.2 14.5 6 14.5 4.4 14.5 3.6 13.6 3.6 11.8 3.6 10.1 4.4 9.3 6.3 9.3H7.5V7H6.2C4.6 7 3.9 6.3 3.9 4.9 3.9 3.7 4.5 3.3 5.8 3.3 6.8 3.3 7.6 3.7 8.2 4.6Z",
         _ => unreachable!("tone values are reduced to one dozenal digit"),
     }
@@ -2158,11 +2185,28 @@ fn time_signature_glyph_path(value: u8) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{glyph_path, parse_score, Meter};
+    use super::{glyph_path, parse_score, render_svg, Meter};
 
     #[test]
     fn tonehead_one_has_no_projecting_foot() {
         assert_eq!(glyph_path(1), "M2 5.1L6.1 1.5H8.8V16.5H5.9V5.1L3.3 7.2Z");
+    }
+
+    #[test]
+    fn dek_uses_the_two_outline_rotated_180_degrees() {
+        let source = include_str!("../tests/fixtures/minimal.musicxml").replace(
+            "<step>C</step><octave>4</octave>",
+            "<step>A</step><alter>1</alter><octave>4</octave>",
+        );
+        let score = parse_score(source.as_bytes()).expect("dek fixture should parse");
+        let svg = render_svg(&score);
+        let dek = svg
+            .lines()
+            .find(|line| line.contains("data-tone=\"10\""))
+            .expect("rendered dek tonehead");
+
+        assert!(dek.contains(&format!("d=\"{}\"", glyph_path(2))), "{dek}");
+        assert!(dek.contains("rotate(180 6 9)"), "{dek}");
     }
 
     #[test]
