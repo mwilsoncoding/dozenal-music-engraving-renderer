@@ -92,6 +92,35 @@ fn accepts_a_single_voice_with_a_nondefault_identifier() {
 }
 
 #[test]
+fn rejects_an_empty_voice_identifier_without_writing_svg() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("empty-voice.musicxml");
+    let fixture =
+        include_str!("fixtures/minimal.musicxml").replace("<voice>1</voice>", "<voice> </voice>");
+    fs::write(&input, fixture).expect("write score with empty voice identifier");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        !output.status.success(),
+        "empty voice identifier was accepted"
+    );
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostic.contains("voice> identifier must not be empty"));
+    assert!(diagnostic
+        .contains("XML path /score-partwise/part[@id='P1']/measure[@number='1']/note/voice"));
+    assert!(
+        !directory.join("empty-voice.svg").exists(),
+        "invalid score must not produce an SVG"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn spaces_sequential_notes_according_to_duration() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
