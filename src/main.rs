@@ -6,10 +6,48 @@ use std::process;
 mod xml;
 use xml::Element;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Tone {
     octave: u8,
     value: u8,
+}
+
+struct Event {
+    tone: Option<Tone>,
+    duration_units: u32,
+    duration_name: &'static str,
+    dots: u8,
+    tie_start: bool,
+    tie_stop: bool,
+    beams: Vec<BeamMark>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BeamMark {
+    level: u8,
+    state: BeamState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BeamState {
+    Begin,
+    Continue,
+    End,
+}
+
+struct Measure {
+    events: Vec<Event>,
+    meter: Option<Meter>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Meter {
+    beats: u8,
+    beat_type: u8,
+}
+
+struct Score {
+    measures: Vec<Measure>,
 }
 
 fn main() {
@@ -68,7 +106,7 @@ fn parse_args() -> Result<(PathBuf, PathBuf), String> {
     Ok((input, output))
 }
 
-fn parse_score(source: &[u8]) -> Result<Tone, String> {
+fn parse_score(source: &[u8]) -> Result<Score, String> {
     let elements = xml::parse(source).map_err(|error| error.to_string())?;
     let root = root_element(&elements)?;
     if !elements[root].namespace.is_empty() || elements[root].name != "score-partwise" {
@@ -89,7 +127,8 @@ fn parse_score(source: &[u8]) -> Result<Tone, String> {
             "unsupported MusicXML namespace on an element; expected no namespace".to_owned(),
         ));
     }
-    let value_errors = collect_value_errors(&elements);
+    let mut value_errors = collect_value_errors(&elements);
+    value_errors.extend(collect_duration_errors(&elements));
     if !value_errors.is_empty() {
         return Err(value_errors.join("\n"));
     }
@@ -112,63 +151,479 @@ fn parse_score(source: &[u8]) -> Result<Tone, String> {
         ));
     }
     require_container_text(&elements[part])?;
-    let [measure] = exact_children(&elements, part, &["measure"])?;
-    require_attribute(&elements[measure], "number", "1")?;
-    require_container_text(&elements[measure])?;
-    let [attributes, note] = exact_children(&elements, measure, &["attributes", "note"])?;
+    require_container_text(&elements[part])?;
+    let mut divisions = None;
+    let mut transposition = 0;
+    let mut active_meter = None;
+    let mut pending_tie: Option<Tone> = None;
+    let mut active_beams = [false; 5];
+    let mut measures = Vec::new();
+    for measure_id in &elements[part].children {
+        let measure_element = &elements[*measure_id];
+        if measure_element.name != "measure" {
+            return Err(element_diagnostic(
+                measure_element,
+                "unsupported shape: <part> may contain only <measure> elements".to_owned(),
+            ));
+        }
+        required_attribute(measure_element, "number")?;
+        require_container_text(measure_element)?;
+        let mut events = Vec::new();
+        for child in &measure_element.children {
+            let element = &elements[*child];
+            match element.name.as_str() {
+                "attributes" => {
+                    require_no_attributes(element)?;
+                    require_container_text(element)?;
+                    let mut saw_divisions = false;
+                    let mut saw_transpose = false;
+                    let mut saw_time = false;
+                    for attribute in &element.children {
+                        let attribute_element = &elements[*attribute];
+                        match attribute_element.name.as_str() {
+                            "divisions" if !saw_divisions => {
+                                let value = leaf_text(attribute_element)?
+                                    .parse::<u32>()
+                                    .ok()
+                                    .filter(|value| *value > 0)
+                                    .ok_or_else(|| {
+                                        element_diagnostic(
+                                            attribute_element,
+                                            "<divisions> must be a positive integer".to_owned(),
+                                        )
+                                    })?;
+                                divisions = Some(value);
+                                saw_divisions = true;
+                            }
+                            "transpose" if !saw_transpose => {
+                                transposition = transpose_semitones(&elements, *attribute)?;
+                                saw_transpose = true;
+                            }
+                            "time" if !saw_time => {
+                                active_meter = Some(parse_time(&elements, *attribute)?);
+                                saw_time = true;
+                            }
+                            _ => {
+                                return Err(element_diagnostic(
+                                    attribute_element,
+                                    "unsupported score attribute".to_owned(),
+                                ));
+                            }
+                        }
+                    }
+                    if element.children.is_empty() {
+                        return Err(element_diagnostic(
+                            element,
+                            "unsupported shape: <attributes> may not be empty".to_owned(),
+                        ));
+                    }
+                }
+                "note" => {
+                    let divisions = divisions.ok_or_else(|| {
+                        element_diagnostic(
+                            element,
+                            "a positive <divisions> value is required before note events"
+                                .to_owned(),
+                        )
+                    })?;
+                    let event = parse_note(&elements, *child, divisions, transposition)?;
+                    validate_beam_group(element, &event, &mut active_beams)?;
+                    if let Some(tied_tone) = pending_tie.take() {
+                        if !event.tie_stop {
+                            return Err(element_diagnostic(
+                                element,
+                                "tie start must connect to the next equal concert pitch".to_owned(),
+                            ));
+                        }
+                        if event.tone.as_ref() != Some(&tied_tone) {
+                            return Err(element_diagnostic(
+                                element,
+                                "tie stop must match the preceding concert pitch".to_owned(),
+                            ));
+                        }
+                    } else if event.tie_stop {
+                        return Err(element_diagnostic(
+                            element,
+                            "tie stop has no preceding tie start".to_owned(),
+                        ));
+                    }
+                    if event.tie_start {
+                        pending_tie = event.tone;
+                        if pending_tie.is_none() {
+                            return Err(element_diagnostic(
+                                element,
+                                "ties may connect only pitched events".to_owned(),
+                            ));
+                        }
+                    }
+                    events.push(event);
+                }
+                _ => {
+                    return Err(element_diagnostic(
+                        element,
+                        format!("unsupported measure element <{}>", element.name),
+                    ));
+                }
+            }
+        }
+        if events.is_empty() {
+            return Err(element_diagnostic(
+                measure_element,
+                "unsupported score: a measure must contain at least one event".to_owned(),
+            ));
+        }
+        measures.push(Measure {
+            events,
+            meter: active_meter,
+        });
+    }
+    if measures.is_empty() {
+        return Err(element_diagnostic(
+            &elements[part],
+            "unsupported score: <part> must contain at least one measure".to_owned(),
+        ));
+    }
+    if pending_tie.is_some() {
+        return Err(element_diagnostic(
+            &elements[part],
+            "tie start has no matching tie stop".to_owned(),
+        ));
+    }
+    if active_beams.iter().skip(1).any(|active| *active) {
+        return Err(element_diagnostic(
+            &elements[part],
+            "beam group is missing an end marker".to_owned(),
+        ));
+    }
 
-    require_no_attributes(&elements[attributes])?;
-    require_container_text(&elements[attributes])?;
-    let attribute_children = &elements[attributes].children;
-    let divisions_ids = attribute_children
+    Ok(Score { measures })
+}
+
+fn parse_time(elements: &[Element], time: usize) -> Result<Meter, String> {
+    let element = &elements[time];
+    require_no_attributes(element)?;
+    require_container_text(element)?;
+    let [beats, beat_type] = exact_children(elements, time, &["beats", "beat-type"])?;
+    let parse_digit = |id| -> Result<u8, String> {
+        let text = leaf_text(&elements[id])?;
+        text.parse::<u8>()
+            .ok()
+            .filter(|value| (1..=9).contains(value))
+            .ok_or_else(|| {
+                element_diagnostic(
+                    &elements[id],
+                    "unsupported time signature; beats and beat-type must each be one digit from 1 through 9"
+                        .to_owned(),
+                )
+            })
+    };
+    Ok(Meter {
+        beats: parse_digit(beats)?,
+        beat_type: parse_digit(beat_type)?,
+    })
+}
+
+fn validate_beam_group(
+    note: &Element,
+    event: &Event,
+    active_beams: &mut [bool; 5],
+) -> Result<(), String> {
+    let mut current_levels = [false; 5];
+    for beam in &event.beams {
+        current_levels[usize::from(beam.level)] = true;
+    }
+    for level in 1..=4 {
+        if active_beams[level] && !current_levels[level] {
+            return Err(element_diagnostic(
+                note,
+                format!("beam level {level} group is interrupted"),
+            ));
+        }
+    }
+    for beam in &event.beams {
+        let index = usize::from(beam.level);
+        match beam.state {
+            BeamState::Begin if active_beams[index] => {
+                return Err(element_diagnostic(
+                    note,
+                    format!(
+                        "beam level {} begins before the prior group ends",
+                        beam.level
+                    ),
+                ));
+            }
+            BeamState::Begin => active_beams[index] = true,
+            BeamState::Continue | BeamState::End if !active_beams[index] => {
+                return Err(element_diagnostic(
+                    note,
+                    format!("beam level {} continues without a begin marker", beam.level),
+                ));
+            }
+            BeamState::Continue => {}
+            BeamState::End => active_beams[index] = false,
+        }
+    }
+    Ok(())
+}
+
+fn parse_note(
+    elements: &[Element],
+    note: usize,
+    divisions: u32,
+    transposition: i32,
+) -> Result<Event, String> {
+    let note_element = &elements[note];
+    require_no_attributes(note_element)?;
+    require_container_text(note_element)?;
+    if note_element
+        .children
         .iter()
-        .copied()
-        .filter(|child| elements[*child].name == "divisions")
-        .collect::<Vec<_>>();
-    let transpose_ids = attribute_children
-        .iter()
-        .copied()
-        .filter(|child| elements[*child].name == "transpose")
-        .collect::<Vec<_>>();
-    if divisions_ids.len() != 1
-        || transpose_ids.len() > 1
-        || attribute_children
-            .iter()
-            .any(|child| !matches!(elements[*child].name.as_str(), "divisions" | "transpose"))
+        .any(|child| elements[*child].name == "chord")
     {
         return Err(element_diagnostic(
-            &elements[attributes],
-            "unsupported shape: <attributes> requires one <divisions> and optional <transpose>"
-                .to_owned(),
+            note_element,
+            "chords are unsupported until task 26".to_owned(),
         ));
     }
-    let divisions = divisions_ids[0];
-    if leaf_text(&elements[divisions])? != "1" {
-        return Err(element_diagnostic(
-            &elements[divisions],
-            "unsupported score: divisions must be 1".to_owned(),
-        ));
-    }
-    let transposition = transpose_ids
+    let children = &note_element.children;
+    let is_rest = children
         .first()
-        .map(|transpose| transpose_semitones(&elements, *transpose))
-        .transpose()?
-        .unwrap_or(0);
-
-    require_no_attributes(&elements[note])?;
-    require_container_text(&elements[note])?;
-    let [pitch, duration, voice, note_type] =
-        exact_children(&elements, note, &["pitch", "duration", "voice", "type"])?;
-    if leaf_text(&elements[duration])? != "1"
-        || leaf_text(&elements[voice])? != "1"
-        || leaf_text(&elements[note_type])? != "quarter"
-    {
+        .is_some_and(|child| elements[*child].name == "rest");
+    let event_element = children.first().copied().ok_or_else(|| {
+        element_diagnostic(note_element, "unsupported empty note event".to_owned())
+    })?;
+    if elements[event_element].name != if is_rest { "rest" } else { "pitch" } {
         return Err(element_diagnostic(
-            &elements[note],
-            "unsupported score: only one quarter-note event in voice 1 is supported".to_owned(),
+            note_element,
+            "unsupported note shape; expected <pitch> or <rest> first".to_owned(),
         ));
     }
+    let mut position = 1;
+    let duration = *children.get(position).ok_or_else(|| {
+        element_diagnostic(note_element, "note event requires <duration>".to_owned())
+    })?;
+    if elements[duration].name != "duration" {
+        return Err(element_diagnostic(
+            &elements[duration],
+            "expected <duration> after <pitch> or <rest>".to_owned(),
+        ));
+    }
+    position += 1;
+    let mut tie_start = false;
+    let mut tie_stop = false;
+    while children
+        .get(position)
+        .is_some_and(|child| elements[*child].name == "tie")
+    {
+        let tie = children[position];
+        let tie_type = required_attribute(&elements[tie], "type")?;
+        require_container_text(&elements[tie])?;
+        if !elements[tie].children.is_empty() {
+            return Err(element_diagnostic(
+                &elements[tie],
+                "<tie> must be empty".to_owned(),
+            ));
+        }
+        match tie_type {
+            "start" if !tie_start => tie_start = true,
+            "stop" if !tie_stop => tie_stop = true,
+            _ => {
+                return Err(element_diagnostic(
+                    &elements[tie],
+                    "tie type must be one unique 'start' and/or 'stop'".to_owned(),
+                ));
+            }
+        }
+        position += 1;
+    }
+    let voice = *children.get(position).ok_or_else(|| {
+        element_diagnostic(note_element, "note event requires <voice>".to_owned())
+    })?;
+    position += 1;
+    let note_type = *children
+        .get(position)
+        .ok_or_else(|| element_diagnostic(note_element, "note event requires <type>".to_owned()))?;
+    position += 1;
+    let dot = if children
+        .get(position)
+        .is_some_and(|child| elements[*child].name == "dot")
+    {
+        let dot = children[position];
+        if !elements[dot].attributes.is_empty() || !elements[dot].children.is_empty() {
+            return Err(element_diagnostic(
+                &elements[dot],
+                "<dot> must be empty and have no attributes".to_owned(),
+            ));
+        }
+        position += 1;
+        Some(dot)
+    } else {
+        None
+    };
+    let mut beams = Vec::new();
+    while children
+        .get(position)
+        .is_some_and(|child| elements[*child].name == "beam")
+    {
+        let beam = children[position];
+        let level = required_attribute(&elements[beam], "number")?
+            .parse::<u8>()
+            .ok()
+            .filter(|level| (1..=4).contains(level))
+            .ok_or_else(|| {
+                element_diagnostic(
+                    &elements[beam],
+                    "beam number must be 1 through 4".to_owned(),
+                )
+            })?;
+        if !elements[beam].children.is_empty() {
+            return Err(element_diagnostic(
+                &elements[beam],
+                "<beam> must be text only".to_owned(),
+            ));
+        }
+        let state = match elements[beam].text.trim() {
+            "begin" => BeamState::Begin,
+            "continue" => BeamState::Continue,
+            "end" => BeamState::End,
+            value => {
+                return Err(element_diagnostic(
+                    &elements[beam],
+                    format!("unsupported beam value {value:?}"),
+                ));
+            }
+        };
+        if beams
+            .iter()
+            .any(|existing: &BeamMark| existing.level == level)
+        {
+            return Err(element_diagnostic(
+                &elements[beam],
+                format!("duplicate beam level {level}"),
+            ));
+        }
+        beams.push(BeamMark { level, state });
+        position += 1;
+    }
+    if position != children.len() {
+        return Err(element_diagnostic(
+            note_element,
+            "unsupported note content after beam declarations".to_owned(),
+        ));
+    }
+    if is_rest {
+        require_no_attributes(&elements[event_element])?;
+        require_container_text(&elements[event_element])?;
+        if !elements[event_element].children.is_empty() {
+            return Err(element_diagnostic(
+                &elements[event_element],
+                "unsupported rest shape".to_owned(),
+            ));
+        }
+    }
+    if leaf_text(&elements[voice])? != "1" {
+        return Err(element_diagnostic(
+            &elements[voice],
+            "only voice 1 is supported".to_owned(),
+        ));
+    }
+    let (duration_name, base_units, mark_count) = match leaf_text(&elements[note_type])? {
+        "whole" => ("whole", 64, 0),
+        "half" => ("half", 32, 2),
+        "quarter" => ("quarter", 16, 0),
+        "eighth" => ("eighth", 8, 0),
+        "16th" => ("16th", 4, 0),
+        "32nd" => ("32nd", 2, 0),
+        "64th" => ("64th", 1, 0),
+        value => {
+            return Err(element_diagnostic(
+                &elements[note_type],
+                format!("unsupported note type {value:?}"),
+            ));
+        }
+    };
+    let dots = usize::from(dot.is_some());
+    if dots > 0 && !matches!(duration_name, "quarter" | "half") {
+        return Err(element_diagnostic(
+            &elements[note_type],
+            "only dotted quarter and dotted half notes are supported".to_owned(),
+        ));
+    }
+    if is_rest && dots != 0 {
+        return Err(element_diagnostic(
+            &elements[dot.expect("dot exists")],
+            "dotted rests are not supported".to_owned(),
+        ));
+    }
+    if is_rest && !beams.is_empty() {
+        return Err(element_diagnostic(
+            note_element,
+            "beams on rests are unsupported".to_owned(),
+        ));
+    }
+    let maximum_beam_level = match duration_name {
+        "eighth" => 1,
+        "16th" => 2,
+        "32nd" => 3,
+        "64th" => 4,
+        _ => 0,
+    };
+    if let Some(beam) = beams.iter().find(|beam| beam.level > maximum_beam_level) {
+        return Err(element_diagnostic(
+            &elements[note_type],
+            format!(
+                "beam level {} is not supported by {} notes",
+                beam.level, duration_name
+            ),
+        ));
+    }
+    let duration_units = if dots == 0 {
+        base_units
+    } else {
+        base_units + base_units / 2
+    };
+    let duration_marks = if dots == 1 {
+        if duration_name == "quarter" {
+            1
+        } else {
+            3
+        }
+    } else {
+        mark_count
+    };
+    let duration_ticks = leaf_text(&elements[duration])?
+        .parse::<u32>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            element_diagnostic(
+                &elements[duration],
+                "<duration> must be a positive integer".to_owned(),
+            )
+        })?;
+    if u64::from(duration_ticks) * 16 != u64::from(divisions) * u64::from(duration_units) {
+        return Err(element_diagnostic(
+            &elements[duration],
+            format!("duration {duration_ticks} does not match <type> at divisions {divisions}"),
+        ));
+    }
+    let tone = if is_rest {
+        None
+    } else {
+        Some(parse_pitch(elements, event_element, transposition)?)
+    };
+    Ok(Event {
+        tone,
+        duration_units,
+        duration_name,
+        dots: duration_marks,
+        tie_start,
+        tie_stop,
+        beams,
+    })
+}
 
+fn parse_pitch(elements: &[Element], pitch: usize, transposition: i32) -> Result<Tone, String> {
     require_no_attributes(&elements[pitch])?;
     require_container_text(&elements[pitch])?;
     let pitch_children = &elements[pitch].children;
@@ -255,7 +710,6 @@ fn parse_score(source: &[u8]) -> Result<Tone, String> {
             format!("unsupported concert pitch octave {octave}; expected 0 through 9"),
         ));
     }
-
     Ok(Tone {
         octave: octave as u8,
         value: absolute_pitch.rem_euclid(12) as u8,
@@ -385,10 +839,7 @@ fn collect_value_errors(elements: &[Element]) -> Vec<String> {
         }
         let value = element.text.trim();
         let message = match element.name.as_str() {
-            "divisions" if value != "1" => Some("unsupported score: <divisions> must be 1"),
-            "duration" if value != "1" => Some("unsupported score: <duration> must be 1"),
             "voice" if value != "1" => Some("unsupported score: <voice> must be 1"),
-            "type" if value != "quarter" => Some("unsupported score: <type> must be quarter"),
             "alter"
                 if value
                     .parse::<i32>()
@@ -409,6 +860,76 @@ fn collect_value_errors(elements: &[Element]) -> Vec<String> {
         if let Some(message) = message {
             errors.push(element_diagnostic(element, message.to_owned()));
         }
+    }
+    errors
+}
+
+fn collect_duration_errors(elements: &[Element]) -> Vec<String> {
+    let mut errors = Vec::new();
+    let mut active_divisions = None;
+    for (index, element) in elements.iter().enumerate() {
+        if element.name == "divisions" && element.children.is_empty() {
+            active_divisions = element
+                .text
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|value| *value > 0);
+        }
+        if element.name != "note" {
+            continue;
+        }
+        let Some(divisions) = active_divisions else {
+            continue;
+        };
+        let duration = element
+            .children
+            .iter()
+            .find(|child| elements[**child].name == "duration")
+            .copied();
+        let note_type = element
+            .children
+            .iter()
+            .find(|child| elements[**child].name == "type")
+            .copied();
+        let (Some(duration), Some(note_type)) = (duration, note_type) else {
+            continue;
+        };
+        let base_units = match elements[note_type].text.trim() {
+            "whole" => 64u64,
+            "half" => 32,
+            "quarter" => 16,
+            "eighth" => 8,
+            "16th" => 4,
+            "32nd" => 2,
+            "64th" => 1,
+            _ => continue,
+        };
+        let dots = element
+            .children
+            .iter()
+            .filter(|child| elements[**child].name == "dot")
+            .count();
+        if dots > 1 || (dots == 1 && !matches!(elements[note_type].text.trim(), "quarter" | "half"))
+        {
+            continue;
+        }
+        let duration_ticks = elements[duration].text.trim().parse::<u32>().ok();
+        let Some(duration_ticks) = duration_ticks.filter(|value| *value > 0) else {
+            continue;
+        };
+        let duration_units = if dots == 1 {
+            base_units + base_units / 2
+        } else {
+            base_units
+        };
+        if u64::from(duration_ticks) * 16 != u64::from(divisions) * duration_units {
+            errors.push(element_diagnostic(
+                &elements[duration],
+                format!("duration {duration_ticks} does not match <type> at divisions {divisions}"),
+            ));
+        }
+        let _ = index;
     }
     errors
 }
@@ -526,50 +1047,224 @@ fn leaf_text(element: &Element) -> Result<&str, String> {
     Ok(text)
 }
 
-fn render_svg(tone: &Tone) -> String {
-    let octave_y = lane_y(tone.octave);
-    let note_y = octave_y + 9;
-    let stem_end = if tone.octave < 5 {
-        octave_y - 20
-    } else {
-        octave_y + 37
-    };
-    let stem = format!(
-        "<path id=\"stem\" d=\"M102 {note_y}V{stem_end}\" stroke=\"#171717\" stroke-width=\"1.5\"/>"
-    );
-    let mut ledger_lines = String::new();
-    let ledger_octaves: Vec<u8> = if tone.octave < 4 {
-        (tone.octave..=3).rev().collect()
-    } else if tone.octave > 5 {
-        (6..=tone.octave).collect()
-    } else {
-        Vec::new()
-    };
-    for octave in ledger_octaves {
-        let ledger_y = lane_y(octave) + 9;
-        ledger_lines.push_str(&format!(
-            "<path id=\"ledger-line-octave-{octave}\" d=\"M84 {ledger_y}H112\" stroke=\"#171717\"/>"
-        ));
+fn render_svg(score: &Score) -> String {
+    let mut event_markup = String::new();
+    let mut beam_markup = String::new();
+    let mut tie_markup = String::new();
+    let mut x = 92;
+    let mut right = 128;
+    let mut view_top = 0;
+    let mut view_bottom = 88;
+    let mut index = 0;
+    let mut active_meter = None;
+    let mut meter_index = 0;
+    let mut pending_tie_path: Option<(i32, i32)> = None;
+    let mut active_beams = [None; 5];
+    for measure in &score.measures {
+        if let Some(meter) = measure.meter {
+            if active_meter != Some(meter) {
+                let numerator_id = if meter_index == 0 {
+                    "meter-numerator".to_owned()
+                } else {
+                    format!("meter-numerator-{meter_index}")
+                };
+                let denominator_id = if meter_index == 0 {
+                    "meter-denominator".to_owned()
+                } else {
+                    format!("meter-denominator-{meter_index}")
+                };
+                event_markup.push_str(&format!(
+                    "<path id=\"{numerator_id}\" transform=\"translate({} 30)\" d=\"{}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n<path id=\"{denominator_id}\" transform=\"translate({} 50)\" d=\"{}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n",
+                    x - 24,
+                    glyph_path(meter.beats),
+                    x - 24,
+                    glyph_path(meter.beat_type)
+                ));
+                x += 28;
+                meter_index += 1;
+            }
+            active_meter = Some(meter);
+        }
+        for event in &measure.events {
+            let Some(tone) = event.tone.as_ref() else {
+                event_markup.push_str(&format!(
+                    "<path id=\"rest-{index}\" class=\"rest\" data-duration=\"{}\" transform=\"translate({x} 40)\" d=\"{}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n",
+                    event.duration_name,
+                    rest_glyph_path(event.duration_name)
+                ));
+                right = right.max(x + 24);
+                x += (event.duration_units * 5).div_ceil(2).max(12) as i32;
+                index += 1;
+                continue;
+            };
+            let octave_y = lane_y(tone.octave);
+            let note_y = octave_y + 9;
+            let stem_end = if tone.octave < 5 {
+                octave_y - 20
+            } else {
+                octave_y + 37
+            };
+            let stem_id = if index == 0 {
+                "stem".to_owned()
+            } else {
+                format!("stem-{index}")
+            };
+            let stem_x = x + if tone.octave < 5 { 10 } else { 0 };
+            if event.duration_name != "whole" {
+                event_markup.push_str(&format!(
+                    "<path id=\"{stem_id}\" class=\"stem\" d=\"M{stem_x} {note_y}V{stem_end}\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n"
+                ));
+                let flag_count = match event.duration_name {
+                    "eighth" => 1,
+                    "16th" => 2,
+                    "32nd" => 3,
+                    "64th" => 4,
+                    _ => 0,
+                };
+                for flag in 0..flag_count {
+                    let level = (flag + 1) as u8;
+                    if event.beams.iter().any(|beam| beam.level == level) {
+                        continue;
+                    }
+                    let flag_y = if tone.octave < 5 {
+                        stem_end + flag * 3
+                    } else {
+                        stem_end - flag * 3
+                    };
+                    let path = if tone.octave < 5 {
+                        format!(
+                            "M{stem_x} {flag_y}C{} {} {} {} {} {}",
+                            stem_x + 9,
+                            flag_y + 2,
+                            stem_x + 10,
+                            flag_y + 7,
+                            stem_x + 5,
+                            flag_y + 10
+                        )
+                    } else {
+                        format!(
+                            "M{stem_x} {flag_y}C{} {} {} {} {} {}",
+                            stem_x - 9,
+                            flag_y + 2,
+                            stem_x - 10,
+                            flag_y + 7,
+                            stem_x - 5,
+                            flag_y + 10
+                        )
+                    };
+                    event_markup.push_str(&format!(
+                        "<path id=\"flag-{index}-{flag}\" class=\"flag\" d=\"{path}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n"
+                    ));
+                }
+            }
+            for beam in &event.beams {
+                let level = usize::from(beam.level);
+                let offset = i32::from(beam.level - 1) * 4;
+                let beam_y = if tone.octave < 5 {
+                    stem_end + offset
+                } else {
+                    stem_end - offset
+                };
+                match beam.state {
+                    BeamState::Begin => active_beams[level] = Some((stem_x, beam_y)),
+                    BeamState::Continue | BeamState::End => {
+                        let (start_x, start_y) =
+                            active_beams[level].expect("beam group is validated before rendering");
+                        beam_markup.push_str(&format!(
+                            "<path id=\"beam-{index}-{level}\" class=\"beam\" data-level=\"{level}\" d=\"M{start_x} {start_y}L{stem_x} {beam_y}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"3\" stroke-linecap=\"square\"/>\n"
+                        ));
+                        if beam.state == BeamState::Continue {
+                            active_beams[level] = Some((stem_x, beam_y));
+                        } else {
+                            active_beams[level] = None;
+                        }
+                    }
+                }
+            }
+            for mark in 0..event.dots {
+                let (mark_x, mark_y) = match (event.duration_name, event.dots, mark) {
+                    ("half", 2, _) => (x + 14, octave_y + 5 + i32::from(mark) * 7),
+                    ("half", 3, 0..=1) => (x + 14, octave_y + 5 + i32::from(mark) * 7),
+                    ("half", 3, _) => (x + 19, octave_y + 8),
+                    _ => (x + 14, note_y),
+                };
+                event_markup.push_str(&format!(
+                    "<path id=\"duration-mark-{index}-{mark}\" class=\"duration-mark\" d=\"M{mark_x} {mark_y}a1.2 1.2 0 1 0 2.4 0a1.2 1.2 0 1 0 -2.4 0\" fill=\"#171717\"/>\n"
+                ));
+            }
+            let ledger_octaves: Vec<u8> = if tone.octave < 4 {
+                (tone.octave..=3).rev().collect()
+            } else if tone.octave > 5 {
+                (6..=tone.octave).collect()
+            } else {
+                Vec::new()
+            };
+            for octave in ledger_octaves {
+                let ledger_y = lane_y(octave) + 9;
+                event_markup.push_str(&format!(
+                    "<path id=\"ledger-line-octave-{octave}-event-{index}\" d=\"M{} {ledger_y}H{}\" stroke=\"#171717\"/>\n",
+                    x - 8,
+                    x + 20
+                ));
+            }
+            let tonehead_id = if index == 0 {
+                "tonehead".to_owned()
+            } else {
+                format!("tonehead-{index}")
+            };
+            event_markup.push_str(&format!(
+                "<path id=\"{tonehead_id}\" class=\"tonehead\" data-tone=\"{}\" data-octave=\"{}\" data-duration=\"{}\" transform=\"translate({x} {octave_y})\" d=\"{}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n",
+                tone.value,
+                tone.octave,
+                event.duration_name,
+                glyph_path(tone.value)
+            ));
+            if event.tie_stop {
+                if let Some((start_x, tie_y)) = pending_tie_path.take() {
+                    let end_x = x + 5;
+                    tie_markup.push_str(&format!(
+                        "<path id=\"tie-{index}\" class=\"tie\" d=\"M{start_x} {tie_y}C{} {} {} {} {end_x} {tie_y}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n",
+                        start_x + 10,
+                        tie_y + 9,
+                        end_x - 10,
+                        tie_y + 9
+                    ));
+                    view_bottom = view_bottom.max(tie_y + 10);
+                }
+            }
+            if event.tie_start {
+                pending_tie_path = Some((x + 8, octave_y + 18));
+            }
+            view_top = view_top.min(octave_y - 20);
+            view_bottom = view_bottom.max(octave_y + 37);
+            right = right.max(x + 28);
+            x += (event.duration_units * 5).div_ceil(2).max(12) as i32;
+            index += 1;
+        }
     }
-    let view_top = 0.min(octave_y - 4);
-    let view_bottom = 88.max(octave_y + 20);
+    let view_width = right + 12;
     let view_height = view_bottom - view_top;
     format!(
-		"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 {view_top} 140 {view_height}\" role=\"img\">\
-		 <path id=\"staff-line-1\" d=\"M12 28H128\" stroke=\"#171717\"/>\
-		 <path id=\"staff-line-2\" d=\"M12 48H128\" stroke=\"#171717\"/>\
-		 <path id=\"staff-line-3\" d=\"M12 68H128\" stroke=\"#171717\"/>\
-		 <path id=\"octave-5\" d=\"{}\" transform=\"translate(26 30)\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\
-		 <path id=\"octave-4\" d=\"{}\" transform=\"translate(26 50)\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\
-		 {ledger_lines}{stem}\
-		 <path id=\"tonehead\" data-tone=\"{}\" data-octave=\"{}\" transform=\"translate(92 {octave_y})\" d=\"{}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\
-		 </svg>\n",
-		glyph_path(5),
-		glyph_path(4),
-		tone.value,
-		tone.octave,
-		glyph_path(tone.value)
-	)
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 {view_top} {view_width} {view_height}\" role=\"img\">\n<path id=\"staff-line-1\" d=\"M12 28H{}\" stroke=\"#171717\"/>\n<path id=\"staff-line-2\" d=\"M12 48H{}\" stroke=\"#171717\"/>\n<path id=\"staff-line-3\" d=\"M12 68H{}\" stroke=\"#171717\"/>\n<path id=\"octave-5\" d=\"{}\" transform=\"translate(26 30)\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n<path id=\"octave-4\" d=\"{}\" transform=\"translate(26 50)\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n{beam_markup}{event_markup}{tie_markup}</svg>\n",
+        view_width - 12,
+        view_width - 12,
+        view_width - 12,
+        glyph_path(5),
+        glyph_path(4)
+    )
+}
+
+fn rest_glyph_path(duration_name: &str) -> &'static str {
+    match duration_name {
+        "whole" => "M2 5H10V8H2Z",
+        "half" => "M2 8H10V11H2Z",
+        "quarter" => "M5 1L9 4L4 8L8 11L5 15",
+        "eighth" => "M5 1L9 4L4 8L8 11L5 15M8 11L11 13",
+        "16th" => "M5 1L9 4L4 8L8 11L5 15M8 9L11 11M8 12L11 14",
+        "32nd" => "M5 1L9 4L4 8L8 11L5 15M8 7L11 9M8 10L11 12M8 13L11 15",
+        "64th" => "M5 1L9 4L4 8L8 11L5 15M8 5L11 7M8 8L11 10M8 11L11 13M8 14L11 16",
+        _ => unreachable!("duration was validated while parsing"),
+    }
 }
 
 fn lane_y(octave: u8) -> i32 {
