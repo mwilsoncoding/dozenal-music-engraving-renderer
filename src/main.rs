@@ -2097,7 +2097,7 @@ fn render_svg(score: &Score) -> String {
             let barline_span = ComponentBounds::filled(0.0, 28.0, 0.0, 108.0);
             for component in geometry.all() {
                 if component.overlaps_vertically(barline_span) {
-                    barline_x = barline_x.max((component.right + 2.5).ceil() as i32);
+                    barline_x = barline_x.max((component.right + 5.0).ceil() as i32);
                 }
             }
         }
@@ -2110,7 +2110,7 @@ fn render_svg(score: &Score) -> String {
         );
         final_barline_x = barline_x;
         right = right.max(barline_x + 12);
-        x = barline_x + 3;
+        x = barline_x + 4;
     }
     let view_width = right + 12;
     scene.view_top = view_top;
@@ -2297,14 +2297,14 @@ mod tests {
         assert!(
             svg.lines().any(|line| {
                 line.contains("id=\"beam-7-1\"")
-                    && line.contains("d=\"M491.25 40.50L506.75 40.50\"")
+                    && line.contains("d=\"M493.25 40.50L508.75 40.50\"")
             }),
             "primary mixed-duration beam: {svg}"
         );
         assert!(
             svg.lines().any(|line| {
                 line.contains("id=\"beam-7-2\"")
-                    && line.contains("d=\"M491.25 45.50L506.75 45.50\"")
+                    && line.contains("d=\"M493.25 45.50L508.75 45.50\"")
             }),
             "secondary beam should keep a 2-unit gap: {svg}"
         );
@@ -2318,7 +2318,7 @@ mod tests {
         );
         assert!(
             svg.lines().any(|line| {
-                line.contains("id=\"beam-hook-7-3\"") && line.contains("d=\"M506 50.5L497 50.5\"")
+                line.contains("id=\"beam-hook-7-3\"") && line.contains("d=\"M508 50.5L499 50.5\"")
             }),
             "partial hook should stay parallel with the same gap: {svg}"
         );

@@ -22,14 +22,14 @@
       <note><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><type>16th</type><beam number="1">begin</beam><beam number="2">begin</beam></note>
       <note><pitch><step>F</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>32nd</type><beam number="1">end</beam><beam number="2">end</beam><beam number="3">backward hook</beam></note>
       <note><pitch><step>F</step><alter>1</alter><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>64th</type></note>
-      <note><rest/><duration>32</duration><voice>1</voice><type>half</type></note>
-      <note><rest/><duration>8</duration><voice>1</voice><type>eighth</type></note>
       <note><rest/><duration>1</duration><voice>1</voice><type>64th</type></note>
+      <note><rest/><duration>8</duration><voice>1</voice><type>eighth</type></note>
+      <note><rest/><duration>32</duration><voice>1</voice><type>half</type></note>
     </measure>
     <measure number="4">
       <note><pitch><step>G</step><octave>4</octave></pitch><duration>24</duration><voice>1</voice><type>quarter</type><dot/></note>
-      <note><rest/><duration>32</duration><voice>1</voice><type>half</type></note>
       <note><rest/><duration>8</duration><voice>1</voice><type>eighth</type></note>
+      <note><rest/><duration>32</duration><voice>1</voice><type>half</type></note>
     </measure>
     <measure number="5">
       <note><pitch><step>G</step><alter>1</alter><octave>4</octave></pitch><duration>48</duration><voice>1</voice><type>half</type><dot/></note>
@@ -66,8 +66,7 @@
       <note><chord/><pitch><step>F</step><octave>8</octave></pitch><duration>16</duration><voice>1</voice><type>quarter</type></note>
       <note><chord/><pitch><step>F</step><alter>1</alter><octave>9</octave></pitch><duration>16</duration><voice>1</voice><type>quarter</type></note>
       <note><rest/><duration>16</duration><voice>1</voice><type>quarter</type></note>
-      <note><rest/><duration>16</duration><voice>1</voice><type>quarter</type></note>
-      <note><rest/><duration>16</duration><voice>1</voice><type>quarter</type></note>
+      <note><rest/><duration>32</duration><voice>1</voice><type>half</type></note>
     </measure>
   </part>
 </score-partwise>

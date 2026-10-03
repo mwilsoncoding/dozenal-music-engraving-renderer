@@ -307,6 +307,64 @@ fn enforces_minimum_clearance_between_vertically_overlapping_event_geometry() {
 }
 
 #[test]
+fn pads_events_from_both_sides_of_measure_barlines() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("barline-padding.musicxml");
+    let second_measure = r#"
+    <measure number="2">
+            <note><rest/><duration>1</duration><voice>1</voice><type>64th</type></note>
+    </measure>"#;
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<divisions>1</divisions>", "<divisions>16</divisions>")
+        .replace(
+            original_note,
+            "<note><rest/><duration>1</duration><voice>1</voice><type>64th</type></note>",
+        )
+        .replace("  </part>", &format!("{second_measure}\n  </part>"));
+    fs::write(&input, fixture).expect("write barline-padding score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "barline-padding score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("barline-padding.svg")).expect("read SVG");
+    let rest_xs = svg
+        .lines()
+        .filter(|line| line.contains("class=\"rest\""))
+        .map(|line| {
+            line.split("transform=\"translate(")
+                .nth(1)
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse::<i32>().ok())
+                .expect("tonehead x position")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rest_xs.len(), 2, "{svg}");
+    let barline_x = svg
+        .lines()
+        .find(|line| line.contains("id=\"barline-1\""))
+        .and_then(|line| line.split(" d=\"M").nth(1))
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse::<i32>().ok())
+        .expect("first barline x position");
+    let before_gap = f64::from(barline_x) - (f64::from(rest_xs[0]) + 13.845);
+    let after_gap = f64::from(rest_xs[1]) + 1.155 - f64::from(barline_x);
+    assert!(
+        before_gap >= 5.0 && after_gap >= 5.0,
+        "events should have at least 5 SVG units of padding on both sides of the barline (before={before_gap}, after={after_gap}): {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn engraves_supported_note_durations_and_only_the_two_dotted_forms() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
