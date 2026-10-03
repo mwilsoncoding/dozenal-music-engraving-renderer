@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prototype: Font-Referenced Dozenal Glyphs</title>
+  <style>
+    @font-face {
+      font-family: "DejaVu Reference";
+      src: url("./assets/fonts/DejaVuSans-Bold.ttf") format("truetype");
+      font-style: normal;
+      font-weight: 700;
+      font-display: block;
+    }
+
+    @font-face {
+      font-family: "Bravura Reference";
+      src: url("./assets/fonts/Bravura.otf") format("opentype");
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+    }
+
+    @font-face {
+      font-family: "Petaluma Reference";
+      src: url("./assets/fonts/Petaluma.otf") format("opentype");
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+    }
+
+    @font-face {
+      font-family: "Leland Reference";
+      src: url("./assets/fonts/Leland.otf") format("opentype");
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+    }
+
+    :root {
+      color-scheme: light;
+      --ink: #172b31;
+      --muted: #5b6b6c;
+      --paper: #f2f1eb;
+      --surface: #fffefa;
+      --rule: #c9ceca;
+      --accent: #b4513b;
+      --green: #28675d;
+      --ui-font: "DejaVu Reference", sans-serif;
+      --music-font: "Bravura Reference";
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      min-height: 100vh;
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: var(--ui-font);
+    }
+
+    body[data-variant="petaluma"] { --music-font: "Petaluma Reference"; }
+    body[data-variant="leland"] { --music-font: "Leland Reference"; }
+
+    main {
+      width: min(100% - 40px, 1120px);
+      margin: 0 auto;
+      padding: 38px 0 120px;
+    }
+
+    .topline {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 12px;
+      color: var(--green);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(30px, 5vw, 50px);
+      font-weight: 700;
+      line-height: 1.05;
+    }
+
+    .intro {
+      max-width: 760px;
+      margin: 12px 0 30px;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.55;
+    }
+
+    .font-name {
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .specimen-section {
+      display: grid;
+      grid-template-columns: minmax(180px, 0.8fr) minmax(0, 2fr);
+      gap: 24px;
+      border-top: 1px solid var(--rule);
+      padding: 24px 0;
+    }
+
+    .section-label {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    .section-note {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .sample-area {
+      min-width: 0;
+      background: var(--surface);
+      border: 1px solid var(--rule);
+      padding: 20px;
+    }
+
+    .sample-caption {
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .tone-run {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 4px 18px;
+      color: #111;
+      font-size: 36px;
+      line-height: 1.3;
+    }
+
+    .tone-run .glyph {
+      min-width: 0.55em;
+      text-align: center;
+      font-family: "DejaVu Reference", sans-serif;
+      font-weight: 700;
+    }
+
+    .meter-sample {
+      display: inline-grid;
+      grid-template-rows: 1fr 1fr;
+      align-items: center;
+      justify-items: center;
+      min-width: 66px;
+      color: #111;
+      font-family: var(--music-font), serif;
+      font-size: 50px;
+      line-height: 0.84;
+    }
+
+    .meter-sample .numerator,
+    .meter-sample .denominator {
+      display: block;
+    }
+
+    .music-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: end;
+      gap: 12px 22px;
+    }
+
+    .music-item {
+      display: grid;
+      justify-items: center;
+      gap: 8px;
+      min-width: 50px;
+      color: #111;
+    }
+
+    .music-glyph {
+      min-width: 42px;
+      text-align: center;
+      font-family: var(--music-font), serif;
+      font-size: 48px;
+      line-height: 1;
+    }
+
+    .music-item small {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .flag-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px 22px;
+      align-items: end;
+    }
+
+    .flag-item {
+      display: grid;
+      justify-items: center;
+      gap: 8px;
+      color: #111;
+    }
+
+    .flag-pair {
+      display: flex;
+      align-items: start;
+      gap: 4px;
+      height: 78px;
+    }
+
+    .stem-demo {
+      width: 2px;
+      height: 58px;
+      margin-top: 2px;
+      background: #111;
+    }
+
+    .flag-glyph {
+      font-family: var(--music-font), serif;
+      font-size: 47px;
+      line-height: 1;
+    }
+
+    .flag-item small {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .staff-sample {
+      position: relative;
+      height: 124px;
+      overflow: hidden;
+      background: repeating-linear-gradient(
+        to bottom,
+        transparent 0,
+        transparent 38px,
+        var(--rule) 39px,
+        var(--rule) 40px
+      );
+    }
+
+    .indicator {
+      position: absolute;
+      top: 42px;
+      left: 8px;
+      display: grid;
+      gap: 0;
+      color: #111;
+      font-family: "DejaVu Reference", sans-serif;
+      font-size: 22px;
+      font-weight: 700;
+      line-height: 0.86;
+    }
+
+    .staff-tone {
+      position: absolute;
+      top: 48px;
+      left: 110px;
+      color: #111;
+      font-family: "DejaVu Reference", sans-serif;
+      font-size: 34px;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    .music-signature {
+      position: absolute;
+      top: 41px;
+      left: 174px;
+      display: grid;
+      color: #111;
+      font-family: var(--music-font), serif;
+      font-size: 36px;
+      line-height: 0.82;
+      text-align: center;
+    }
+
+    .music-rest {
+      position: absolute;
+      top: 48px;
+      left: 250px;
+      color: #111;
+      font-family: var(--music-font), serif;
+      font-size: 40px;
+      line-height: 1;
+    }
+
+    .flag-on-staff {
+      position: absolute;
+      top: 8px;
+      left: 350px;
+      display: flex;
+      gap: 3px;
+      align-items: start;
+      color: #111;
+    }
+
+    .flag-on-staff .stem-demo { height: 46px; }
+    .flag-on-staff .flag-glyph { font-size: 40px; }
+
+    .custom-row {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      flex-wrap: wrap;
+    }
+
+    .custom-sample {
+      display: grid;
+      justify-items: center;
+      gap: 8px;
+      color: #111;
+    }
+
+    .custom-sample svg {
+      width: 54px;
+      height: 82px;
+      overflow: visible;
+    }
+
+    .custom-sample path {
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.3;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .custom-sample small {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .weights {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 28px;
+    }
+
+    .weight-sample {
+      display: grid;
+      gap: 8px;
+      font-family: "DejaVu Reference", sans-serif;
+      color: #111;
+    }
+
+    .weight-sample strong {
+      font-size: 45px;
+      line-height: 1;
+    }
+
+    .weight-sample small {
+      color: var(--muted);
+      font: 11px var(--ui-font), sans-serif;
+    }
+
+    .switcher {
+      position: fixed;
+      z-index: 5;
+      left: 50%;
+      bottom: 18px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      border: 1px solid #233a40;
+      background: #172b31;
+      color: #fffefa;
+      box-shadow: 0 8px 28px rgb(12 28 30 / 20%);
+      transform: translateX(-50%);
+    }
+
+    .switcher button {
+      width: 36px;
+      height: 36px;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+      font: 24px var(--ui-font), sans-serif;
+    }
+
+    .switcher-label {
+      min-width: 190px;
+      text-align: center;
+      font-size: 12px;
+    }
+
+    .license-note {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    @media (max-width: 680px) {
+      main { width: min(100% - 28px, 1120px); padding-top: 24px; }
+      .specimen-section { grid-template-columns: 1fr; gap: 14px; }
+      .sample-area { padding: 16px; }
+      .tone-run { gap: 6px 12px; font-size: 30px; }
+      .switcher-label { min-width: 145px; }
+    }
+  </style>
+</head>
+<body data-variant="bravura">
+  <main>
+    <header>
+      <div class="topline">
+        <span>Prototype · font-reference specimen</span>
+        <span id="active-font-name" class="font-name">Bravura 1.482</span>
+      </div>
+      <h1>Softer glyph references</h1>
+      <p class="intro">Compare DejaVu Sans Bold 700 for dozenal Toneheads with three SMuFL music-font references. The specimen uses font text only as a visual reference; final output remains hand-drawn SVG paths.</p>
+    </header>
+
+    <section class="specimen-section">
+      <div>
+        <h2 class="section-label">Toneheads and indicators</h2>
+        <p class="section-note">DejaVu Sans Bold 700 · 2.37</p>
+      </div>
+      <div class="sample-area">
+        <p class="sample-caption">Decimal Toneheads</p>
+        <div class="tone-run" aria-label="Toneheads zero through nine">
+          <span class="glyph">0</span><span class="glyph">1</span><span class="glyph">2</span><span class="glyph">3</span><span class="glyph">4</span><span class="glyph">5</span><span class="glyph">6</span><span class="glyph">7</span><span class="glyph">8</span><span class="glyph">9</span>
+        </div>
+        <p class="sample-caption">Octave indicator and tonehead</p>
+        <div class="staff-sample" aria-label="Three-line staff sample with octave indicator, tonehead, time signature, rest and note flag">
+          <svg width="100%" height="124" viewBox="0 0 560 124" preserveAspectRatio="none" aria-hidden="true">
+            <path d="M0 28H560M0 68H560M0 108H560" fill="none" stroke="#c9ceca" stroke-width="1"/>
+          </svg>
+          <span class="indicator"><span>5</span><span>4</span></span>
+          <span class="staff-tone">8</span>
+          <span class="music-signature"><span data-music="timeSig4"></span><span data-music="timeSig4"></span></span>
+          <span class="music-rest" data-music="restQuarter"></span>
+          <span class="flag-on-staff"><i class="stem-demo"></i><span class="flag-glyph" data-music="flag8thUp"></span></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="specimen-section">
+      <div>
+        <h2 class="section-label">Music-font meter</h2>
+        <p class="section-note">Candidate-specific time-signature numerals at display size.</p>
+      </div>
+      <div class="sample-area">
+        <p class="sample-caption">4/4 and 3/4</p>
+        <div class="music-row">
+          <div class="music-item"><span class="meter-sample"><span class="numerator" data-music="timeSig4"></span><span class="denominator" data-music="timeSig4"></span></span><small>4/4</small></div>
+          <div class="music-item"><span class="meter-sample"><span class="numerator" data-music="timeSig3"></span><span class="denominator" data-music="timeSig4"></span></span><small>3/4</small></div>
+          <div class="music-item"><span class="meter-sample"><span class="numerator" data-music="timeSig6"></span><span class="denominator" data-music="timeSig8"></span></span><small>6/8</small></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="specimen-section">
+      <div>
+        <h2 class="section-label">Rests</h2>
+        <p class="section-note">Whole through 64th, from the active music-font candidate.</p>
+      </div>
+      <div class="sample-area">
+        <div class="music-row">
+          <div class="music-item"><span class="music-glyph" data-music="restWhole"></span><small>Whole</small></div>
+          <div class="music-item"><span class="music-glyph" data-music="restHalf"></span><small>Half</small></div>
+          <div class="music-item"><span class="music-glyph" data-music="restQuarter"></span><small>Quarter</small></div>
+          <div class="music-item"><span class="music-glyph" data-music="rest8th"></span><small>Eighth</small></div>
+          <div class="music-item"><span class="music-glyph" data-music="rest16th"></span><small>16th</small></div>
+          <div class="music-item"><span class="music-glyph" data-music="rest32nd"></span><small>32nd</small></div>
+          <div class="music-item"><span class="music-glyph" data-music="rest64th"></span><small>64th</small></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="specimen-section">
+      <div>
+        <h2 class="section-label">Note flags</h2>
+        <p class="section-note">Font flag glyphs placed beside simple stems for comparison.</p>
+      </div>
+      <div class="sample-area">
+        <div class="flag-row">
+          <div class="flag-item"><span class="flag-pair"><i class="stem-demo"></i><span class="flag-glyph" data-music="flag8thUp"></span></span><small>Eighth</small></div>
+          <div class="flag-item"><span class="flag-pair"><i class="stem-demo"></i><span class="flag-glyph" data-music="flag16thUp"></span></span><small>16th</small></div>
+          <div class="flag-item"><span class="flag-pair"><i class="stem-demo"></i><span class="flag-glyph" data-music="flag32ndUp"></span></span><small>32nd</small></div>
+          <div class="flag-item"><span class="flag-pair"><i class="stem-demo"></i><span class="flag-glyph" data-music="flag64thUp"></span></span><small>64th</small></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="specimen-section">
+      <div>
+        <h2 class="section-label">Custom dek and el</h2>
+        <p class="section-note">DejaVu has no U+218A/U+218B. Compare existing angular paths with rounded hand-drawn sketches.</p>
+      </div>
+      <div class="sample-area">
+        <p class="sample-caption">Current paths and rounded sketches</p>
+        <div class="custom-row">
+          <div class="custom-sample"><svg viewBox="0 0 12 20" aria-label="Current dek path"><path d="M10 16H2V9H10V2H2"/></svg><small>Current dek</small></div>
+          <div class="custom-sample"><svg viewBox="0 0 12 20" aria-label="Rounded dek sketch"><path d="M10 16H3Q2 16 2 15V10Q2 9 3 9H9Q10 9 10 8V3Q10 2 9 2H2"/></svg><small>Rounded dek</small></div>
+          <div class="custom-sample"><svg viewBox="0 0 12 20" aria-label="Current el path"><path d="M10 16H2V2H10M10 9H2"/></svg><small>Current el</small></div>
+          <div class="custom-sample"><svg viewBox="0 0 12 20" aria-label="Rounded el sketch"><path d="M9 16H3Q2 16 2 15V3Q2 2 3 2H9M9 9H3"/></svg><small>Rounded el</small></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="specimen-section">
+      <div>
+        <h2 class="section-label">Weight reference</h2>
+        <p class="section-note">The requested 600 face is not in the static release; 700 is shown as the available bold face.</p>
+      </div>
+      <div class="sample-area">
+        <div class="weights">
+          <div class="weight-sample"><strong>0123456789</strong><small>DejaVu Sans Bold 700</small></div>
+          <div class="weight-sample"><strong>↊↋</strong><small>Hand-drawn candidates</small></div>
+        </div>
+      </div>
+    </section>
+
+    <p class="license-note">Prototype only · See assets/fonts for pinned font files and license notices. Font text shown here is a visual reference; the production SVG remains hand-authored paths.</p>
+  </main>
+
+  <nav class="switcher" aria-label="Music font candidate">
+    <button id="previous" type="button" aria-label="Previous font candidate">‹</button>
+    <span class="switcher-label" id="switcher-label"></span>
+    <button id="next" type="button" aria-label="Next font candidate">›</button>
+  </nav>
+
+  <script>
+    const candidates = [
+      { key: "bravura", family: "Bravura Reference", label: "Bravura 1.482" },
+      { key: "petaluma", family: "Petaluma Reference", label: "Petaluma 1.065" },
+      { key: "leland", family: "Leland Reference", label: "Leland 0.80" },
+    ];
+    let selected = new URLSearchParams(location.search).get("variant") || "bravura";
+    const previous = document.querySelector("#previous");
+    const next = document.querySelector("#next");
+    const label = document.querySelector("#switcher-label");
+    const activeFontName = document.querySelector("#active-font-name");
+
+    function updateCandidate() {
+      const active = candidates.find((candidate) => candidate.key === selected) || candidates[0];
+      selected = active.key;
+      document.body.dataset.variant = active.key;
+      label.textContent = active.label;
+      activeFontName.textContent = active.label;
+      document.querySelectorAll("[data-music]").forEach((element) => {
+        const name = element.dataset.music;
+        const codepoint = window.smuFlGlyphs[name];
+        element.textContent = codepoint ? String.fromCodePoint(codepoint) : "?";
+      });
+      const url = new URL(location.href);
+      url.searchParams.set("variant", active.key);
+      history.replaceState(null, "", url);
+    }
+
+    function move(direction) {
+      const index = candidates.findIndex((candidate) => candidate.key === selected);
+      selected = candidates[(index + direction + candidates.length) % candidates.length].key;
+      updateCandidate();
+    }
+
+    previous.addEventListener("click", () => move(-1));
+    next.addEventListener("click", () => move(1));
+    window.addEventListener("keydown", (event) => {
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || /INPUT|TEXTAREA|SELECT/.test(target.tagName))) return;
+      if (event.key === "ArrowLeft") move(-1);
+      if (event.key === "ArrowRight") move(1);
+    });
+
+    window.smuFlGlyphs = {
+      timeSig0: 0xE080,
+      timeSig1: 0xE081,
+      timeSig2: 0xE082,
+      timeSig3: 0xE083,
+      timeSig4: 0xE084,
+      timeSig5: 0xE085,
+      timeSig6: 0xE086,
+      timeSig7: 0xE087,
+      timeSig8: 0xE088,
+      timeSig9: 0xE089,
+      restWhole: 0xE4E3,
+      restHalf: 0xE4E4,
+      restQuarter: 0xE4E5,
+      rest8th: 0xE4E6,
+      rest16th: 0xE4E7,
+      rest32nd: 0xE4E8,
+      rest64th: 0xE4E9,
+      flag8thUp: 0xE240,
+      flag16thUp: 0xE242,
+      flag32ndUp: 0xE244,
+      flag64thUp: 0xE246,
+    };
+    updateCandidate();
+  </script>
+</body>
+</html>
