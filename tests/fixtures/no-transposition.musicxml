@@ -51,12 +51,20 @@
       <note><pitch><step>C</step><octave>6</octave></pitch><duration>16</duration><voice>1</voice><type>quarter</type></note>
       <note><pitch><step>C</step><octave>7</octave></pitch><duration>16</duration><voice>1</voice><type>quarter</type></note>
       <note><pitch><step>C</step><octave>8</octave></pitch><duration>16</duration><voice>1</voice><type>quarter</type></note>
-      <note><pitch><step>A</step><octave>4</octave></pitch><duration>16</duration><tie type="start"/><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>A</step><octave>0</octave></pitch><duration>16</duration><tie type="start"/><voice>1</voice><type>quarter</type></note>
       <note><chord/><pitch><step>G</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><type>quarter</type></note>
     </measure>
     <measure number="9">
-      <note><pitch><step>A</step><octave>4</octave></pitch><duration>16</duration><tie type="stop"/><voice>1</voice><type>quarter</type></note>
-      <note><chord/><pitch><step>G</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>A</step><octave>0</octave></pitch><duration>16</duration><tie type="stop"/><voice>1</voice><type>quarter</type></note>
+      <note><chord/><pitch><step>A</step><alter>1</alter><octave>1</octave></pitch><duration>16</duration><voice>1</voice><type>quarter</type></note>
+      <note><chord/><pitch><step>B</step><octave>2</octave></pitch><duration>16</duration><voice>1</voice><type>quarter</type></note>
+      <note><chord/><pitch><step>C</step><octave>3</octave></pitch><duration>16</duration><voice>1</voice><type>quarter</type></note>
+      <note><chord/><pitch><step>C</step><alter>1</alter><octave>4</octave></pitch><duration>16</duration><voice>1</voice><type>quarter</type></note>
+      <note><chord/><pitch><step>D</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><type>quarter</type></note>
+      <note><chord/><pitch><step>D</step><alter>1</alter><octave>6</octave></pitch><duration>16</duration><voice>1</voice><type>quarter</type></note>
+      <note><chord/><pitch><step>E</step><octave>7</octave></pitch><duration>16</duration><voice>1</voice><type>quarter</type></note>
+      <note><chord/><pitch><step>F</step><octave>8</octave></pitch><duration>16</duration><voice>1</voice><type>quarter</type></note>
+      <note><chord/><pitch><step>F</step><alter>1</alter><octave>9</octave></pitch><duration>16</duration><voice>1</voice><type>quarter</type></note>
       <note><rest/><duration>16</duration><voice>1</voice><type>quarter</type></note>
       <note><rest/><duration>16</duration><voice>1</voice><type>quarter</type></note>
       <note><rest/><duration>16</duration><voice>1</voice><type>quarter</type></note>
