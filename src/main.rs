@@ -3,13 +3,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process;
 
-#[derive(Debug)]
-struct Element {
-    name: String,
-    attributes: Vec<(String, String)>,
-    text: String,
-    children: Vec<usize>,
-}
+mod xml;
+use xml::Element;
 
 #[derive(Debug)]
 struct Tone {
@@ -26,16 +21,16 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let (input_path, output_path) = parse_args()?;
-    let source = fs::read_to_string(&input_path)
+    let source = xml::read_file(&input_path)
         .map_err(|error| format!("cannot read {}: {error}", input_path.display()))?;
-    let score = parse_score(&source)?;
+    let score =
+        parse_score(&source).map_err(|error| format!("{}: {error}", input_path.display()))?;
     let svg = render_svg(&score);
 
-    if let Some(extension) = output_path.extension() {
-        if extension != "svg" {
-            return Err("output path must have the .svg extension".to_owned());
-        }
-    } else {
+    if output_path
+        .extension()
+        .is_none_or(|extension| extension != "svg")
+    {
         return Err("output path must have the .svg extension".to_owned());
     }
 
@@ -73,14 +68,30 @@ fn parse_args() -> Result<(PathBuf, PathBuf), String> {
     Ok((input, output))
 }
 
-fn parse_score(source: &str) -> Result<Tone, String> {
-    let elements = parse_xml_subset(source)?;
+fn parse_score(source: &[u8]) -> Result<Tone, String> {
+    let elements = xml::parse(source).map_err(|error| error.to_string())?;
     let root = root_element(&elements)?;
-    if elements[root].name != "score-partwise" {
-        return Err(format!(
-            "unsupported root <{}>; expected <score-partwise>",
-            elements[root].name
+    if !elements[root].namespace.is_empty() || elements[root].name != "score-partwise" {
+        return Err(element_diagnostic(
+            &elements[root],
+            format!(
+                "unsupported root <{}>; expected no-namespace <score-partwise>",
+                elements[root].name
+            ),
         ));
+    }
+    if let Some(element) = elements
+        .iter()
+        .find(|element| !element.namespace.is_empty())
+    {
+        return Err(element_diagnostic(
+            element,
+            "unsupported MusicXML namespace on an element; expected no namespace".to_owned(),
+        ));
+    }
+    let value_errors = collect_value_errors(&elements);
+    if !value_errors.is_empty() {
+        return Err(value_errors.join("\n"));
     }
     require_attribute(&elements[root], "version", "4.0")?;
     require_container_text(&elements[root])?;
@@ -95,7 +106,10 @@ fn parse_score(source: &str) -> Result<Tone, String> {
     leaf_text(&elements[part_name])?;
 
     if required_attribute(&elements[part], "id")? != part_id {
-        return Err("unsupported shape: part id does not match score-part id".to_owned());
+        return Err(element_diagnostic(
+            &elements[part],
+            "unsupported shape: part id does not match score-part id".to_owned(),
+        ));
     }
     require_container_text(&elements[part])?;
     let [measure] = exact_children(&elements, part, &["measure"])?;
@@ -107,7 +121,10 @@ fn parse_score(source: &str) -> Result<Tone, String> {
     require_container_text(&elements[attributes])?;
     let [divisions] = exact_children(&elements, attributes, &["divisions"])?;
     if leaf_text(&elements[divisions])? != "1" {
-        return Err("unsupported score: divisions must be 1".to_owned());
+        return Err(element_diagnostic(
+            &elements[divisions],
+            "unsupported score: divisions must be 1".to_owned(),
+        ));
     }
 
     require_no_attributes(&elements[note])?;
@@ -118,33 +135,41 @@ fn parse_score(source: &str) -> Result<Tone, String> {
         || leaf_text(&elements[voice])? != "1"
         || leaf_text(&elements[note_type])? != "quarter"
     {
-        return Err(
+        return Err(element_diagnostic(
+            &elements[note],
             "unsupported score: only one quarter-note event in voice 1 is supported".to_owned(),
-        );
+        ));
     }
 
     require_no_attributes(&elements[pitch])?;
     require_container_text(&elements[pitch])?;
     let pitch_children = &elements[pitch].children;
     let (step_id, octave_id) = match pitch_children.as_slice() {
-		[step_id, octave_id] if elements[*step_id].name == "step" => (*step_id, *octave_id),
-		[step_id, alter_id, octave_id]
-			if elements[*step_id].name == "step" && elements[*alter_id].name == "alter" =>
-		{
-			if leaf_text(&elements[*alter_id])? != "0" {
-				return Err("unsupported pitch: only natural tones are supported".to_owned());
-			}
-			(*step_id, *octave_id)
-		}
-		_ => {
-			return Err(
-				"unsupported shape: <pitch> must contain <step>, optional natural <alter>, and <octave>"
-					.to_owned(),
-			)
-		}
-	};
+        [step_id, octave_id] if elements[*step_id].name == "step" => (*step_id, *octave_id),
+        [step_id, alter_id, octave_id]
+            if elements[*step_id].name == "step" && elements[*alter_id].name == "alter" =>
+        {
+            if leaf_text(&elements[*alter_id])? != "0" {
+                return Err(element_diagnostic(
+                    &elements[*alter_id],
+                    "unsupported pitch: only natural tones are supported".to_owned(),
+                ));
+            }
+            (*step_id, *octave_id)
+        }
+        _ => {
+            return Err(element_diagnostic(
+                &elements[pitch],
+                "unsupported shape: <pitch> must contain <step>, optional natural <alter>, and <octave>"
+                    .to_owned(),
+            ))
+        }
+    };
     if elements[octave_id].name != "octave" {
-        return Err("unsupported shape: <pitch> must end with <octave>".to_owned());
+        return Err(element_diagnostic(
+            &elements[pitch],
+            "unsupported shape: <pitch> must end with <octave>".to_owned(),
+        ));
     }
 
     let step = leaf_text(&elements[step_id])?;
@@ -156,183 +181,72 @@ fn parse_score(source: &str) -> Result<Tone, String> {
         "G" => 7,
         "A" => 9,
         "B" => 11,
-        _ => return Err(format!("unsupported pitch step {step:?}")),
+        _ => {
+            return Err(element_diagnostic(
+                &elements[step_id],
+                format!("unsupported pitch step {step:?}"),
+            ));
+        }
     };
     let octave = leaf_text(&elements[octave_id])?
         .parse::<u8>()
-        .map_err(|_| "unsupported pitch octave; expected 4 or 5".to_owned())?;
+        .map_err(|_| {
+            element_diagnostic(
+                &elements[octave_id],
+                "unsupported pitch octave; expected 4 or 5".to_owned(),
+            )
+        })?;
     if !(4..=5).contains(&octave) {
-        return Err("unsupported pitch octave; this bootstrap supports octaves 4 and 5".to_owned());
+        return Err(element_diagnostic(
+            &elements[octave_id],
+            "unsupported pitch octave; this bootstrap supports octaves 4 and 5".to_owned(),
+        ));
     }
 
     Ok(Tone { octave, value })
 }
 
-fn parse_xml_subset(source: &str) -> Result<Vec<Element>, String> {
-    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
-    let mut elements = Vec::new();
-    let mut stack = Vec::<usize>::new();
-    let mut cursor = 0;
-    let mut declaration_seen = false;
+fn element_diagnostic(element: &Element, message: String) -> String {
+    format!(
+        "{message} (byte {}, line {}, column {}, XML path {})",
+        element.byte_offset, element.line, element.column, element.path
+    )
+}
 
-    while cursor < source.len() {
-        let Some(relative_open) = source[cursor..].find('<') else {
-            append_text(&mut elements, &stack, &source[cursor..])?;
-            break;
-        };
-        let open = cursor + relative_open;
-        append_text(&mut elements, &stack, &source[cursor..open])?;
-        let relative_close = source[open..]
-            .find('>')
-            .ok_or_else(|| "malformed XML: unterminated tag".to_owned())?;
-        let close = open + relative_close;
-        let raw = source[open + 1..close].trim();
-        cursor = close + 1;
-
-        if raw.starts_with("?xml") {
-            if declaration_seen || !elements.is_empty() || !stack.is_empty() || !raw.ends_with('?')
-            {
-                return Err("unsupported XML declaration placement or syntax".to_owned());
-            }
-            if !matches!(
-                raw,
-                "?xml version=\"1.0\" encoding=\"UTF-8\"?"
-                    | "?xml version='1.0' encoding='UTF-8'?"
-                    | "?xml version=\"1.0\"?"
-                    | "?xml version='1.0'?"
-            ) {
-                return Err("unsupported XML declaration; expected XML 1.0 UTF-8".to_owned());
-            }
-            declaration_seen = true;
+fn collect_value_errors(elements: &[Element]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for element in elements {
+        if !element.children.is_empty() || !element.attributes.is_empty() {
             continue;
         }
-        if raw.starts_with('!') {
-            return Err(
-                "unsupported XML construct; DTDs, comments, and CDATA are not supported".to_owned(),
-            );
-        }
-        if raw.starts_with('?') {
-            return Err("unsupported XML processing instruction".to_owned());
-        }
-
-        if let Some(closing) = raw.strip_prefix('/') {
-            let name = closing.trim();
-            if name.is_empty() || name.chars().any(char::is_whitespace) {
-                return Err("malformed XML: invalid closing tag".to_owned());
-            }
-            let Some(open_element) = stack.pop() else {
-                return Err(format!("malformed XML: unexpected closing tag </{name}>"));
-            };
-            if elements[open_element].name != name {
-                return Err(format!(
-                    "malformed XML: expected </{}>, found </{name}>",
-                    elements[open_element].name
+        let value = element.text.trim();
+        let message = match element.name.as_str() {
+            "divisions" if value != "1" => Some("unsupported score: <divisions> must be 1"),
+            "duration" if value != "1" => Some("unsupported score: <duration> must be 1"),
+            "voice" if value != "1" => Some("unsupported score: <voice> must be 1"),
+            "type" if value != "quarter" => Some("unsupported score: <type> must be quarter"),
+            "alter" if value != "0" => Some("unsupported pitch: only natural tones are supported"),
+            "step" if !matches!(value, "A" | "B" | "C" | "D" | "E" | "F" | "G") => {
+                errors.push(element_diagnostic(
+                    element,
+                    format!("unsupported pitch step {value:?}"),
                 ));
+                None
             }
-            continue;
-        }
-
-        let self_closing = raw.ends_with('/');
-        let body = if self_closing {
-            raw[..raw.len() - 1].trim_end()
-        } else {
-            raw
+            "octave"
+                if value
+                    .parse::<u8>()
+                    .map_or(true, |octave| !(4..=5).contains(&octave)) =>
+            {
+                Some("unsupported pitch octave; this bootstrap supports octaves 4 and 5")
+            }
+            _ => None,
         };
-        let (name, attributes) = parse_open_tag(body)?;
-        let index = elements.len();
-        elements.push(Element {
-            name,
-            attributes,
-            text: String::new(),
-            children: Vec::new(),
-        });
-        if let Some(parent) = stack.last().copied() {
-            elements[parent].children.push(index);
-        }
-        if !self_closing {
-            stack.push(index);
+        if let Some(message) = message {
+            errors.push(element_diagnostic(element, message.to_owned()));
         }
     }
-
-    if let Some(open_element) = stack.last().copied() {
-        return Err(format!(
-            "malformed XML: unclosed <{}>",
-            elements[open_element].name
-        ));
-    }
-    root_element(&elements)?;
-    Ok(elements)
-}
-
-fn append_text(elements: &mut [Element], stack: &[usize], text: &str) -> Result<(), String> {
-    if text.contains('&') {
-        return Err("unsupported XML entity reference".to_owned());
-    }
-    if let Some(parent) = stack.last() {
-        elements[*parent].text.push_str(text);
-    } else if !text.trim().is_empty() {
-        return Err("malformed XML: text outside the document element".to_owned());
-    }
-    Ok(())
-}
-
-fn parse_open_tag(raw: &str) -> Result<(String, Vec<(String, String)>), String> {
-    let name_end = raw.find(char::is_whitespace).unwrap_or(raw.len());
-    let name = &raw[..name_end];
-    validate_name(name)?;
-    let mut remaining = raw[name_end..].trim();
-    let mut attributes = Vec::new();
-    while !remaining.is_empty() {
-        let equals = remaining
-            .find('=')
-            .ok_or_else(|| "malformed XML: expected '=' in attribute".to_owned())?;
-        let attribute_name = remaining[..equals].trim();
-        if attribute_name.is_empty() || attribute_name.chars().any(char::is_whitespace) {
-            return Err("malformed XML: invalid attribute name".to_owned());
-        }
-        validate_name(attribute_name)?;
-        remaining = remaining[equals + 1..].trim_start();
-        let quote = remaining
-            .chars()
-            .next()
-            .ok_or_else(|| "malformed XML: missing attribute value".to_owned())?;
-        if quote != '\'' && quote != '"' {
-            return Err("malformed XML: attribute values must be quoted".to_owned());
-        }
-        let value_start = 1;
-        let value_end = remaining[value_start..]
-            .find(quote)
-            .map(|end| end + value_start)
-            .ok_or_else(|| "malformed XML: unterminated attribute value".to_owned())?;
-        let value = &remaining[value_start..value_end];
-        if value.contains('&') {
-            return Err("unsupported XML entity reference".to_owned());
-        }
-        if attributes.iter().any(|(name, _)| name == attribute_name) {
-            return Err(format!(
-                "malformed XML: duplicate attribute {attribute_name:?}"
-            ));
-        }
-        attributes.push((attribute_name.to_owned(), value.to_owned()));
-        remaining = remaining[value_end + 1..].trim_start();
-    }
-    Ok((name.to_owned(), attributes))
-}
-
-fn validate_name(name: &str) -> Result<(), String> {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return Err("malformed XML: empty element or attribute name".to_owned());
-    };
-    if first == ':'
-        || !first.is_ascii_alphabetic() && first != '_'
-        || chars.any(|character| {
-            !character.is_ascii_alphanumeric() && !matches!(character, '_' | '-' | '.')
-        })
-    {
-        return Err(format!("unsupported XML name {name:?}"));
-    }
-    Ok(())
+    errors
 }
 
 fn root_element(elements: &[Element]) -> Result<usize, String> {
@@ -355,9 +269,12 @@ fn root_element(elements: &[Element]) -> Result<usize, String> {
 
 fn required_attribute<'a>(element: &'a Element, name: &str) -> Result<&'a str, String> {
     if element.attributes.len() != 1 || element.attributes[0].0 != name {
-        return Err(format!(
-            "unsupported shape: <{}> requires only the {name:?} attribute",
-            element.name
+        return Err(element_diagnostic(
+            element,
+            format!(
+                "unsupported shape: <{}> requires only the {name:?} attribute",
+                element.name
+            ),
         ));
     }
     Ok(&element.attributes[0].1)
@@ -385,10 +302,13 @@ fn exact_children<const N: usize>(
             .zip(expected)
             .any(|(child, name)| elements[*child].name != *name)
     {
-        return Err(format!(
-            "unsupported shape: <{}> must contain {}",
-            elements[parent].name,
-            expected.join(", ")
+        return Err(element_diagnostic(
+            &elements[parent],
+            format!(
+                "unsupported shape: <{}> must contain {}",
+                elements[parent].name,
+                expected.join(", ")
+            ),
         ));
     }
     Ok(std::array::from_fn(|index| children[index]))
@@ -398,9 +318,12 @@ fn require_container_text(element: &Element) -> Result<(), String> {
     if element.text.trim().is_empty() {
         Ok(())
     } else {
-        Err(format!(
-            "unsupported shape: unexpected text inside <{}>",
-            element.name
+        Err(element_diagnostic(
+            element,
+            format!(
+                "unsupported shape: unexpected text inside <{}>",
+                element.name
+            ),
         ))
     }
 }
@@ -409,25 +332,31 @@ fn require_no_attributes(element: &Element) -> Result<(), String> {
     if element.attributes.is_empty() {
         Ok(())
     } else {
-        Err(format!(
-            "unsupported shape: attributes on <{}> are not supported",
-            element.name
+        Err(element_diagnostic(
+            element,
+            format!(
+                "unsupported shape: attributes on <{}> are not supported",
+                element.name
+            ),
         ))
     }
 }
 
 fn leaf_text(element: &Element) -> Result<&str, String> {
     if !element.children.is_empty() || !element.attributes.is_empty() {
-        return Err(format!(
-            "unsupported shape: <{}> must be a plain text element",
-            element.name
+        return Err(element_diagnostic(
+            element,
+            format!(
+                "unsupported shape: <{}> must be a plain text element",
+                element.name
+            ),
         ));
     }
     let text = element.text.trim();
     if text.is_empty() {
-        return Err(format!(
-            "unsupported score: <{}> may not be empty",
-            element.name
+        return Err(element_diagnostic(
+            element,
+            format!("unsupported score: <{}> may not be empty", element.name),
         ));
     }
     Ok(text)
