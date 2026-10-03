@@ -1274,6 +1274,158 @@ fn preserves_explicit_musicxml_eighth_note_beams() {
 }
 
 #[test]
+fn renders_multi_octave_beaming_fixture_geometry() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("multi-octave-beaming.musicxml");
+    fs::write(
+        &input,
+        include_str!("fixtures/multi-octave-beaming.musicxml"),
+    )
+    .expect("write multi-octave beaming fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "multi-octave beaming fixture failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("multi-octave-beaming.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 13, "{svg}");
+    assert_eq!(svg.matches("class=\"stem\"").count(), 12, "{svg}");
+    assert_eq!(svg.matches("class=\"beam\"").count(), 7, "{svg}");
+    assert_eq!(svg.matches("class=\"beam-hook\"").count(), 1, "{svg}");
+    assert_eq!(svg.matches("class=\"flag\"").count(), 0, "{svg}");
+
+    let expected_stems = [
+        (0, 68, 97),
+        (1, 48, 77),
+        (2, 88, 117),
+        (3, 68, 97),
+        (4, 68, 97),
+        (5, 88, 117),
+        (6, 108, 137),
+        (7, 48, 77),
+        (8, 28, -1),
+        (9, 68, 39),
+        (10, 68, 97),
+        (11, 48, 77),
+    ];
+    let rendered_stems = (0..expected_stems.len())
+        .map(|event_index| {
+            let stem_id = if event_index == 0 {
+                "id=\"stem\"".to_owned()
+            } else {
+                format!("id=\"stem-{event_index}\"")
+            };
+            let line = svg
+                .lines()
+                .find(|line| line.contains(&stem_id))
+                .expect("stem path");
+            let path = line
+                .split(" d=\"M")
+                .nth(1)
+                .and_then(|value| value.split('"').next())
+                .expect("stem path data");
+            let (start, end) = path.split_once('V').expect("stem endpoints");
+            let start_y = start
+                .split_whitespace()
+                .nth(1)
+                .and_then(|value| value.parse::<i32>().ok())
+                .expect("stem start y");
+            let end_y = end.parse::<i32>().expect("stem end y");
+            (event_index, start_y, end_y)
+        })
+        .collect::<Vec<_>>();
+
+    let mut behavior_mismatches = Vec::new();
+    for (beam_id, expected_path) in [
+        ("beam-1-1", "M96.19 96.69L117.69 75.19"),
+        ("beam-3-1", "M140.19 116.69L161.19 95.19"),
+        ("beam-5-1", "M186.31 95.19L207.81 116.69"),
+        ("beam-7-1", "M227.83 138.78L249.33 74.28"),
+        ("beam-9-1", "M271.94 -1.64L295.44 41.09"),
+        ("beam-11-1", "M318.16 96.76L338.66 75.18"),
+        ("beam-11-2", "M318.16 91.76L338.66 70.18"),
+    ] {
+        let beam = svg
+            .lines()
+            .find(|line| line.contains(&format!("id=\"{beam_id}\"")))
+            .expect("expected multi-octave beam");
+        if !beam.contains(&format!("d=\"{expected_path}\"")) {
+            behavior_mismatches.push(format!("{beam_id}: expected {expected_path}; got {beam}"));
+        }
+    }
+
+    let hook = svg
+        .lines()
+        .find(|line| line.contains("id=\"beam-hook-11-3\""))
+        .expect("backward third-level hook");
+    let hook_path = hook
+        .split(" d=\"")
+        .nth(1)
+        .and_then(|value| value.split('"').next())
+        .expect("hook path data");
+    let (hook_start, hook_end) = hook_path
+        .strip_prefix('M')
+        .and_then(|value| value.split_once('L'))
+        .expect("hook endpoints");
+    let (hook_start_x, hook_start_y) = hook_start.split_once(' ').expect("hook start point");
+    let (hook_end_x, hook_end_y) = hook_end.split_once(' ').expect("hook end point");
+    assert_eq!(
+        hook_start_y, hook_end_y,
+        "backward hook stays horizontal: {hook}"
+    );
+    assert_eq!(
+        hook_start_x.parse::<i32>().expect("hook start x")
+            - hook_end_x.parse::<i32>().expect("hook end x"),
+        9,
+        "backward hook extends left by its standard length: {hook}"
+    );
+
+    let beam_path = |level: u8| {
+        svg.lines()
+            .find(|line| line.contains(&format!("id=\"beam-11-{level}\"")))
+            .and_then(|line| line.split(" d=\"").nth(1))
+            .and_then(|value| value.split('"').next())
+            .expect("mixed-duration beam path")
+            .to_owned()
+    };
+    let beam_points = |path: &str| {
+        let (start, end) = path
+            .strip_prefix('M')
+            .and_then(|value| value.split_once('L'))
+            .expect("beam endpoints");
+        let (_, start_y) = start.split_once(' ').expect("beam start point");
+        let (_, end_y) = end.split_once(' ').expect("beam end point");
+        (
+            start_y.parse::<f64>().expect("beam start y"),
+            end_y.parse::<f64>().expect("beam end y"),
+        )
+    };
+    let primary = beam_points(&beam_path(1));
+    let secondary = beam_points(&beam_path(2));
+    assert!((primary.0 - secondary.0).abs() == 5.0);
+    assert!((primary.1 - secondary.1).abs() == 5.0);
+
+    if rendered_stems != expected_stems {
+        behavior_mismatches.push(format!(
+            "expected group-wide stem anchors {expected_stems:?}; got {rendered_stems:?}"
+        ));
+    }
+    assert!(
+        behavior_mismatches.is_empty(),
+        "multi-octave beaming geometry differs from the agreed group-wide direction plan:\n{}",
+        behavior_mismatches.join("\n")
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn rejects_unclosed_explicit_beam_groups_without_svg() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
