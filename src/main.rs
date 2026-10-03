@@ -1759,7 +1759,7 @@ fn render_svg(score: &Score) -> String {
                     None,
                     Vec::new(),
                     PathGeometry::new(
-                        Some((meter_x, 31)),
+                        Some((meter_x, 30)),
                         time_signature_glyph_path(meter.beats),
                         PathStyle::FilledGlyph,
                     )
@@ -1772,7 +1772,7 @@ fn render_svg(score: &Score) -> String {
                     None,
                     Vec::new(),
                     PathGeometry::new(
-                        Some((meter_x, 71)),
+                        Some((meter_x, 70)),
                         time_signature_glyph_path(meter.beat_type),
                         PathStyle::FilledGlyph,
                     )
@@ -2134,14 +2134,14 @@ fn render_svg(score: &Score) -> String {
         "octave-5",
         None,
         Vec::new(),
-        PathGeometry::new(Some((26, 50)), glyph_path(5), PathStyle::FilledGlyph),
+        PathGeometry::new(Some((26, 49)), glyph_path(5), PathStyle::FilledGlyph),
     );
     scene.add_path(
         DrawLayer::Staff,
         "octave-4",
         None,
         Vec::new(),
-        PathGeometry::new(Some((26, 70)), glyph_path(4), PathStyle::FilledGlyph),
+        PathGeometry::new(Some((26, 69)), glyph_path(4), PathStyle::FilledGlyph),
     );
     scene.to_svg()
 }
@@ -2165,8 +2165,8 @@ fn flag_level_count(duration_name: &str) -> u8 {
 
 fn lane_y(octave: u8) -> i32 {
     match octave {
-        0..=4 => 70 + (4 - i32::from(octave)) * 20,
-        _ => 50 - (i32::from(octave) - 5) * 20,
+        0..=4 => 69 + (4 - i32::from(octave)) * 20,
+        _ => 49 - (i32::from(octave) - 5) * 20,
     }
 }
 
@@ -2297,14 +2297,14 @@ mod tests {
         assert!(
             svg.lines().any(|line| {
                 line.contains("id=\"beam-7-1\"")
-                    && line.contains("d=\"M491.25 41.50L506.75 41.50\"")
+                    && line.contains("d=\"M491.25 40.50L506.75 40.50\"")
             }),
             "primary mixed-duration beam: {svg}"
         );
         assert!(
             svg.lines().any(|line| {
                 line.contains("id=\"beam-7-2\"")
-                    && line.contains("d=\"M491.25 46.50L506.75 46.50\"")
+                    && line.contains("d=\"M491.25 45.50L506.75 45.50\"")
             }),
             "secondary beam should keep a 2-unit gap: {svg}"
         );
@@ -2318,7 +2318,7 @@ mod tests {
         );
         assert!(
             svg.lines().any(|line| {
-                line.contains("id=\"beam-hook-7-3\"") && line.contains("d=\"M506 51.5L497 51.5\"")
+                line.contains("id=\"beam-hook-7-3\"") && line.contains("d=\"M506 50.5L497 50.5\"")
             }),
             "partial hook should stay parallel with the same gap: {svg}"
         );

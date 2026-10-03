@@ -1026,7 +1026,7 @@ fn renders_simple_numeric_meter_and_rests() {
     let fixture = source
         .replace(
             "<attributes><divisions>1</divisions></attributes>",
-            "<attributes><divisions>1</divisions><time><beats>3</beats><beat-type>4</beat-type></time></attributes>",
+            "<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>",
         )
         .replace(
             "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>",
@@ -1057,11 +1057,11 @@ fn renders_simple_numeric_meter_and_rests() {
     assert!(svg.contains("id=\"meter-numerator\""), "{svg}");
     assert!(svg.contains("id=\"meter-denominator\""), "{svg}");
     assert!(
-        svg.contains("id=\"meter-numerator\" transform=\"translate(68 31) scale(2)\""),
+        svg.contains("id=\"meter-numerator\" transform=\"translate(68 30) scale(2)\""),
         "time-signature numerator should fill the octave 5/6 lanes: {svg}"
     );
     assert!(
-        svg.contains("id=\"meter-denominator\" transform=\"translate(68 71) scale(2)\""),
+        svg.contains("id=\"meter-denominator\" transform=\"translate(68 70) scale(2)\""),
         "time-signature denominator should fill the octave 3/4 lanes: {svg}"
     );
     assert!(!svg.contains("<text"), "SVG glyphs must not rely on fonts");
@@ -1198,7 +1198,7 @@ fn preserves_explicit_musicxml_eighth_note_beams() {
         .find(|line| line.contains("class=\"beam\""))
         .expect("beam path");
     assert!(
-        beam.contains("d=\"M97.25 41.50L118.75 41.50\""),
+        beam.contains("d=\"M97.25 40.50L118.75 40.50\""),
         "beam edges should meet the outer stem edges with a flush top border: {beam}"
     );
     assert!(beam.contains("stroke-linecap=\"butt\""), "{beam}");
@@ -1262,7 +1262,7 @@ fn renders_forward_beam_hook_as_a_beam_segment() {
         .lines()
         .find(|line| line.contains("class=\"beam-hook\""))
         .expect("beam hook path");
-    assert!(hook.contains("d=\"M98 41.5L107 41.5\""), "{hook}");
+    assert!(hook.contains("d=\"M98 40.5L107 40.5\""), "{hook}");
     assert!(hook.contains("stroke-linecap=\"butt\""), "{hook}");
 
     fs::remove_dir_all(directory).expect("remove test directory");
@@ -1298,7 +1298,7 @@ fn renders_smooth_32nd_flags_toward_a_down_stem_notehead() {
         .collect::<Vec<_>>();
     assert_eq!(flags.len(), 1, "one compound flag glyph per note: {svg}");
     let flag = flags[0];
-    assert!(flag.contains("transform=\"translate(97.25 98)\""), "{flag}");
+    assert!(flag.contains("transform=\"translate(97.25 97)\""), "{flag}");
     assert!(flag.contains("fill-rule=\"nonzero\""), "{flag}");
     assert!(
         !flag.contains("rotate("),
@@ -1349,7 +1349,7 @@ fn applies_chromatic_transposition_before_mapping_pitch() {
         "C4 + 2 semitones should map to Tone 2"
     );
     assert!(
-        svg.contains("transform=\"translate(92 70)\""),
+        svg.contains("transform=\"translate(92 69)\""),
         "result remains in octave 4"
     );
 
@@ -1473,7 +1473,8 @@ fn maps_enharmonic_alterations_across_octave_boundaries() {
 
 #[test]
 fn renders_all_ten_octave_lanes_with_ledger_lines_and_fitting_viewbox() {
-    let expected_lane_y = [150, 130, 110, 90, 70, 50, 30, 10, -10, -30];
+    let expected_lane_y = [149, 129, 109, 89, 69, 49, 29, 9, -11, -31];
+    let mut rendered_lane_y = [0; 10];
     for octave in 0..=9 {
         let directory = scratch_dir();
         fs::create_dir_all(&directory).expect("create test directory");
@@ -1506,6 +1507,7 @@ fn renders_all_ten_octave_lanes_with_ledger_lines_and_fitting_viewbox() {
             .and_then(|value| value.parse::<i32>().ok())
             .expect("tonehead y position");
         assert_eq!(lane_y, expected_lane_y[octave as usize], "octave {octave}");
+        rendered_lane_y[octave as usize] = lane_y;
         for staff_line_y in [28, 68, 108] {
             assert!(
                 svg.contains(&format!("d=\"M12 {staff_line_y}H")),
@@ -1513,8 +1515,8 @@ fn renders_all_ten_octave_lanes_with_ledger_lines_and_fitting_viewbox() {
             );
         }
         assert!(
-            svg.contains("id=\"octave-4\" transform=\"translate(26 70)\"")
-                && svg.contains("id=\"octave-5\" transform=\"translate(26 50)\""),
+            svg.contains("id=\"octave-4\" transform=\"translate(26 69)\"")
+                && svg.contains("id=\"octave-5\" transform=\"translate(26 49)\""),
             "octave 4/5 lane positions must match the left-side indicators: {svg}"
         );
 
@@ -1557,6 +1559,11 @@ fn renders_all_ten_octave_lanes_with_ledger_lines_and_fitting_viewbox() {
 
         fs::remove_dir_all(directory).expect("remove test directory");
     }
+
+    let octave_4_center = rendered_lane_y[4] + 9;
+    let octave_5_center = rendered_lane_y[5] + 9;
+    assert_eq!(octave_4_center - octave_5_center, 20);
+    assert_eq!((octave_4_center + octave_5_center) / 2, 68);
 }
 
 #[test]
