@@ -44,6 +44,25 @@ fn renders_fixture_to_default_and_explicit_svg_paths() {
     );
     let default_svg = directory.join("minimal.svg");
     let svg = fs::read_to_string(&default_svg).expect("read default SVG");
+    let view_box = svg
+        .lines()
+        .next()
+        .and_then(|line| line.split("viewBox=\"0 ").nth(1))
+        .and_then(|value| value.split('\"').next())
+        .expect("viewBox");
+    let background_geometry = view_box.split_whitespace().collect::<Vec<_>>();
+    assert_eq!(background_geometry.len(), 3);
+    assert_eq!(
+        svg.lines().nth(1),
+        Some(
+            format!(
+                "<rect id=\"background\" x=\"0\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#fff\"/>",
+                background_geometry[0], background_geometry[1], background_geometry[2]
+            )
+            .as_str()
+        ),
+        "opaque white background must fill the viewBox behind the score"
+    );
     assert_eq!(svg.matches("id=\"staff-line-").count(), 3);
     assert!(svg.contains("id=\"octave-4\""));
     assert!(svg.contains("id=\"octave-5\""));

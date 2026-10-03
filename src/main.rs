@@ -1307,6 +1307,12 @@ impl Scene {
             self.view_top, self.view_width, self.view_height
         )
         .expect("writing to a String cannot fail");
+        writeln!(
+            svg,
+            "<rect id=\"background\" x=\"0\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#fff\"/>",
+            self.view_top, self.view_width, self.view_height
+        )
+        .expect("writing to a String cannot fail");
         for layer in [
             DrawLayer::Staff,
             DrawLayer::Beam,
