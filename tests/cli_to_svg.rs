@@ -10,6 +10,22 @@ fn scratch_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("domunor-cli-{}-{nonce}", std::process::id()))
 }
 
+fn utf16_bytes(source: &str, little_endian: bool) -> Vec<u8> {
+    let mut bytes = if little_endian {
+        vec![0xff, 0xfe]
+    } else {
+        vec![0xfe, 0xff]
+    };
+    for unit in source.encode_utf16() {
+        bytes.extend(if little_endian {
+            unit.to_le_bytes()
+        } else {
+            unit.to_be_bytes()
+        });
+    }
+    bytes
+}
+
 #[test]
 fn renders_fixture_to_default_and_explicit_svg_paths() {
     let directory = scratch_dir();
@@ -98,6 +114,666 @@ fn rejects_unhandled_note_attributes_without_creating_svg() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(!directory.join("extra-attribute.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn processes_musicxml_doctype_and_internal_general_entity() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("doctype.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n", "")
+        .replace(
+            "<score-partwise",
+            "<!DOCTYPE score-partwise PUBLIC '-//MusicXML//DTD MusicXML 4.0 Partwise//EN' 'https://www.musicxml.org/dtds/partwise.dtd' [<!ENTITY label 'Music'>]>\n<score-partwise",
+        )
+        .replace(
+            "<part-name>Music</part-name>",
+            "<part-name>&label;</part-name>",
+        );
+    fs::write(&input, fixture).expect("write score with internal entity");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+
+    assert!(
+        output.status.success(),
+        "CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(directory.join("doctype.svg").is_file());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn recursively_expands_internal_general_entities() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("nested-entities.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n", "")
+        .replace(
+            "<score-partwise",
+            "<!DOCTYPE score-partwise [<!ENTITY base 'Music'><!ENTITY label '&base;'>]>\n<score-partwise",
+        )
+        .replace("<part-name>Music</part-name>", "<part-name>&label;</part-name>");
+    fs::write(&input, fixture).expect("write score with nested entities");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(directory.join("nested-entities.svg").is_file());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn processes_internal_parameter_entities_in_the_internal_subset() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("parameter-entity.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n", "")
+        .replace(
+            "<score-partwise",
+            "<!DOCTYPE score-partwise [<!ENTITY % label_decl \"<!ENTITY label 'Music'>\">%label_decl;]>\n<score-partwise",
+        )
+        .replace("<part-name>Music</part-name>", "<part-name>&label;</part-name>");
+    fs::write(&input, fixture).expect("write score with parameter entity");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(directory.join("parameter-entity.svg").is_file());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn expands_parameter_entities_inside_entity_values() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("parameter-entity-value.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n", "")
+        .replace("version=\"4.0\"", "version=\"&ver;\"")
+        .replace(
+            "<score-partwise",
+            "<!DOCTYPE score-partwise [<!ENTITY % digits '4.0'><!ENTITY ver '%digits;'>]>\n<score-partwise",
+        );
+    fs::write(&input, fixture).expect("write score with a parameter entity value");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(directory.join("parameter-entity-value.svg").is_file());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn parses_markup_in_general_entity_replacement_text() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("markup-entity.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n", "")
+        .replace("<part-name>Music</part-name>", "&label;")
+        .replace(
+            "<score-partwise",
+            "<!DOCTYPE score-partwise [<!ENTITY label '<part-name>Music</part-name>'>] >\n<score-partwise",
+        );
+    fs::write(&input, fixture).expect("write score with markup entity");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(directory.join("markup-entity.svg").is_file());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_markup_entity_replacement_in_attribute_values() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("attribute-markup-entity.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n", "")
+        .replace("version=\"4.0\"", "version=\"&less;\"")
+        .replace(
+            "<score-partwise",
+            "<!DOCTYPE score-partwise [<!ENTITY less '<'>]>\n<score-partwise",
+        );
+    fs::write(&input, fixture).expect("write score with attribute markup entity");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostic.contains("markup in an entity replacement"),
+        "{diagnostic}"
+    );
+    assert!(!directory.join("attribute-markup-entity.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn malformed_xml_reports_original_byte_and_normalized_line_column_and_path() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("bad-close.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("?>\n", "?>\r\n<!-- \u{1f3b5} -->\r\n")
+        .replace("</pitch>", "</pitxh>");
+    let failure_offset = fixture.find("</pitxh>").expect("mismatched tag") + "</pitxh>".len();
+    let normalized = fixture.replace("\r\n", "\n").replace('\r', "\n");
+    let normalized_offset = normalized.find("</pitxh>").expect("normalized tag") + "</pitxh>".len();
+    let prefix = &normalized[..normalized_offset];
+    let expected_line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let expected_column = prefix
+        .rsplit('\n')
+        .next()
+        .expect("last line")
+        .chars()
+        .count()
+        + 1;
+    fs::write(&input, fixture).expect("write malformed score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostic.contains(input.to_str().expect("UTF-8 path")));
+    assert!(
+        diagnostic.contains(&format!("byte {failure_offset}")),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains(&format!("line {expected_line}, column {expected_column}")),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("/score-partwise/part[@id='P1']/measure[@number='1']/note/pitch"),
+        "{diagnostic}"
+    );
+    assert!(!directory.join("bad-close.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn reports_depth_and_entity_expansion_limits_as_resource_errors() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+
+    let depth_input = directory.join("too-deep.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n", "");
+    let wrapper_count = 59;
+    let nested = format!(
+        "{}{}{}",
+        "<wrapper>".repeat(wrapper_count),
+        fixture,
+        "</wrapper>".repeat(wrapper_count)
+    );
+    fs::write(&depth_input, nested).expect("write deeply nested score");
+    let depth_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&depth_input)
+        .output()
+        .expect("run CLI");
+    assert!(!depth_output.status.success());
+    assert!(String::from_utf8_lossy(&depth_output.stderr).contains("resource limit XML"));
+    assert!(!directory.join("too-deep.svg").exists());
+
+    let expansion_input = directory.join("entity-expansion.musicxml");
+    let expanded_text = "x".repeat(8 * 1024 * 1024 + 1);
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n", "")
+        .replace(
+            "<score-partwise",
+            &format!(
+                "<!DOCTYPE score-partwise [<!ENTITY large '{expanded_text}'>]>\n<score-partwise"
+            ),
+        )
+        .replace(
+            "<part-name>Music</part-name>",
+            "<part-name>&large;</part-name>",
+        );
+    fs::write(&expansion_input, fixture).expect("write expansion-limit score");
+    let expansion_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&expansion_input)
+        .output()
+        .expect("run CLI");
+    assert!(!expansion_output.status.success());
+    let diagnostic = String::from_utf8_lossy(&expansion_output.stderr);
+    assert!(diagnostic.contains("resource limit XML"), "{diagnostic}");
+    assert!(diagnostic.contains("aggregate limit"), "{diagnostic}");
+    assert!(!directory.join("entity-expansion.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_exponential_entity_expansion_before_memory_exhaustion() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("exponential-entities.musicxml");
+    let mut declarations = format!("<!ENTITY e0 '{}'>", "x".repeat(8 * 1024));
+    for level in 1..=14 {
+        let previous = level - 1;
+        declarations.push_str(&format!("<!ENTITY e{level} '&e{previous};&e{previous};'>"));
+    }
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n", "")
+        .replace(
+            "<score-partwise",
+            &format!("<!DOCTYPE score-partwise [{declarations}]>\n<score-partwise"),
+        )
+        .replace(
+            "<part-name>Music</part-name>",
+            "<part-name>&e14;</part-name>",
+        );
+    fs::write(&input, fixture).expect("write exponentially expanding score");
+
+    let output = Command::new("sh")
+        .args([
+            "-c",
+            "ulimit -v 65536; exec \"$1\" \"$2\"",
+            "sh",
+            env!("CARGO_BIN_EXE_domunor"),
+        ])
+        .arg(&input)
+        .output()
+        .expect("run CLI with a 64-MiB address-space limit");
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(diagnostic.contains("resource limit XML"), "{diagnostic}");
+    assert!(diagnostic.contains("aggregate limit"), "{diagnostic}");
+    assert!(!directory.join("exponential-entities.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_input_over_64_mib_as_a_resource_limit() {
+    use std::fs::OpenOptions;
+
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("too-large.musicxml");
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&input)
+        .expect("create oversized input")
+        .set_len(64 * 1024 * 1024 + 1)
+        .expect("create sparse oversized input");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostic.contains("resource limit XML"), "{diagnostic}");
+    assert!(diagnostic.contains("64-MiB") || diagnostic.contains("67108864"));
+    assert!(!directory.join("too-large.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_malformed_markup_declarations_in_the_internal_subset() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("malformed-dtd.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+        "<!DOCTYPE score-partwise [<!ELEMENT score-partwise ???>] >\n",
+    );
+    fs::write(&input, fixture).expect("write malformed internal subset");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        !output.status.success(),
+        "malformed internal DTD declaration was accepted"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("malformed XML"),
+        "missing DTD grammar diagnostic: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!directory.join("malformed-dtd.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn accepts_valid_element_attribute_and_notation_declarations() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("valid-dtd.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+            "<!DOCTYPE score-partwise [<!ELEMENT score-partwise (part-list,part)><!ATTLIST score-partwise version CDATA #REQUIRED><!NOTATION sample PUBLIC '-//example//NOTATION sample//EN'><!ELEMENT foo:bar:baz ANY>] >\n",
+    );
+    fs::write(&input, fixture).expect("write valid internal subset");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "valid internal declarations were rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(directory.join("valid-dtd.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_malformed_doctype_external_identifiers() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("malformed-system-id.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+        "<!DOCTYPE score-partwise SYSTEM not-quoted>\n",
+    );
+    fs::write(&input, fixture).expect("write malformed DOCTYPE");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        !output.status.success(),
+        "malformed DOCTYPE external identifier was accepted"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("malformed XML"),
+        "missing DOCTYPE grammar diagnostic"
+    );
+    assert!(!directory.join("malformed-system-id.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn accepts_gt_inside_quoted_external_entity_identifier_without_resolving_it() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("quoted-external-id.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+        "<!DOCTYPE score-partwise [<!ENTITY ext SYSTEM 'https://example.invalid/a>b'>]>\n",
+    );
+    fs::write(&input, fixture).expect("write quoted external entity identifier");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "quoted external identifier should parse without resolution: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(directory.join("quoted-external-id.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_malformed_xml_declaration_order_and_spacing() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    for (index, declaration) in [
+        "<?xml version=\"1.0\" standalone=\"yes\" encoding=\"UTF-8\"?>",
+        "<?xml version=\"1.0\"encoding=\"UTF-8\"?>",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let input = directory.join(format!("bad-declaration-{index}.musicxml"));
+        let fixture = include_str!("fixtures/minimal.musicxml")
+            .replace("<?xml version=\"1.0\" encoding=\"UTF-8\"?>", declaration);
+        fs::write(&input, fixture).expect("write malformed XML declaration");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(
+            !output.status.success(),
+            "malformed XML declaration {index} was accepted"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("malformed XML"),
+            "missing XML declaration diagnostic"
+        );
+        assert!(!directory
+            .join(format!("bad-declaration-{index}.svg"))
+            .exists());
+    }
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn reports_independent_musicxml_value_errors_together() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("multiple-values.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<step>C</step>", "<step>H</step>")
+        .replace("<duration>1</duration>", "<duration>2</duration>");
+    fs::write(&input, fixture).expect("write score with independent invalid values");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostic.contains("unsupported pitch step \"H\""),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("duration"), "{diagnostic}");
+    assert!(!directory.join("multiple-values.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn accepts_utf16_bom_and_normalizes_xml_line_endings() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("UTF-8", "UTF-16")
+        .replace('\n', "\r\n");
+
+    for (suffix, little_endian) in [("le", true), ("be", false)] {
+        let input = directory.join(format!("encoded-{suffix}.musicxml"));
+        fs::write(&input, utf16_bytes(&fixture, little_endian)).expect("write UTF-16 score");
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(
+            output.status.success(),
+            "UTF-16 {suffix} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(directory.join(format!("encoded-{suffix}.svg")).is_file());
+    }
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn malformed_encoding_diagnostics_do_not_invent_unicode_positions() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let utf8 = b"<score-partwise>\n\xf0\x9f\x8e\xb5\xc3(\n".to_vec();
+    let mut utf16 = utf16_bytes("<score-partwise>\n", true);
+    for unit in "\u{1f3b5}".encode_utf16() {
+        utf16.extend(unit.to_le_bytes());
+    }
+    utf16.extend(0xd800_u16.to_le_bytes());
+
+    for (name, input_bytes) in [("invalid-utf8", utf8), ("invalid-utf16", utf16)] {
+        let input = directory.join(format!("{name}.musicxml"));
+        fs::write(&input, input_bytes).expect("write malformed encoded document");
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(!output.status.success());
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(diagnostic.contains("byte "), "{diagnostic}");
+        assert!(
+            diagnostic.contains("line/column unavailable"),
+            "{diagnostic}"
+        );
+        assert!(!diagnostic.contains(", line "), "{diagnostic}");
+        assert!(!directory.join(format!("{name}.svg")).exists());
+    }
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn enforces_namespace_well_formedness_and_no_namespace_musicxml_profile() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+
+    let namespaced_input = directory.join("namespaced.musicxml");
+    let namespaced = include_str!("fixtures/minimal.musicxml").replace(
+        "<score-partwise version=\"4.0\">",
+        "<score-partwise xmlns=\"urn:example:music\" version=\"4.0\">",
+    );
+    fs::write(&namespaced_input, namespaced).expect("write namespaced score");
+    let namespaced_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&namespaced_input)
+        .output()
+        .expect("run CLI");
+    assert!(!namespaced_output.status.success());
+    assert!(String::from_utf8_lossy(&namespaced_output.stderr).contains("unsupported root"));
+    assert!(!directory.join("namespaced.svg").exists());
+
+    let undeclared_input = directory.join("undeclared-prefix.musicxml");
+    fs::write(&undeclared_input, "<score-partwise:score version=\"4.0\"/>")
+        .expect("write undeclared-prefix document");
+    let undeclared = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&undeclared_input)
+        .output()
+        .expect("run CLI");
+    assert!(!undeclared.status.success());
+    let undeclared_diagnostic = String::from_utf8_lossy(&undeclared.stderr);
+    assert!(undeclared_diagnostic.contains("malformed XML"));
+    assert!(undeclared_diagnostic.contains("undeclared namespace prefix"));
+    assert!(!directory.join("undeclared-prefix.svg").exists());
+
+    let invalid_qname_input = directory.join("invalid-qname.musicxml");
+    let invalid_qname = include_str!("fixtures/minimal.musicxml").replace(
+        "<score-partwise version=\"4.0\">",
+        "<score-partwise xmlns:a=\"urn:example\" a:1invalid=\"x\" version=\"4.0\">",
+    );
+    fs::write(&invalid_qname_input, invalid_qname).expect("write invalid QName score");
+    let invalid_qname_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&invalid_qname_input)
+        .output()
+        .expect("run CLI");
+    assert!(!invalid_qname_output.status.success());
+    let diagnostic = String::from_utf8_lossy(&invalid_qname_output.stderr);
+    assert!(diagnostic.contains("malformed XML"), "{diagnostic}");
+    assert!(diagnostic.contains("QName"), "{diagnostic}");
+    assert!(!directory.join("invalid-qname.svg").exists());
+
+    let invalid_prefix_input = directory.join("invalid-prefix-qname.musicxml");
+    let invalid_prefix = include_str!("fixtures/minimal.musicxml")
+        .replace("<score-partwise", "<:score-partwise")
+        .replace("</score-partwise>", "</:score-partwise>");
+    fs::write(&invalid_prefix_input, invalid_prefix).expect("write invalid-prefix QName score");
+    let invalid_prefix_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&invalid_prefix_input)
+        .output()
+        .expect("run CLI");
+    assert!(!invalid_prefix_output.status.success());
+    let diagnostic = String::from_utf8_lossy(&invalid_prefix_output.stderr);
+    assert!(diagnostic.contains("malformed XML"), "{diagnostic}");
+    assert!(diagnostic.contains("QName"), "{diagnostic}");
+    assert!(!directory.join("invalid-prefix-qname.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_external_entity_references_without_writing_svg() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("external-entity.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n", "")
+        .replace(
+            "<score-partwise",
+            "<!DOCTYPE score-partwise [<!ENTITY ext SYSTEM 'file:///etc/passwd'>]>\n<score-partwise",
+        )
+        .replace("<part-name>Music</part-name>", "<part-name>&ext;</part-name>");
+    fs::write(&input, fixture).expect("write score with external entity");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostic.contains("external entity reference is not resolved"));
+    assert!(diagnostic.contains(input.to_str().expect("UTF-8 path")));
+    assert!(!directory.join("external-entity.svg").exists());
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
