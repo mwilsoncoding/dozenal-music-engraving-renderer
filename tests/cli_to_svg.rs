@@ -534,6 +534,74 @@ fn connects_equal_pitch_ties_across_measure_boundaries() {
 }
 
 #[test]
+fn connects_each_same_octave_chord_tie_to_its_tonehead_offset() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("same-octave-chord-ties.musicxml");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let notes = "<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><tie type=\"start\"/><voice>1</voice><type>quarter</type></note>\n      <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><tie type=\"start\"/><voice>1</voice><type>quarter</type></note>\n      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><tie type=\"stop\"/><voice>1</voice><type>quarter</type></note>\n      <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><tie type=\"stop\"/><voice>1</voice><type>quarter</type></note>";
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(original_note, notes);
+    fs::write(&input, fixture).expect("write tied chord score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "tied chord failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("same-octave-chord-ties.svg")).expect("read SVG");
+    let stop_tone_xs = svg
+        .lines()
+        .filter(|line| line.contains("class=\"tonehead\"") && line.contains("data-event=\"1\""))
+        .map(|line| {
+            let marker = "transform=\"translate(";
+            let start = line.find(marker).expect("tonehead transform") + marker.len();
+            line[start..]
+                .split_whitespace()
+                .next()
+                .expect("tonehead x coordinate")
+                .parse::<i32>()
+                .expect("integer tonehead x coordinate")
+        })
+        .collect::<Vec<_>>();
+    let tie_stops = svg
+        .lines()
+        .filter(|line| line.contains("class=\"tie\""))
+        .map(|line| {
+            let tone_index = line
+                .split("id=\"tie-1-")
+                .nth(1)
+                .expect("tie tone index")
+                .split('"')
+                .next()
+                .expect("tie tone index")
+                .parse::<usize>()
+                .expect("integer tie tone index");
+            let path = line.split(" d=\"").nth(1).expect("tie path data");
+            let end_x = path
+                .split('C')
+                .nth(1)
+                .expect("tie curve")
+                .split_whitespace()
+                .nth(4)
+                .expect("tie endpoint x coordinate")
+                .parse::<i32>()
+                .expect("integer tie endpoint x coordinate");
+            (tone_index, end_x)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tie_stops.len(), stop_tone_xs.len(), "{svg}");
+    for (tone_index, end_x) in tie_stops {
+        assert_eq!(end_x, stop_tone_xs[tone_index] + 5, "{svg}");
+    }
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn preserves_explicit_musicxml_eighth_note_beams() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
@@ -894,6 +962,39 @@ fn rejects_unsupported_score_shape_without_creating_svg() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(!directory.join("unsupported.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn reports_source_context_for_an_unsupported_musicxml_version() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("wrong-version.musicxml");
+    let fixture =
+        include_str!("fixtures/minimal.musicxml").replace("version=\"4.0\"", "version=\"3.0\"");
+    let root_offset = fixture.find("<score-partwise").expect("root element");
+    fs::write(&input, fixture).expect("write wrong-version score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success(), "unsupported version was accepted");
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostic.contains(input.to_str().expect("UTF-8 input path")),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains(&format!("byte {root_offset}, line 2, column 1")),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("XML path /score-partwise"),
+        "{diagnostic}"
+    );
+    assert!(!directory.join("wrong-version.svg").exists());
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }

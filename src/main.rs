@@ -1,4 +1,5 @@
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 use std::process;
@@ -161,7 +162,6 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
             "unsupported shape: part id does not match score-part id".to_owned(),
         ));
     }
-    require_container_text(&elements[part])?;
     require_container_text(&elements[part])?;
     let mut divisions = None;
     let mut transposition = 0;
@@ -1095,9 +1095,12 @@ fn required_attribute<'a>(element: &'a Element, name: &str) -> Result<&'a str, S
 
 fn require_attribute(element: &Element, name: &str, expected: &str) -> Result<(), String> {
     if required_attribute(element, name)? != expected {
-        return Err(format!(
-            "unsupported score: <{}> {name} must be {expected:?}",
-            element.name
+        return Err(element_diagnostic(
+            element,
+            format!(
+                "unsupported score: <{}> {name} must be {expected:?}",
+                element.name
+            ),
         ));
     }
     Ok(())
@@ -1175,10 +1178,186 @@ fn leaf_text(element: &Element) -> Result<&str, String> {
     Ok(text)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DrawLayer {
+    Staff,
+    Beam,
+    Event,
+    Tie,
+}
+
+#[derive(Clone, Copy)]
+enum PathClass {
+    Rest,
+    Stem,
+    Flag,
+    Beam,
+    BeamHook,
+    DurationMark,
+    ChordBracket,
+    Tonehead,
+    Tie,
+}
+
+#[derive(Clone, Copy)]
+enum PathMetadata {
+    Event(usize),
+    ToneIndex(usize),
+    Tone(u8),
+    Octave(u8),
+    Duration(&'static str),
+    BeamLevel(u8),
+}
+
+#[derive(Clone, Copy)]
+enum PathStyle {
+    StaffLine,
+    MediumStroke,
+    MediumOutline,
+    GlyphOutline,
+    Beam,
+    Solid,
+}
+
+struct DrawCommand {
+    layer: DrawLayer,
+    id: String,
+    class: Option<PathClass>,
+    metadata: Vec<PathMetadata>,
+    geometry: PathGeometry,
+}
+
+struct PathGeometry {
+    transform: Option<(i32, i32)>,
+    path_data: String,
+    style: PathStyle,
+}
+
+impl PathGeometry {
+    fn new(transform: Option<(i32, i32)>, path_data: impl Into<String>, style: PathStyle) -> Self {
+        Self {
+            transform,
+            path_data: path_data.into(),
+            style,
+        }
+    }
+}
+
+struct Scene {
+    view_top: i32,
+    view_width: i32,
+    view_height: i32,
+    commands: Vec<DrawCommand>,
+}
+
+impl Scene {
+    fn new(view_top: i32, view_width: i32, view_height: i32) -> Self {
+        Self {
+            view_top,
+            view_width,
+            view_height,
+            commands: Vec::new(),
+        }
+    }
+
+    fn add_path(
+        &mut self,
+        layer: DrawLayer,
+        id: impl Into<String>,
+        class: Option<PathClass>,
+        metadata: Vec<PathMetadata>,
+        geometry: PathGeometry,
+    ) {
+        self.commands.push(DrawCommand {
+            layer,
+            id: id.into(),
+            class,
+            metadata,
+            geometry,
+        });
+    }
+
+    fn to_svg(&self) -> String {
+        let mut svg = String::new();
+        writeln!(
+            svg,
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 {} {} {}\" role=\"img\">",
+            self.view_top, self.view_width, self.view_height
+        )
+        .expect("writing to a String cannot fail");
+        for layer in [
+            DrawLayer::Staff,
+            DrawLayer::Beam,
+            DrawLayer::Event,
+            DrawLayer::Tie,
+        ] {
+            for command in self
+                .commands
+                .iter()
+                .filter(|command| command.layer == layer)
+            {
+                self.write_path(&mut svg, command);
+            }
+        }
+        svg.push_str("</svg>\n");
+        svg
+    }
+
+    fn write_path(&self, svg: &mut String, command: &DrawCommand) {
+        write!(svg, "<path id=\"{}\"", command.id).expect("writing to a String cannot fail");
+        if let Some(class) = command.class {
+            let class = match class {
+                PathClass::Rest => "rest",
+                PathClass::Stem => "stem",
+                PathClass::Flag => "flag",
+                PathClass::Beam => "beam",
+                PathClass::BeamHook => "beam-hook",
+                PathClass::DurationMark => "duration-mark",
+                PathClass::ChordBracket => "chord-bracket",
+                PathClass::Tonehead => "tonehead",
+                PathClass::Tie => "tie",
+            };
+            write!(svg, " class=\"{class}\"").expect("writing to a String cannot fail");
+        }
+        for metadata in &command.metadata {
+            match metadata {
+                PathMetadata::Event(value) => write!(svg, " data-event=\"{value}\""),
+                PathMetadata::ToneIndex(value) => write!(svg, " data-tone-index=\"{value}\""),
+                PathMetadata::Tone(value) => write!(svg, " data-tone=\"{value}\""),
+                PathMetadata::Octave(value) => write!(svg, " data-octave=\"{value}\""),
+                PathMetadata::Duration(value) => write!(svg, " data-duration=\"{value}\""),
+                PathMetadata::BeamLevel(value) => write!(svg, " data-level=\"{value}\""),
+            }
+            .expect("writing to a String cannot fail");
+        }
+        if let Some((x, y)) = command.geometry.transform {
+            write!(svg, " transform=\"translate({x} {y})\"")
+                .expect("writing to a String cannot fail");
+        }
+        write!(svg, " d=\"{}\"", command.geometry.path_data)
+            .expect("writing to a String cannot fail");
+        match command.geometry.style {
+            PathStyle::StaffLine => svg.push_str(" stroke=\"#171717\""),
+            PathStyle::MediumStroke => {
+                svg.push_str(" stroke=\"#171717\" stroke-width=\"1.5\"")
+            }
+            PathStyle::MediumOutline => {
+                svg.push_str(" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"")
+            }
+            PathStyle::GlyphOutline => svg.push_str(
+                " fill=\"none\" stroke=\"#171717\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"",
+            ),
+            PathStyle::Beam => svg.push_str(
+                " fill=\"none\" stroke=\"#171717\" stroke-width=\"3\" stroke-linecap=\"square\"",
+            ),
+            PathStyle::Solid => svg.push_str(" fill=\"#171717\""),
+        }
+        svg.push_str("/>\n");
+    }
+}
+
 fn render_svg(score: &Score) -> String {
-    let mut event_markup = String::new();
-    let mut beam_markup = String::new();
-    let mut tie_markup = String::new();
+    let mut scene = Scene::new(0, 0, 0);
     let mut x = 92;
     let mut right = 128;
     let mut view_top = 0;
@@ -1201,13 +1380,29 @@ fn render_svg(score: &Score) -> String {
                 } else {
                     format!("meter-denominator-{meter_index}")
                 };
-                event_markup.push_str(&format!(
-                    "<path id=\"{numerator_id}\" transform=\"translate({} 30)\" d=\"{}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n<path id=\"{denominator_id}\" transform=\"translate({} 50)\" d=\"{}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n",
-                    x - 24,
-                    glyph_path(meter.beats),
-                    x - 24,
-                    glyph_path(meter.beat_type)
-                ));
+                let meter_x = x - 24;
+                scene.add_path(
+                    DrawLayer::Event,
+                    numerator_id,
+                    None,
+                    Vec::new(),
+                    PathGeometry::new(
+                        Some((meter_x, 30)),
+                        glyph_path(meter.beats),
+                        PathStyle::MediumOutline,
+                    ),
+                );
+                scene.add_path(
+                    DrawLayer::Event,
+                    denominator_id,
+                    None,
+                    Vec::new(),
+                    PathGeometry::new(
+                        Some((meter_x, 50)),
+                        glyph_path(meter.beat_type),
+                        PathStyle::MediumOutline,
+                    ),
+                );
                 x += 28;
                 meter_index += 1;
             }
@@ -1215,11 +1410,17 @@ fn render_svg(score: &Score) -> String {
         }
         for event in &measure.events {
             if event.tones.is_empty() {
-                event_markup.push_str(&format!(
-                    "<path id=\"rest-{index}\" class=\"rest\" data-duration=\"{}\" transform=\"translate({x} 40)\" d=\"{}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n",
-                    event.duration_name,
-                    rest_glyph_path(event.duration_name)
-                ));
+                scene.add_path(
+                    DrawLayer::Event,
+                    format!("rest-{index}"),
+                    Some(PathClass::Rest),
+                    vec![PathMetadata::Duration(event.duration_name)],
+                    PathGeometry::new(
+                        Some((x, 40)),
+                        rest_glyph_path(event.duration_name),
+                        PathStyle::GlyphOutline,
+                    ),
+                );
                 right = right.max(x + 24);
                 x += (event.duration_units * 5).div_ceil(2).max(12) as i32;
                 index += 1;
@@ -1271,9 +1472,17 @@ fn render_svg(score: &Score) -> String {
                 leftmost_tone_x
             };
             if event.duration_name != "whole" {
-                event_markup.push_str(&format!(
-                    "<path id=\"{stem_id}\" class=\"stem\" d=\"M{stem_x} {note_y}V{stem_end}\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n"
-                ));
+                scene.add_path(
+                    DrawLayer::Event,
+                    stem_id,
+                    Some(PathClass::Stem),
+                    Vec::new(),
+                    PathGeometry::new(
+                        None,
+                        format!("M{stem_x} {note_y}V{stem_end}"),
+                        PathStyle::MediumStroke,
+                    ),
+                );
                 let flag_count = match event.duration_name {
                     "eighth" => 1,
                     "16th" => 2,
@@ -1312,9 +1521,13 @@ fn render_svg(score: &Score) -> String {
                             flag_y + 10
                         )
                     };
-                    event_markup.push_str(&format!(
-                        "<path id=\"flag-{index}-{flag}\" class=\"flag\" d=\"{path}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n"
-                    ));
+                    scene.add_path(
+                        DrawLayer::Event,
+                        format!("flag-{index}-{flag}"),
+                        Some(PathClass::Flag),
+                        Vec::new(),
+                        PathGeometry::new(None, path, PathStyle::MediumOutline),
+                    );
                 }
             }
             for beam in &event.beams {
@@ -1330,9 +1543,17 @@ fn render_svg(score: &Score) -> String {
                     BeamState::Continue | BeamState::End => {
                         let (start_x, start_y) =
                             active_beams[level].expect("beam group is validated before rendering");
-                        beam_markup.push_str(&format!(
-                            "<path id=\"beam-{index}-{level}\" class=\"beam\" data-level=\"{level}\" d=\"M{start_x} {start_y}L{stem_x} {beam_y}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"3\" stroke-linecap=\"square\"/>\n"
-                        ));
+                        scene.add_path(
+                            DrawLayer::Beam,
+                            format!("beam-{index}-{level}"),
+                            Some(PathClass::Beam),
+                            vec![PathMetadata::BeamLevel(beam.level)],
+                            PathGeometry::new(
+                                None,
+                                format!("M{start_x} {start_y}L{stem_x} {beam_y}"),
+                                PathStyle::Beam,
+                            ),
+                        );
                         if beam.state == BeamState::Continue {
                             active_beams[level] = Some((stem_x, beam_y));
                         } else {
@@ -1347,9 +1568,17 @@ fn render_svg(score: &Score) -> String {
                         };
                         let end_x = stem_x + direction * 9;
                         let end_y = if stem_up { beam_y + 4 } else { beam_y - 4 };
-                        beam_markup.push_str(&format!(
-                            "<path id=\"beam-hook-{index}-{level}\" class=\"beam-hook\" data-level=\"{level}\" d=\"M{stem_x} {beam_y}L{end_x} {end_y}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"3\" stroke-linecap=\"square\"/>\n"
-                        ));
+                        scene.add_path(
+                            DrawLayer::Beam,
+                            format!("beam-hook-{index}-{level}"),
+                            Some(PathClass::BeamHook),
+                            vec![PathMetadata::BeamLevel(beam.level)],
+                            PathGeometry::new(
+                                None,
+                                format!("M{stem_x} {beam_y}L{end_x} {end_y}"),
+                                PathStyle::Beam,
+                            ),
+                        );
                     }
                 }
             }
@@ -1362,9 +1591,17 @@ fn render_svg(score: &Score) -> String {
                     ("half", 3, _) => (x + 19, lane_y(first_tone.octave) + 8),
                     _ => (x + 14, lane_y(first_tone.octave) + 9),
                 };
-                event_markup.push_str(&format!(
-                    "<path id=\"duration-mark-{index}-{mark}\" class=\"duration-mark\" d=\"M{mark_x} {mark_y}a1.2 1.2 0 1 0 2.4 0a1.2 1.2 0 1 0 -2.4 0\" fill=\"#171717\"/>\n"
-                ));
+                scene.add_path(
+                    DrawLayer::Event,
+                    format!("duration-mark-{index}-{mark}"),
+                    Some(PathClass::DurationMark),
+                    Vec::new(),
+                    PathGeometry::new(
+                        None,
+                        format!("M{mark_x} {mark_y}a1.2 1.2 0 1 0 2.4 0a1.2 1.2 0 1 0 -2.4 0"),
+                        PathStyle::Solid,
+                    ),
+                );
             }
             let mut ledger_octaves = event
                 .tones
@@ -1383,11 +1620,21 @@ fn render_svg(score: &Score) -> String {
             ledger_octaves.dedup();
             for octave in ledger_octaves {
                 let ledger_y = lane_y(octave) + 9;
-                event_markup.push_str(&format!(
-                    "<path id=\"ledger-line-octave-{octave}-event-{index}\" d=\"M{} {ledger_y}H{}\" stroke=\"#171717\"/>\n",
-                    leftmost_tone_x - 8,
-                    rightmost_tone_x + 20
-                ));
+                scene.add_path(
+                    DrawLayer::Event,
+                    format!("ledger-line-octave-{octave}-event-{index}"),
+                    None,
+                    Vec::new(),
+                    PathGeometry::new(
+                        None,
+                        format!(
+                            "M{} {ledger_y}H{}",
+                            leftmost_tone_x - 8,
+                            rightmost_tone_x + 20
+                        ),
+                        PathStyle::StaffLine,
+                    ),
+                );
             }
             if event.tones.len() > 1 {
                 let top = event
@@ -1402,21 +1649,44 @@ fn render_svg(score: &Score) -> String {
                     .map(|tone| lane_y(tone.tone.octave) + 18)
                     .max()
                     .expect("chord has a tone");
-                event_markup.push_str(&format!(
-                    "<path id=\"chord-bracket-left-{index}\" class=\"chord-bracket\" data-event=\"{index}\" d=\"M{} {top}C{} {} {} {} {} {bottom}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n<path id=\"chord-bracket-right-{index}\" class=\"chord-bracket\" data-event=\"{index}\" d=\"M{} {top}C{} {} {} {} {} {bottom}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n",
-                    leftmost_tone_x - 3,
-                    leftmost_tone_x - 9,
-                    top + 3,
-                    leftmost_tone_x - 9,
-                    bottom - 3,
-                    leftmost_tone_x - 3,
-                    rightmost_tone_x + 13,
-                    rightmost_tone_x + 19,
-                    top + 3,
-                    rightmost_tone_x + 19,
-                    bottom - 3,
-                    rightmost_tone_x + 13
-                ));
+                scene.add_path(
+                    DrawLayer::Event,
+                    format!("chord-bracket-left-{index}"),
+                    Some(PathClass::ChordBracket),
+                    vec![PathMetadata::Event(index)],
+                    PathGeometry::new(
+                        None,
+                        format!(
+                            "M{} {top}C{} {} {} {} {} {bottom}",
+                            leftmost_tone_x - 3,
+                            leftmost_tone_x - 9,
+                            top + 3,
+                            leftmost_tone_x - 9,
+                            bottom - 3,
+                            leftmost_tone_x - 3
+                        ),
+                        PathStyle::MediumOutline,
+                    ),
+                );
+                scene.add_path(
+                    DrawLayer::Event,
+                    format!("chord-bracket-right-{index}"),
+                    Some(PathClass::ChordBracket),
+                    vec![PathMetadata::Event(index)],
+                    PathGeometry::new(
+                        None,
+                        format!(
+                            "M{} {top}C{} {} {} {} {} {bottom}",
+                            rightmost_tone_x + 13,
+                            rightmost_tone_x + 19,
+                            top + 3,
+                            rightmost_tone_x + 19,
+                            bottom - 3,
+                            rightmost_tone_x + 13
+                        ),
+                        PathStyle::MediumOutline,
+                    ),
+                );
                 right = right.max(rightmost_tone_x + 22);
             }
             for (tone_index, tone_event) in event.tones.iter().enumerate() {
@@ -1430,13 +1700,23 @@ fn render_svg(score: &Score) -> String {
                 } else {
                     format!("tonehead-{index}-{tone_index}")
                 };
-                event_markup.push_str(&format!(
-                    "<path id=\"{tonehead_id}\" class=\"tonehead\" data-event=\"{index}\" data-tone-index=\"{tone_index}\" data-tone=\"{}\" data-octave=\"{}\" data-duration=\"{}\" transform=\"translate({tone_x} {octave_y})\" d=\"{}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n",
-                    tone.value,
-                    tone.octave,
-                    event.duration_name,
-                    glyph_path(tone.value)
-                ));
+                scene.add_path(
+                    DrawLayer::Event,
+                    tonehead_id,
+                    Some(PathClass::Tonehead),
+                    vec![
+                        PathMetadata::Event(index),
+                        PathMetadata::ToneIndex(tone_index),
+                        PathMetadata::Tone(tone.value),
+                        PathMetadata::Octave(tone.octave),
+                        PathMetadata::Duration(event.duration_name),
+                    ],
+                    PathGeometry::new(
+                        Some((tone_x, octave_y)),
+                        glyph_path(tone.value),
+                        PathStyle::GlyphOutline,
+                    ),
+                );
                 let tie_y = octave_y + 18;
                 if tone_event.tie_stop {
                     if let Some(position) = pending_tie_paths
@@ -1444,14 +1724,24 @@ fn render_svg(score: &Score) -> String {
                         .position(|(pending_tone, _, _)| *pending_tone == tone)
                     {
                         let (_, start_x, start_y) = pending_tie_paths.remove(position);
-                        let end_x = x + 5;
-                        tie_markup.push_str(&format!(
-                            "<path id=\"tie-{index}-{tone_index}\" class=\"tie\" d=\"M{start_x} {start_y}C{} {} {} {} {end_x} {start_y}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n",
-                            start_x + 10,
-                            start_y + 9,
-                            end_x - 10,
-                            start_y + 9
-                        ));
+                        let end_x = tone_x + 5;
+                        scene.add_path(
+                            DrawLayer::Tie,
+                            format!("tie-{index}-{tone_index}"),
+                            Some(PathClass::Tie),
+                            Vec::new(),
+                            PathGeometry::new(
+                                None,
+                                format!(
+                                    "M{start_x} {start_y}C{} {} {} {} {end_x} {start_y}",
+                                    start_x + 10,
+                                    start_y + 9,
+                                    end_x - 10,
+                                    start_y + 9
+                                ),
+                                PathStyle::MediumOutline,
+                            ),
+                        );
                         view_bottom = view_bottom.max(start_y + 10);
                     }
                 }
@@ -1473,15 +1763,37 @@ fn render_svg(score: &Score) -> String {
         }
     }
     let view_width = right + 12;
-    let view_height = view_bottom - view_top;
-    format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 {view_top} {view_width} {view_height}\" role=\"img\">\n<path id=\"staff-line-1\" d=\"M12 28H{}\" stroke=\"#171717\"/>\n<path id=\"staff-line-2\" d=\"M12 48H{}\" stroke=\"#171717\"/>\n<path id=\"staff-line-3\" d=\"M12 68H{}\" stroke=\"#171717\"/>\n<path id=\"octave-5\" d=\"{}\" transform=\"translate(26 30)\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n<path id=\"octave-4\" d=\"{}\" transform=\"translate(26 50)\" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"/>\n{beam_markup}{event_markup}{tie_markup}</svg>\n",
-        view_width - 12,
-        view_width - 12,
-        view_width - 12,
-        glyph_path(5),
-        glyph_path(4)
-    )
+    scene.view_top = view_top;
+    scene.view_width = view_width;
+    scene.view_height = view_bottom - view_top;
+    for (id, path_data) in [
+        ("staff-line-1", format!("M12 28H{}", view_width - 12)),
+        ("staff-line-2", format!("M12 48H{}", view_width - 12)),
+        ("staff-line-3", format!("M12 68H{}", view_width - 12)),
+    ] {
+        scene.add_path(
+            DrawLayer::Staff,
+            id,
+            None,
+            Vec::new(),
+            PathGeometry::new(None, path_data, PathStyle::StaffLine),
+        );
+    }
+    scene.add_path(
+        DrawLayer::Staff,
+        "octave-5",
+        None,
+        Vec::new(),
+        PathGeometry::new(Some((26, 30)), glyph_path(5), PathStyle::MediumOutline),
+    );
+    scene.add_path(
+        DrawLayer::Staff,
+        "octave-4",
+        None,
+        Vec::new(),
+        PathGeometry::new(Some((26, 50)), glyph_path(4), PathStyle::MediumOutline),
+    );
+    scene.to_svg()
 }
 
 fn rest_glyph_path(duration_name: &str) -> &'static str {
