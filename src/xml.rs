@@ -329,6 +329,7 @@ struct Parser<'a> {
     elements: Vec<Element>,
     entities: HashMap<String, Entity>,
     parameter_entities: HashMap<String, Entity>,
+    attribute_declarations: HashMap<String, Vec<AttributeDeclaration>>,
     expansion_bytes: usize,
     doctype_name: Option<String>,
     path: Vec<String>,
@@ -339,6 +340,14 @@ enum Entity {
     External,
 }
 
+#[derive(Clone)]
+struct AttributeDeclaration {
+    name: String,
+    default_value: Option<String>,
+    cdata: bool,
+    source_offset: usize,
+}
+
 impl<'a> Parser<'a> {
     fn new(source: &'a Source) -> Self {
         Self {
@@ -347,6 +356,7 @@ impl<'a> Parser<'a> {
             elements: Vec::new(),
             entities: HashMap::new(),
             parameter_entities: HashMap::new(),
+            attribute_declarations: HashMap::new(),
             expansion_bytes: 0,
             doctype_name: None,
             path: Vec::new(),
@@ -485,6 +495,11 @@ impl<'a> Parser<'a> {
                 cursor += close + 7;
                 continue;
             }
+            if content[cursor..].starts_with("<?") {
+                cursor =
+                    self.skip_dtd_processing_instruction(content, cursor, content.len(), base)?;
+                continue;
+            }
             if content[cursor..].starts_with("<!ENTITY") {
                 let (next, name, entity, parameter) =
                     self.entity_declaration(content, cursor, base)?;
@@ -572,6 +587,46 @@ impl<'a> Parser<'a> {
             ));
         }
         Ok(())
+    }
+
+    fn skip_dtd_processing_instruction(
+        &self,
+        content: &str,
+        start: usize,
+        end: usize,
+        base: usize,
+    ) -> Result<usize, XmlError> {
+        let target_start = start + 2;
+        let (target, target_end) = parse_name_at(content, target_start).ok_or_else(|| {
+            self.source.error(
+                base + start,
+                "malformed",
+                "invalid processing-instruction target",
+            )
+        })?;
+        if target.eq_ignore_ascii_case("xml") {
+            return Err(self.source.error(
+                base + start,
+                "malformed",
+                "processing-instruction target 'xml' is reserved",
+            ));
+        }
+        let next = content[target_end..end].chars().next();
+        if next.is_some_and(|character| !is_space(character) && character != '?') {
+            return Err(self.source.error(
+                base + target_end,
+                "malformed",
+                "processing-instruction target must be separated from its data",
+            ));
+        }
+        let close = content[target_end..end].find("?>").ok_or_else(|| {
+            self.source.error(
+                base + start,
+                "malformed",
+                "unterminated processing instruction",
+            )
+        })?;
+        Ok(target_end + close + 2)
     }
 
     fn entity_declaration(
@@ -805,7 +860,7 @@ impl<'a> Parser<'a> {
     }
 
     fn skip_dtd_declaration(
-        &self,
+        &mut self,
         content: &str,
         start: usize,
         base: usize,
@@ -825,8 +880,17 @@ impl<'a> Parser<'a> {
                 quote = Some(character);
             } else if character == '>' {
                 let end = cursor + 1;
-                DtdDeclarationParser::new(self.source, &content[start..end], base + start)
-                    .parse()?;
+                if let Some((element_name, declarations)) =
+                    DtdDeclarationParser::new(self.source, &content[start..end], base + start)
+                        .parse()?
+                {
+                    let existing = self.attribute_declarations.entry(element_name).or_default();
+                    for declaration in declarations {
+                        if !existing.iter().any(|prior| prior.name == declaration.name) {
+                            existing.push(declaration);
+                        }
+                    }
+                }
                 return Ok(end);
             }
             cursor += character.len_utf8();
@@ -893,6 +957,7 @@ impl<'a> Parser<'a> {
             raw_attributes.push((attribute_name, value));
         }
 
+        self.apply_attribute_declarations(&qualified_name, &mut raw_attributes)?;
         let mut namespaces = inherited_namespaces.clone();
         for (name, value) in &raw_attributes {
             if name == "xmlns" {
@@ -1049,6 +1114,87 @@ impl<'a> Parser<'a> {
         }
         self.path.pop();
         Ok(index)
+    }
+
+    fn apply_attribute_declarations(
+        &mut self,
+        element_name: &str,
+        attributes: &mut Vec<(String, String)>,
+    ) -> Result<(), XmlError> {
+        let declarations = self
+            .attribute_declarations
+            .get(element_name)
+            .cloned()
+            .unwrap_or_default();
+        for declaration in &declarations {
+            if let Some((_, value)) = attributes
+                .iter_mut()
+                .find(|(name, _)| name == &declaration.name)
+            {
+                *value = normalize_attribute_value(value, declaration.cdata);
+            } else if let Some(default_value) = &declaration.default_value {
+                let expanded =
+                    self.expand_attribute_default(default_value, declaration.source_offset)?;
+                attributes.push((
+                    declaration.name.clone(),
+                    normalize_attribute_value(&expanded, declaration.cdata),
+                ));
+            }
+        }
+        for (name, value) in attributes.iter_mut() {
+            if !declarations
+                .iter()
+                .any(|declaration| declaration.name == *name)
+            {
+                *value = normalize_attribute_value(value, true);
+            }
+        }
+        Ok(())
+    }
+
+    fn expand_attribute_default(&mut self, raw: &str, position: usize) -> Result<String, XmlError> {
+        let mut output = String::new();
+        let mut cursor = 0;
+        while let Some(relative) = raw[cursor..].find('&') {
+            let ampersand = cursor + relative;
+            output.push_str(&raw[cursor..ampersand]);
+            let end = raw[ampersand..]
+                .find(';')
+                .map(|relative| ampersand + relative)
+                .ok_or_else(|| {
+                    self.source.error(
+                        position,
+                        "malformed",
+                        "unterminated reference in default attribute",
+                    )
+                })?;
+            let name = &raw[ampersand + 1..end];
+            let mut replacement = String::new();
+            let markup =
+                self.expand_reference_value(name, position, 0, &mut Vec::new(), &mut replacement)?;
+            if markup {
+                return Err(self.source.error(
+                    position,
+                    "malformed",
+                    "markup entity replacement is not allowed in a default attribute value",
+                ));
+            }
+            self.expansion_bytes = self
+                .expansion_bytes
+                .checked_add(replacement.len())
+                .filter(|size| *size <= MAX_ENTITY_EXPANSION_BYTES)
+                .ok_or_else(|| {
+                    self.source.error(
+                        position,
+                        "resource limit",
+                        &format!("entity expansion exceeds the {MAX_ENTITY_EXPANSION_BYTES}-byte aggregate limit"),
+                    )
+                })?;
+            output.push_str(&replacement);
+            cursor = end + 1;
+        }
+        output.push_str(&raw[cursor..]);
+        Ok(output)
     }
 
     fn character_data(
@@ -1503,8 +1649,9 @@ impl<'a> DtdDeclarationParser<'a> {
         }
     }
 
-    fn parse(mut self) -> Result<(), XmlError> {
+    fn parse(mut self) -> Result<Option<(String, Vec<AttributeDeclaration>)>, XmlError> {
         self.expect("<!")?;
+        let mut attribute_list = None;
         if self.consume_keyword("ELEMENT") {
             self.require_space()?;
             self.name()?;
@@ -1512,7 +1659,8 @@ impl<'a> DtdDeclarationParser<'a> {
             self.content_spec()?;
         } else if self.consume_keyword("ATTLIST") {
             self.require_space()?;
-            self.name()?;
+            let element_name = self.read_name()?;
+            let mut declarations = Vec::new();
             loop {
                 if !self.take_space() {
                     break;
@@ -1520,12 +1668,20 @@ impl<'a> DtdDeclarationParser<'a> {
                 if self.starts_with(">") {
                     break;
                 }
-                self.name()?;
+                let source_offset = self.base + self.cursor;
+                let name = self.read_name()?;
                 self.require_space()?;
-                self.attribute_type()?;
+                let cdata = self.attribute_type()?;
                 self.require_space()?;
-                self.default_declaration()?;
+                let default_value = self.default_declaration()?;
+                declarations.push(AttributeDeclaration {
+                    name,
+                    default_value,
+                    cdata,
+                    source_offset,
+                });
             }
+            attribute_list = Some((element_name, declarations));
         } else if self.consume_keyword("NOTATION") {
             self.require_space()?;
             self.name()?;
@@ -1541,7 +1697,7 @@ impl<'a> DtdDeclarationParser<'a> {
         if self.cursor != self.text.len() {
             return Err(self.error("unexpected content after DTD markup declaration"));
         }
-        Ok(())
+        Ok(attribute_list)
     }
 
     fn validate_doctype_external_id(
@@ -1657,19 +1813,24 @@ impl<'a> DtdDeclarationParser<'a> {
         }
     }
 
-    fn attribute_type(&mut self) -> Result<(), XmlError> {
+    fn attribute_type(&mut self) -> Result<bool, XmlError> {
+        if self.consume_keyword("CDATA") {
+            return Ok(true);
+        }
         for kind in [
-            "CDATA", "IDREFS", "IDREF", "ID", "ENTITIES", "ENTITY", "NMTOKENS", "NMTOKEN",
+            "IDREFS", "IDREF", "ID", "ENTITIES", "ENTITY", "NMTOKENS", "NMTOKEN",
         ] {
             if self.consume_keyword(kind) {
-                return Ok(());
+                return Ok(false);
             }
         }
         if self.consume_keyword("NOTATION") {
             self.require_space()?;
-            return self.name_enumeration();
+            self.name_enumeration()?;
+            return Ok(false);
         }
-        self.name_token_enumeration()
+        self.name_token_enumeration()?;
+        Ok(false)
     }
 
     fn name_enumeration(&mut self) -> Result<(), XmlError> {
@@ -1698,17 +1859,17 @@ impl<'a> DtdDeclarationParser<'a> {
         self.expect(")")
     }
 
-    fn default_declaration(&mut self) -> Result<(), XmlError> {
+    fn default_declaration(&mut self) -> Result<Option<String>, XmlError> {
         if self.consume_keyword("#REQUIRED") || self.consume_keyword("#IMPLIED") {
-            return Ok(());
+            return Ok(None);
         }
         if self.consume_keyword("#FIXED") {
             self.require_space()?;
         }
-        self.attribute_value()
+        self.attribute_value().map(Some)
     }
 
-    fn attribute_value(&mut self) -> Result<(), XmlError> {
+    fn attribute_value(&mut self) -> Result<String, XmlError> {
         let quote = self
             .current()
             .ok_or_else(|| self.error("missing attribute value"))?;
@@ -1716,10 +1877,12 @@ impl<'a> DtdDeclarationParser<'a> {
             return Err(self.error("attribute values must be quoted"));
         }
         self.advance();
+        let value_start = self.cursor;
         while let Some(character) = self.current() {
             if character == quote {
+                let value = self.text[value_start..self.cursor].to_owned();
                 self.advance();
-                return Ok(());
+                return Ok(value);
             }
             if character == '<' {
                 return Err(self.error("'<' is not allowed in an attribute value"));
@@ -1796,10 +1959,15 @@ impl<'a> DtdDeclarationParser<'a> {
     }
 
     fn name(&mut self) -> Result<(), XmlError> {
+        self.read_name().map(|_| ())
+    }
+
+    fn read_name(&mut self) -> Result<String, XmlError> {
         let (_, end) = parse_name_at(self.text, self.cursor)
             .ok_or_else(|| self.error("expected XML Name in DTD declaration"))?;
+        let name = self.text[self.cursor..end].to_owned();
         self.cursor = end;
-        Ok(())
+        Ok(name)
     }
 
     fn nmtoken(&mut self) -> Result<(), XmlError> {
@@ -2021,6 +2189,28 @@ fn escape_xml_attribute(value: &str) -> String {
         });
     }
     escaped
+}
+
+fn normalize_attribute_value(value: &str, cdata: bool) -> String {
+    let normalized = value
+        .chars()
+        .map(|character| {
+            if matches!(character, '\t' | '\n' | '\r') {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    if cdata {
+        normalized
+    } else {
+        normalized
+            .split(' ')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 fn is_space(character: char) -> bool {

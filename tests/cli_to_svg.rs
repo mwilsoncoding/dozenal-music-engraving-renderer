@@ -494,7 +494,7 @@ fn accepts_valid_element_attribute_and_notation_declarations() {
     let input = directory.join("valid-dtd.musicxml");
     let fixture = include_str!("fixtures/minimal.musicxml").replace(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
-            "<!DOCTYPE score-partwise [<!ELEMENT score-partwise (part-list,part)><!ATTLIST score-partwise version CDATA #REQUIRED><!NOTATION sample PUBLIC '-//example//NOTATION sample//EN'><!ELEMENT foo:bar:baz ANY>] >\n",
+            "<!DOCTYPE score-partwise [<?dtd instruction?><!ELEMENT score-partwise (part-list,part)><!ATTLIST score-partwise version CDATA #REQUIRED><!NOTATION sample PUBLIC '-//example//NOTATION sample//EN'><!ELEMENT foo:bar:baz ANY>] >\n",
     );
     fs::write(&input, fixture).expect("write valid internal subset");
 
@@ -561,6 +561,36 @@ fn accepts_gt_inside_quoted_external_entity_identifier_without_resolving_it() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(directory.join("quoted-external-id.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn applies_internal_attlist_default_attributes_before_musicxml_import() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("default-attributes.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n", "")
+        .replace("<score-partwise version=\"4.0\">", "<score-partwise>")
+        .replace("<score-part id=\"P1\">", "<score-part id=\"  P1  \">")
+        .replace("<part id=\"P1\">", "<part>")
+        .replace(
+            "<score-partwise>",
+            "<!DOCTYPE score-partwise [<!ENTITY ver '4.0'><!ATTLIST score-partwise version CDATA '&ver;'><!ATTLIST score-part id ID #IMPLIED><!ATTLIST part id ID 'P1'>]>\n<score-partwise>",
+        );
+    fs::write(&input, fixture).expect("write score using default attributes");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "DTD defaults were not applied: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(directory.join("default-attributes.svg").exists());
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
