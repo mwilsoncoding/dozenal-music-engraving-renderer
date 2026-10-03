@@ -1254,6 +1254,7 @@ struct DrawCommand {
 struct PathGeometry {
     transform: Option<(i32, i32)>,
     x_offset: f64,
+    y_offset: f64,
     scale: f64,
     rotation: Option<(i32, i32, i32)>,
     path_data: String,
@@ -1265,6 +1266,7 @@ impl PathGeometry {
         Self {
             transform,
             x_offset: 0.0,
+            y_offset: 0.0,
             scale: 1.0,
             rotation: None,
             path_data: path_data.into(),
@@ -1279,6 +1281,11 @@ impl PathGeometry {
 
     fn offset_x(mut self, offset: f64) -> Self {
         self.x_offset = offset;
+        self
+    }
+
+    fn offset_y(mut self, offset: f64) -> Self {
+        self.y_offset = offset;
         self
     }
 
@@ -1348,11 +1355,12 @@ fn event_geometry(
     let mut incoming = Vec::new();
     if event.tones.is_empty() {
         let glyph = bravura_glyphs::rest(event.duration_name);
+        let rest_y = rest_origin_y(event.duration_name, glyph.bounds);
         primary.push(ComponentBounds::filled(
             f64::from(x) + glyph.bounds.0,
-            40.0 + glyph.bounds.1,
+            rest_y + glyph.bounds.1,
             f64::from(x) + glyph.bounds.2,
-            40.0 + glyph.bounds.3,
+            rest_y + glyph.bounds.3,
         ));
         return EventGeometry { primary, incoming };
     }
@@ -1644,13 +1652,26 @@ impl Scene {
         }
         let mut transforms = String::new();
         if let Some((x, y)) = command.geometry.transform {
-            if command.geometry.x_offset == 0.0 {
+            if command.geometry.x_offset == 0.0 && command.geometry.y_offset == 0.0 {
                 write!(transforms, "translate({x} {y})")
-            } else {
+            } else if command.geometry.y_offset == 0.0 {
                 write!(
                     transforms,
                     "translate({:.2} {y})",
                     f64::from(x) + command.geometry.x_offset
+                )
+            } else if command.geometry.x_offset == 0.0 {
+                write!(
+                    transforms,
+                    "translate({x} {:.2})",
+                    f64::from(y) + command.geometry.y_offset
+                )
+            } else {
+                write!(
+                    transforms,
+                    "translate({:.2} {:.2})",
+                    f64::from(x) + command.geometry.x_offset,
+                    f64::from(y) + command.geometry.y_offset
                 )
             }
             .expect("writing to a String cannot fail");
@@ -1691,6 +1712,17 @@ impl Scene {
             PathStyle::Solid => svg.push_str(" fill=\"#171717\""),
         }
         svg.push_str("/>\n");
+    }
+}
+
+fn rest_origin_y(duration_name: &str, bounds: (f64, f64, f64, f64)) -> f64 {
+    let (_, top, _, bottom) = bounds;
+    let center_line_y = 68.0;
+    match duration_name {
+        "whole" => center_line_y - top,
+        "half" => center_line_y - bottom,
+        "quarter" | "eighth" | "16th" | "32nd" | "64th" => center_line_y - (top + bottom) / 2.0,
+        _ => unreachable!("rest duration is validated before rendering"),
     }
 }
 
@@ -1768,16 +1800,16 @@ fn render_svg(score: &Score) -> String {
                 right = right.max(component.right.ceil() as i32);
             }
             if event.tones.is_empty() {
+                let glyph = bravura_glyphs::rest(event.duration_name);
+                let rest_y = rest_origin_y(event.duration_name, glyph.bounds);
+                let rest_y_base = rest_y.floor() as i32;
                 scene.add_path(
                     DrawLayer::Event,
                     format!("rest-{index}"),
                     Some(PathClass::Rest),
                     vec![PathMetadata::Duration(event.duration_name)],
-                    PathGeometry::new(
-                        Some((x, 40)),
-                        bravura_glyphs::rest(event.duration_name).path,
-                        PathStyle::BravuraGlyph,
-                    ),
+                    PathGeometry::new(Some((x, rest_y_base)), glyph.path, PathStyle::BravuraGlyph)
+                        .offset_y(rest_y - f64::from(rest_y_base)),
                 );
                 right = right.max(x + 24);
                 previous_event_geometry = Some(geometry);

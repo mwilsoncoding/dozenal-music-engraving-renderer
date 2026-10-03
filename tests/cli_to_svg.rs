@@ -949,6 +949,75 @@ fn separates_same_octave_chord_tones_and_clears_the_preceding_event() {
 }
 
 #[test]
+fn positions_rests_relative_to_the_center_staff_line() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("rest-positions.musicxml");
+    let source = include_str!("fixtures/minimal.musicxml")
+        .replace("<divisions>1</divisions>", "<divisions>16</divisions>");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let rest_notes = [
+        ("whole", 64),
+        ("half", 32),
+        ("quarter", 16),
+        ("eighth", 8),
+        ("16th", 4),
+        ("32nd", 2),
+        ("64th", 1),
+    ]
+    .into_iter()
+    .map(|(duration, units)| {
+        format!(
+            "<note><rest/><duration>{units}</duration><voice>1</voice><type>{duration}</type></note>"
+        )
+    })
+    .collect::<Vec<_>>()
+    .join("\n      ");
+    let fixture = source.replace(original_note, &format!("      {rest_notes}"));
+    fs::write(&input, fixture).expect("write rest-position score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "rest-position score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("rest-positions.svg")).expect("read SVG");
+    let rest_lines = svg
+        .lines()
+        .filter(|line| line.contains("class=\"rest\""))
+        .collect::<Vec<_>>();
+    assert_eq!(rest_lines.len(), rest_notes.lines().count(), "{svg}");
+
+    for (line, (duration, expected_y)) in rest_lines.iter().zip([
+        ("whole", 63.66),
+        ("half", 56.34),
+        ("quarter", 59.0),
+        ("eighth", 59.0),
+        ("16th", 59.0),
+        ("32nd", 59.0),
+        ("64th", 59.0),
+    ]) {
+        let actual_y = line
+            .split("transform=\"translate(")
+            .nth(1)
+            .and_then(|value| value.split_whitespace().nth(1))
+            .and_then(|value| value.strip_suffix(")\""))
+            .and_then(|value| value.parse::<f64>().ok())
+            .expect("rest y translation");
+        assert!(
+            (actual_y - expected_y).abs() < 0.001,
+            "{duration} rest should align with the center staff line at y={expected_y}, got y={actual_y}: {line}"
+        );
+    }
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn renders_simple_numeric_meter_and_rests() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
