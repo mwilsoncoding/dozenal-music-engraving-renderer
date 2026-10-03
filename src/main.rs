@@ -1203,6 +1203,7 @@ fn leaf_text(element: &Element) -> Result<&str, String> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DrawLayer {
     Staff,
+    Barline,
     Beam,
     Event,
     Tie,
@@ -1272,6 +1273,286 @@ impl PathGeometry {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ComponentBounds {
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+}
+
+impl ComponentBounds {
+    fn stroked(left: f64, top: f64, right: f64, bottom: f64, stroke_width: f64) -> Self {
+        let stroke_radius = stroke_width / 2.0;
+        Self {
+            left: left - stroke_radius,
+            top: top - stroke_radius,
+            right: right + stroke_radius,
+            bottom: bottom + stroke_radius,
+        }
+    }
+
+    fn filled(left: f64, top: f64, right: f64, bottom: f64) -> Self {
+        Self {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    fn overlaps_vertically(self, other: Self) -> bool {
+        self.top <= other.bottom && other.top <= self.bottom
+    }
+}
+
+struct EventGeometry {
+    primary: Vec<ComponentBounds>,
+    incoming: Vec<ComponentBounds>,
+}
+
+impl EventGeometry {
+    fn all(&self) -> impl Iterator<Item = &ComponentBounds> {
+        self.primary.iter().chain(&self.incoming)
+    }
+}
+
+fn event_geometry(
+    event: &Event,
+    x: i32,
+    active_beams: &[Option<(i32, i32)>; 5],
+    pending_ties: &[(Tone, i32, i32)],
+) -> EventGeometry {
+    let mut primary = Vec::new();
+    let mut incoming = Vec::new();
+    if event.tones.is_empty() {
+        let (left, top, right, bottom) = match event.duration_name {
+            "whole" => (2.0, 5.0, 10.0, 8.0),
+            "half" => (2.0, 8.0, 10.0, 11.0),
+            "quarter" => (4.0, 1.0, 9.0, 15.0),
+            "eighth" | "16th" | "32nd" => (4.0, 1.0, 11.0, 15.0),
+            "64th" => (4.0, 1.0, 11.0, 16.0),
+            _ => unreachable!("rest duration was validated while parsing"),
+        };
+        primary.push(ComponentBounds::stroked(
+            f64::from(x) + left,
+            40.0 + top,
+            f64::from(x) + right,
+            40.0 + bottom,
+            1.8,
+        ));
+        return EventGeometry { primary, incoming };
+    }
+
+    let mut lane_offsets = [0i32; 10];
+    let tone_xs = event
+        .tones
+        .iter()
+        .map(|tone| {
+            let octave = usize::from(tone.tone.octave);
+            let tone_x = x + lane_offsets[octave];
+            lane_offsets[octave] += 12;
+            tone_x
+        })
+        .collect::<Vec<_>>();
+    let leftmost_tone_x = *tone_xs.iter().min().expect("event has tones");
+    let rightmost_tone_x = *tone_xs.iter().max().expect("event has tones");
+    for (tone_index, tone_event) in event.tones.iter().enumerate() {
+        let (left, right) = match tone_event.tone.value {
+            0 => (1.0, 11.0),
+            1 => (4.0, 8.0),
+            _ => (2.0, 10.0),
+        };
+        let tone_y = lane_y(tone_event.tone.octave);
+        primary.push(ComponentBounds::stroked(
+            f64::from(tone_xs[tone_index]) + left,
+            f64::from(tone_y) + 2.0,
+            f64::from(tone_xs[tone_index]) + right,
+            f64::from(tone_y) + 16.0,
+            1.8,
+        ));
+    }
+
+    let stem_tone_index = event
+        .tones
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, tone)| lane_y(tone.tone.octave))
+        .map(|(tone_index, _)| tone_index)
+        .expect("pitched event has a tone");
+    let stem_octave_y = lane_y(event.tones[stem_tone_index].tone.octave);
+    let stem_start = stem_octave_y - 1;
+    let stem_end = stem_octave_y - 30;
+    let stem_x = tone_xs[stem_tone_index] + 6;
+    if event.duration_name != "whole" {
+        primary.push(ComponentBounds::stroked(
+            f64::from(stem_x),
+            f64::from(stem_end),
+            f64::from(stem_x),
+            f64::from(stem_start),
+            1.5,
+        ));
+        let flag_count = match event.duration_name {
+            "eighth" => 1,
+            "16th" => 2,
+            "32nd" => 3,
+            "64th" => 4,
+            _ => 0,
+        };
+        for flag in 0..flag_count {
+            let level = (flag + 1) as u8;
+            if event.beams.iter().any(|beam| beam.level == level) {
+                continue;
+            }
+            let flag_y = stem_end + flag * 3;
+            primary.push(ComponentBounds::stroked(
+                f64::from(stem_x),
+                f64::from(flag_y),
+                f64::from(stem_x + 10),
+                f64::from(flag_y + 10),
+                1.5,
+            ));
+        }
+    }
+
+    for beam in &event.beams {
+        let level = usize::from(beam.level);
+        let offset = i32::from(beam.level - 1) * 4;
+        let beam_y = stem_end + offset;
+        match beam.state {
+            BeamState::Begin => {}
+            BeamState::Continue | BeamState::End => {
+                if let Some((start_x, start_y)) = active_beams[level] {
+                    incoming.push(ComponentBounds::stroked(
+                        f64::from(start_x.min(stem_x)),
+                        f64::from(start_y.min(beam_y)),
+                        f64::from(start_x.max(stem_x)),
+                        f64::from(start_y.max(beam_y)),
+                        3.0,
+                    ));
+                }
+            }
+            BeamState::ForwardHook | BeamState::BackwardHook => {
+                let direction = if beam.state == BeamState::ForwardHook {
+                    1
+                } else {
+                    -1
+                };
+                let end_x = stem_x + direction * 9;
+                primary.push(ComponentBounds::stroked(
+                    f64::from(stem_x.min(end_x)),
+                    f64::from(beam_y),
+                    f64::from(stem_x.max(end_x)),
+                    f64::from(beam_y + 4),
+                    3.0,
+                ));
+            }
+        }
+    }
+
+    let first_tone = &event.tones[0].tone;
+    for mark in 0..event.dots {
+        let (mark_x, mark_y) = match (event.duration_name, event.dots, mark) {
+            ("quarter", 1, _) => (x + 14, lane_y(first_tone.octave) + 12),
+            ("half", 2, _) => (x + 14, lane_y(first_tone.octave) + 5 + i32::from(mark) * 7),
+            ("half", 3, 0..=1) => (x + 14, lane_y(first_tone.octave) + 5 + i32::from(mark) * 7),
+            ("half", 3, _) => (x + 19, lane_y(first_tone.octave) + 12),
+            _ => (x + 14, lane_y(first_tone.octave) + 9),
+        };
+        primary.push(ComponentBounds::filled(
+            f64::from(mark_x),
+            f64::from(mark_y) - 1.2,
+            f64::from(mark_x) + 2.4,
+            f64::from(mark_y) + 1.2,
+        ));
+    }
+
+    if event.tones.iter().any(|tone| tone.tone.octave <= 1) {
+        primary.push(ComponentBounds::stroked(
+            f64::from(leftmost_tone_x - 8),
+            148.0,
+            f64::from(rightmost_tone_x + 20),
+            148.0,
+            1.0,
+        ));
+    }
+    if event.tones.iter().any(|tone| tone.tone.octave >= 8) {
+        primary.push(ComponentBounds::stroked(
+            f64::from(leftmost_tone_x - 8),
+            -12.0,
+            f64::from(rightmost_tone_x + 20),
+            -12.0,
+            1.0,
+        ));
+    }
+    if event.tones.len() > 1 {
+        let top = event
+            .tones
+            .iter()
+            .map(|tone| lane_y(tone.tone.octave))
+            .min()
+            .expect("chord has a tone");
+        let bottom = event
+            .tones
+            .iter()
+            .map(|tone| lane_y(tone.tone.octave) + 18)
+            .max()
+            .expect("chord has a tone");
+        primary.push(ComponentBounds::stroked(
+            f64::from(leftmost_tone_x - 9),
+            f64::from(top),
+            f64::from(leftmost_tone_x - 3),
+            f64::from(bottom),
+            1.5,
+        ));
+        primary.push(ComponentBounds::stroked(
+            f64::from(rightmost_tone_x + 13),
+            f64::from(top),
+            f64::from(rightmost_tone_x + 19),
+            f64::from(bottom),
+            1.5,
+        ));
+    }
+
+    for (tone_index, tone_event) in event.tones.iter().enumerate() {
+        if !tone_event.tie_stop {
+            continue;
+        }
+        let Some((_, start_x, start_y)) = pending_ties
+            .iter()
+            .find(|(pending_tone, _, _)| *pending_tone == tone_event.tone)
+        else {
+            continue;
+        };
+        let end_x = tone_xs[tone_index] + 5;
+        incoming.push(ComponentBounds::stroked(
+            f64::from((*start_x).min(*start_x + 10).min(end_x - 10).min(end_x)),
+            f64::from(*start_y),
+            f64::from((*start_x).max(*start_x + 10).max(end_x - 10).max(end_x)),
+            f64::from(*start_y + 9),
+            1.5,
+        ));
+    }
+
+    EventGeometry { primary, incoming }
+}
+
+fn next_event_x(preferred_x: i32, previous: &EventGeometry, current: &EventGeometry) -> i32 {
+    let mut required_x = preferred_x;
+    for previous_component in previous.all() {
+        for current_component in &current.primary {
+            if previous_component.overlaps_vertically(*current_component) {
+                required_x = required_x.max(
+                    (f64::from(preferred_x) + previous_component.right + 2.0
+                        - current_component.left)
+                        .ceil() as i32,
+                );
+            }
+        }
+    }
+    required_x
+}
+
 struct Scene {
     view_top: i32,
     view_width: i32,
@@ -1322,6 +1603,7 @@ impl Scene {
         .expect("writing to a String cannot fail");
         for layer in [
             DrawLayer::Staff,
+            DrawLayer::Barline,
             DrawLayer::Beam,
             DrawLayer::Event,
             DrawLayer::Tie,
@@ -1407,7 +1689,8 @@ fn render_svg(score: &Score) -> String {
     let mut meter_index = 0;
     let mut pending_tie_paths: Vec<(Tone, i32, i32)> = Vec::new();
     let mut active_beams = [None; 5];
-    for measure in &score.measures {
+    for (measure_index, measure) in score.measures.iter().enumerate() {
+        let mut previous_event_geometry = None;
         if let Some(meter) = measure.meter {
             if active_meter != Some(meter) {
                 let numerator_id = if meter_index == 0 {
@@ -1420,7 +1703,7 @@ fn render_svg(score: &Score) -> String {
                 } else {
                     format!("meter-denominator-{meter_index}")
                 };
-                let meter_x = x - 24;
+                let meter_x = if measure_index == 0 { x - 24 } else { x };
                 scene.add_path(
                     DrawLayer::Event,
                     numerator_id,
@@ -1451,6 +1734,20 @@ fn render_svg(score: &Score) -> String {
             active_meter = Some(meter);
         }
         for event in &measure.events {
+            let preferred_x = x;
+            let preferred_geometry =
+                event_geometry(event, preferred_x, &active_beams, &pending_tie_paths);
+            if let Some(previous) = &previous_event_geometry {
+                x = next_event_x(preferred_x, previous, &preferred_geometry);
+            }
+            let geometry = if x == preferred_x {
+                preferred_geometry
+            } else {
+                event_geometry(event, x, &active_beams, &pending_tie_paths)
+            };
+            for component in geometry.all() {
+                right = right.max(component.right.ceil() as i32);
+            }
             if event.tones.is_empty() {
                 scene.add_path(
                     DrawLayer::Event,
@@ -1464,7 +1761,8 @@ fn render_svg(score: &Score) -> String {
                     ),
                 );
                 right = right.max(x + 24);
-                x += (event.duration_units * 5).div_ceil(2).max(12) as i32;
+                previous_event_geometry = Some(geometry);
+                x += (event.duration_units * 5).div_ceil(2) as i32;
                 index += 1;
                 continue;
             }
@@ -1754,15 +2052,28 @@ fn render_svg(score: &Score) -> String {
                 view_bottom = view_bottom.max(octave_y + 37);
             }
             right = right.max(x + 28);
-            let minimum_advance = if event.tones.len() > 1 {
-                rightmost_tone_x - x + 28
-            } else {
-                12
-            };
-            let duration_advance = (event.duration_units * 5).div_ceil(2) as i32;
-            x += duration_advance.max(minimum_advance);
+            previous_event_geometry = Some(geometry);
+            x += (event.duration_units * 5).div_ceil(2) as i32;
             index += 1;
         }
+        let mut barline_x = x;
+        if let Some(geometry) = &previous_event_geometry {
+            let barline_span = ComponentBounds::filled(0.0, 28.0, 0.0, 108.0);
+            for component in geometry.all() {
+                if component.overlaps_vertically(barline_span) {
+                    barline_x = barline_x.max((component.right + 2.5).ceil() as i32);
+                }
+            }
+        }
+        scene.add_path(
+            DrawLayer::Barline,
+            format!("barline-{}", measure_index + 1),
+            None,
+            Vec::new(),
+            PathGeometry::new(None, format!("M{barline_x} 28V108"), PathStyle::StaffLine),
+        );
+        right = right.max(barline_x + 12);
+        x = barline_x + 3;
     }
     let view_width = right + 12;
     scene.view_top = view_top;
