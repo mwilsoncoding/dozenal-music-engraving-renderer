@@ -725,7 +725,7 @@ fn canonical_score_covers_supported_mvp_content_in_self_contained_svg() {
     assert!(svg.contains("id=\"meter-denominator\""), "{svg}");
     assert_filled_glyph_paths(&svg);
     assert_eq!(svg.matches("class=\"tonehead\"").count(), 24, "{svg}");
-    assert_eq!(svg.matches("class=\"rest\"").count(), 11, "{svg}");
+    assert_eq!(svg.matches("class=\"rest\"").count(), 10, "{svg}");
     assert_eq!(svg.matches("class=\"stem\"").count(), 21, "{svg}");
     assert_eq!(svg.matches("class=\"duration-mark\"").count(), 6, "{svg}");
     assert_eq!(svg.matches("class=\"flag\"").count(), 1, "{svg}");
@@ -775,8 +775,12 @@ fn canonical_score_covers_supported_mvp_content_in_self_contained_svg() {
             "missing {duration}: {svg}"
         );
     }
-    assert!(svg.contains("data-tone=\"1\" data-octave=\"0\""), "{svg}");
-    assert!(svg.contains("data-tone=\"10\" data-octave=\"9\""), "{svg}");
+    assert!(svg.contains("data-tone=\"0\" data-octave=\"0\""), "{svg}");
+    assert!(svg.contains("data-tone=\"9\" data-octave=\"9\""), "{svg}");
+    assert!(
+        svg.contains("data-event=\"0\" data-tone-index=\"0\" data-tone=\"11\" data-octave=\"3\""),
+        "lowered written pitch plus the retained +1 transpose should render as B3: {svg}"
+    );
     for octave in 0..=9 {
         assert!(
             svg.contains(&format!("data-octave=\"{octave}\"")),
