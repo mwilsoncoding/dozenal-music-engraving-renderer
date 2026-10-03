@@ -69,6 +69,29 @@ fn renders_fixture_to_default_and_explicit_svg_paths() {
 }
 
 #[test]
+fn accepts_a_single_voice_with_a_nondefault_identifier() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("voice-two.musicxml");
+    let fixture =
+        include_str!("fixtures/minimal.musicxml").replace("<voice>1</voice>", "<voice>2</voice>");
+    fs::write(&input, fixture).expect("write single-voice score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "single voice with ID 2 was rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(directory.join("voice-two.svg").is_file());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn spaces_sequential_notes_according_to_duration() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");

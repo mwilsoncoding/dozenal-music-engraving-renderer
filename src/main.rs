@@ -140,6 +140,7 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
         ));
     }
     let mut value_errors = collect_value_errors(&elements);
+    value_errors.extend(collect_voice_errors(&elements));
     value_errors.extend(collect_duration_errors(&elements));
     if !value_errors.is_empty() {
         return Err(value_errors.join("\n"));
@@ -598,12 +599,7 @@ fn parse_note(
             ));
         }
     }
-    if leaf_text(&elements[voice])? != "1" {
-        return Err(element_diagnostic(
-            &elements[voice],
-            "only voice 1 is supported".to_owned(),
-        ));
-    }
+    leaf_text(&elements[voice])?;
     let (duration_name, base_units, mark_count) = match leaf_text(&elements[note_type])? {
         "whole" => ("whole", 64, 0),
         "half" => ("half", 32, 2),
@@ -959,6 +955,33 @@ fn element_diagnostic(element: &Element, message: String) -> String {
     )
 }
 
+fn collect_voice_errors(elements: &[Element]) -> Vec<String> {
+    let mut voice_id = None;
+    let mut errors = Vec::new();
+    for element in elements.iter().filter(|element| element.name == "voice") {
+        if !element.children.is_empty() || !element.attributes.is_empty() {
+            continue;
+        }
+        let value = element.text.trim();
+        if value.is_empty() {
+            errors.push(element_diagnostic(
+                element,
+                "unsupported score: <voice> identifier must not be empty".to_owned(),
+            ));
+        } else if let Some(existing_id) = voice_id {
+            if existing_id != value {
+                errors.push(element_diagnostic(
+                    element,
+                    "unsupported score: multiple voices are not supported".to_owned(),
+                ));
+            }
+        } else {
+            voice_id = Some(value);
+        }
+    }
+    errors
+}
+
 fn collect_value_errors(elements: &[Element]) -> Vec<String> {
     let mut errors = Vec::new();
     for element in elements {
@@ -967,7 +990,6 @@ fn collect_value_errors(elements: &[Element]) -> Vec<String> {
         }
         let value = element.text.trim();
         let message = match element.name.as_str() {
-            "voice" if value != "1" => Some("unsupported score: <voice> must be 1"),
             "alter"
                 if value
                     .parse::<i32>()
