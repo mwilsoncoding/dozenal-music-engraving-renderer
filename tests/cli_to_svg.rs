@@ -69,6 +69,228 @@ fn renders_fixture_to_default_and_explicit_svg_paths() {
 }
 
 #[test]
+fn spaces_sequential_notes_according_to_duration() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("rhythmic-sequence.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>",
+        "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>eighth</type></note>\n      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>eighth</type></note>\n      <note><pitch><step>E</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>quarter</type></note>\n      <note><pitch><step>F</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>quarter</type></note>",
+    ).replace(
+        "<divisions>1</divisions>",
+        "<divisions>2</divisions>",
+    );
+    fs::write(&input, fixture).expect("write rhythmic score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "rhythmic score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("rhythmic-sequence.svg")).expect("read SVG");
+    let positions = svg
+        .lines()
+        .filter(|line| line.contains("class=\"tonehead\""))
+        .map(|line| {
+            let start = line.find("translate(").expect("tonehead transform") + 10;
+            let end = line[start..].find(' ').expect("x/y separator") + start;
+            line[start..end].parse::<i32>().expect("x coordinate")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(positions.len(), 4, "{svg}");
+    let intervals = positions
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .collect::<Vec<_>>();
+    assert!(intervals[0] > 0, "notes must progress horizontally: {svg}");
+    assert_eq!(intervals[0], intervals[1], "equal eighth intervals: {svg}");
+    assert_eq!(intervals[2], intervals[0] * 2, "quarter spacing: {svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn engraves_supported_note_durations_and_only_the_two_dotted_forms() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("duration-forms.musicxml");
+    let forms = [
+        ("whole", 64, false),
+        ("half", 32, false),
+        ("quarter", 16, false),
+        ("eighth", 8, false),
+        ("16th", 4, false),
+        ("32nd", 2, false),
+        ("64th", 1, false),
+        ("quarter", 24, true),
+        ("half", 48, true),
+    ];
+    let events = forms
+        .iter()
+        .map(|(note_type, ticks, dotted)| {
+            let dot = if *dotted { "<dot/>" } else { "" };
+            format!(
+                "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>{ticks}</duration><voice>1</voice><type>{note_type}</type>{dot}</note>\n"
+            )
+        })
+        .collect::<String>();
+    let source = include_str!("fixtures/minimal.musicxml");
+    let note_start = source.find("      <note>").expect("canonical note start");
+    let note_end = source.find("      </note>").expect("canonical note end") + 13;
+    let fixture = format!("{}{}{}", &source[..note_start], events, &source[note_end..])
+        .replace("<divisions>1</divisions>", "<divisions>16</divisions>");
+    fs::write(&input, fixture).expect("write duration score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "duration score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("duration-forms.svg")).expect("read SVG");
+    assert_eq!(
+        svg.matches("class=\"tonehead\"").count(),
+        forms.len(),
+        "{svg}"
+    );
+    assert_eq!(svg.matches("class=\"stem\"").count(), 8, "{svg}");
+    assert_eq!(svg.matches("class=\"flag\"").count(), 10, "{svg}");
+    assert_eq!(svg.matches("class=\"duration-mark\"").count(), 6, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_simple_numeric_meter_and_rests() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("meter-and-rest.musicxml");
+    let source = include_str!("fixtures/minimal.musicxml");
+    let fixture = source
+        .replace(
+            "<attributes><divisions>1</divisions></attributes>",
+            "<attributes><divisions>1</divisions><time><beats>3</beats><beat-type>4</beat-type></time></attributes>",
+        )
+        .replace(
+            "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>",
+            "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>\n      <note><rest/><duration>1</duration><voice>1</voice><type>quarter</type></note>",
+        );
+    fs::write(&input, fixture).expect("write meter and rest score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "meter and rest score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("meter-and-rest.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 1, "{svg}");
+    assert_eq!(svg.matches("class=\"rest\"").count(), 1, "{svg}");
+    assert!(svg.contains("id=\"meter-numerator\""), "{svg}");
+    assert!(svg.contains("id=\"meter-denominator\""), "{svg}");
+    assert!(!svg.contains("<text"), "SVG glyphs must not rely on fonts");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn connects_equal_pitch_ties_across_measure_boundaries() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("cross-measure-tie.musicxml");
+    let source = include_str!("fixtures/minimal.musicxml");
+    let first_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let first_tie = "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><tie type=\"start\"/><voice>1</voice><type>quarter</type></note>";
+    let second_measure = "\n    <measure number=\"2\"><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><tie type=\"stop\"/><voice>1</voice><type>quarter</type></note></measure>";
+    let fixture = source
+        .replace(first_note, first_tie)
+        .replace("  </part>", &format!("{second_measure}\n  </part>"));
+    fs::write(&input, fixture).expect("write tied score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "tied score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("cross-measure-tie.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 2, "{svg}");
+    assert_eq!(svg.matches("class=\"tie\"").count(), 1, "{svg}");
+    assert!(svg.contains("class=\"tie\" d=\"M"), "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn preserves_explicit_musicxml_eighth_note_beams() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("beamed-eighths.musicxml");
+    let source = include_str!("fixtures/minimal.musicxml");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let notes = "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>eighth</type><beam number=\"1\">begin</beam></note>\n      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>eighth</type><beam number=\"1\">end</beam></note>";
+    let fixture = source
+        .replace("<divisions>1</divisions>", "<divisions>2</divisions>")
+        .replace(original_note, notes);
+    fs::write(&input, fixture).expect("write beamed score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "beamed score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("beamed-eighths.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"beam\"").count(), 1, "{svg}");
+    assert_eq!(svg.matches("class=\"flag\"").count(), 0, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_unclosed_explicit_beam_groups_without_svg() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("unclosed-beam.musicxml");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let beamed_note = "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>eighth</type><beam number=\"1\">begin</beam></note>";
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<divisions>1</divisions>", "<divisions>2</divisions>")
+        .replace(original_note, beamed_note);
+    fs::write(&input, fixture).expect("write unclosed beam score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostic.contains("beam group is missing an end marker"),
+        "{diagnostic}"
+    );
+    assert!(!directory.join("unclosed-beam.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn applies_chromatic_transposition_before_mapping_pitch() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
