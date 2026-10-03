@@ -291,6 +291,35 @@ fn rejects_unclosed_explicit_beam_groups_without_svg() {
 }
 
 #[test]
+fn preserves_beam_hooks_and_the_default_beam_number() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("forward-hook.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<divisions>1</divisions>", "<divisions>2</divisions>")
+        .replace(
+            "<type>quarter</type>",
+            "<type>eighth</type><beam>forward hook</beam>",
+        );
+    fs::write(&input, fixture).expect("write score with a forward beam hook");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "forward hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("forward-hook.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"beam-hook\"").count(), 1, "{svg}");
+    assert_eq!(svg.matches("class=\"flag\"").count(), 0, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn applies_chromatic_transposition_before_mapping_pitch() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");

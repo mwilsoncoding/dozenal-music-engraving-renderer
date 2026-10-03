@@ -33,6 +33,8 @@ enum BeamState {
     Begin,
     Continue,
     End,
+    ForwardHook,
+    BackwardHook,
 }
 
 struct Measure {
@@ -361,6 +363,16 @@ fn validate_beam_group(
             }
             BeamState::Continue => {}
             BeamState::End => active_beams[index] = false,
+            BeamState::ForwardHook | BeamState::BackwardHook if active_beams[index] => {
+                return Err(element_diagnostic(
+                    note,
+                    format!(
+                        "beam hook at level {} interrupts an open beam group",
+                        beam.level
+                    ),
+                ));
+            }
+            BeamState::ForwardHook | BeamState::BackwardHook => {}
         }
     }
     Ok(())
@@ -466,16 +478,25 @@ fn parse_note(
         .is_some_and(|child| elements[*child].name == "beam")
     {
         let beam = children[position];
-        let level = required_attribute(&elements[beam], "number")?
-            .parse::<u8>()
-            .ok()
-            .filter(|level| (1..=4).contains(level))
-            .ok_or_else(|| {
-                element_diagnostic(
+        let level = match elements[beam].attributes.as_slice() {
+            [] => 1,
+            [(name, value)] if name == "number" => value
+                .parse::<u8>()
+                .ok()
+                .filter(|level| (1..=4).contains(level))
+                .ok_or_else(|| {
+                    element_diagnostic(
+                        &elements[beam],
+                        "beam number must be 1 through 4".to_owned(),
+                    )
+                })?,
+            _ => {
+                return Err(element_diagnostic(
                     &elements[beam],
-                    "beam number must be 1 through 4".to_owned(),
-                )
-            })?;
+                    "<beam> supports only the optional number attribute".to_owned(),
+                ));
+            }
+        };
         if !elements[beam].children.is_empty() {
             return Err(element_diagnostic(
                 &elements[beam],
@@ -486,6 +507,8 @@ fn parse_note(
             "begin" => BeamState::Begin,
             "continue" => BeamState::Continue,
             "end" => BeamState::End,
+            "forward hook" => BeamState::ForwardHook,
+            "backward hook" => BeamState::BackwardHook,
             value => {
                 return Err(element_diagnostic(
                     &elements[beam],
@@ -1178,6 +1201,22 @@ fn render_svg(score: &Score) -> String {
                         } else {
                             active_beams[level] = None;
                         }
+                    }
+                    BeamState::ForwardHook | BeamState::BackwardHook => {
+                        let direction = if beam.state == BeamState::ForwardHook {
+                            1
+                        } else {
+                            -1
+                        };
+                        let end_x = stem_x + direction * 9;
+                        let end_y = if tone.octave < 5 {
+                            beam_y + 4
+                        } else {
+                            beam_y - 4
+                        };
+                        beam_markup.push_str(&format!(
+                            "<path id=\"beam-hook-{index}-{level}\" class=\"beam-hook\" data-level=\"{level}\" d=\"M{stem_x} {beam_y}L{end_x} {end_y}\" fill=\"none\" stroke=\"#171717\" stroke-width=\"3\" stroke-linecap=\"square\"/>\n"
+                        ));
                     }
                 }
             }
