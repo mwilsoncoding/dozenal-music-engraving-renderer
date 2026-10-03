@@ -1251,6 +1251,7 @@ struct DrawCommand {
 
 struct PathGeometry {
     transform: Option<(i32, i32)>,
+    scale: u8,
     path_data: String,
     style: PathStyle,
 }
@@ -1259,9 +1260,15 @@ impl PathGeometry {
     fn new(transform: Option<(i32, i32)>, path_data: impl Into<String>, style: PathStyle) -> Self {
         Self {
             transform,
+            scale: 1,
             path_data: path_data.into(),
             style,
         }
+    }
+
+    fn scaled(mut self, scale: u8) -> Self {
+        self.scale = scale;
+        self
     }
 }
 
@@ -1358,10 +1365,15 @@ impl Scene {
             }
             .expect("writing to a String cannot fail");
         }
-        if let Some((x, y)) = command.geometry.transform {
-            write!(svg, " transform=\"translate({x} {y})\"")
-                .expect("writing to a String cannot fail");
+        match (command.geometry.transform, command.geometry.scale) {
+            (Some((x, y)), 1) => write!(svg, " transform=\"translate({x} {y})\""),
+            (Some((x, y)), scale) => {
+                write!(svg, " transform=\"translate({x} {y}) scale({scale})\"")
+            }
+            (None, 1) => Ok(()),
+            (None, scale) => write!(svg, " transform=\"scale({scale})\""),
         }
+        .expect("writing to a String cannot fail");
         write!(svg, " d=\"{}\"", command.geometry.path_data)
             .expect("writing to a String cannot fail");
         match command.geometry.style {
@@ -1415,10 +1427,11 @@ fn render_svg(score: &Score) -> String {
                     None,
                     Vec::new(),
                     PathGeometry::new(
-                        Some((meter_x, 50)),
+                        Some((meter_x, 31)),
                         glyph_path(meter.beats),
                         PathStyle::MediumOutline,
-                    ),
+                    )
+                    .scaled(2),
                 );
                 scene.add_path(
                     DrawLayer::Event,
@@ -1426,10 +1439,11 @@ fn render_svg(score: &Score) -> String {
                     None,
                     Vec::new(),
                     PathGeometry::new(
-                        Some((meter_x, 70)),
+                        Some((meter_x, 71)),
                         glyph_path(meter.beat_type),
                         PathStyle::MediumOutline,
-                    ),
+                    )
+                    .scaled(2),
                 );
                 x += 28;
                 meter_index += 1;

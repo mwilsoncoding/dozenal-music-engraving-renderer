@@ -699,6 +699,14 @@ fn renders_simple_numeric_meter_and_rests() {
     assert_eq!(svg.matches("class=\"rest\"").count(), 1, "{svg}");
     assert!(svg.contains("id=\"meter-numerator\""), "{svg}");
     assert!(svg.contains("id=\"meter-denominator\""), "{svg}");
+    assert!(
+        svg.contains("id=\"meter-numerator\" transform=\"translate(68 31) scale(2)\""),
+        "time-signature numerator should fill the octave 5/6 lanes: {svg}"
+    );
+    assert!(
+        svg.contains("id=\"meter-denominator\" transform=\"translate(68 71) scale(2)\""),
+        "time-signature denominator should fill the octave 3/4 lanes: {svg}"
+    );
     assert!(!svg.contains("<text"), "SVG glyphs must not rely on fonts");
 
     fs::remove_dir_all(directory).expect("remove test directory");
