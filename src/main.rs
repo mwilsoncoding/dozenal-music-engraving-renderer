@@ -1417,15 +1417,16 @@ fn event_geometry(
         let level = usize::from(beam.level);
         let offset = i32::from(beam.level - 1) * 4 * beam_direction;
         let beam_y = stem_end + offset;
+        let beam_center_shift = f64::from(beam_direction) * 1.5;
         match beam.state {
             BeamState::Begin => {}
             BeamState::Continue | BeamState::End => {
                 if let Some((start_x, start_y)) = active_beams[level] {
                     incoming.push(ComponentBounds::stroked(
                         f64::from(start_x.min(stem_x)),
-                        f64::from(start_y.min(beam_y)),
+                        f64::from(start_y.min(beam_y)) + beam_center_shift,
                         f64::from(start_x.max(stem_x)),
-                        f64::from(start_y.max(beam_y)),
+                        f64::from(start_y.max(beam_y)) + beam_center_shift,
                         3.0,
                     ));
                 }
@@ -1680,7 +1681,7 @@ impl Scene {
             }
             PathStyle::FilledGlyph => svg.push_str(" fill=\"#171717\" fill-rule=\"evenodd\""),
             PathStyle::Beam => svg.push_str(
-                " fill=\"none\" stroke=\"#171717\" stroke-width=\"3\" stroke-linecap=\"square\"",
+                " fill=\"none\" stroke=\"#171717\" stroke-width=\"3\" stroke-linecap=\"butt\"",
             ),
             PathStyle::Solid => svg.push_str(" fill=\"#171717\""),
         }
@@ -1860,7 +1861,7 @@ fn render_svg(score: &Score) -> String {
                             vec![PathMetadata::BeamLevel(beam.level)],
                             PathGeometry::new(
                                 None,
-                                format!("M{start_x} {start_y}L{stem_x} {beam_y}"),
+                                beam_segment_path(start_x, start_y, stem_x, beam_y, beam_direction),
                                 PathStyle::Beam,
                             ),
                         );
@@ -2170,6 +2171,28 @@ fn stem_endpoints(tonehead_y: i32, stems_up: bool) -> (i32, i32) {
     } else {
         (tonehead_y + 19, tonehead_y + 48)
     }
+}
+
+fn beam_segment_path(
+    start_x: i32,
+    start_y: i32,
+    end_x: i32,
+    end_y: i32,
+    beam_direction: i32,
+) -> String {
+    let dx = f64::from(end_x - start_x);
+    let dy = f64::from(end_y - start_y);
+    let length = dx.hypot(dy);
+    let normal_x = -dy / length;
+    let normal_y = dx / length;
+    let stem_half_width = 0.75;
+    let beam_half_width = 1.5;
+    let centerline_offset = f64::from(beam_direction) * beam_half_width;
+    let start_x = f64::from(start_x) - stem_half_width + normal_x * centerline_offset;
+    let start_y = f64::from(start_y) - dy / dx * stem_half_width + normal_y * centerline_offset;
+    let end_x = f64::from(end_x) + stem_half_width + normal_x * centerline_offset;
+    let end_y = f64::from(end_y) + dy / dx * stem_half_width + normal_y * centerline_offset;
+    format!("M{start_x:.2} {start_y:.2}L{end_x:.2} {end_y:.2}")
 }
 
 fn glyph_path(value: u8) -> &'static str {

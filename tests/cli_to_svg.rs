@@ -1090,6 +1090,15 @@ fn preserves_explicit_musicxml_eighth_note_beams() {
     let svg = fs::read_to_string(directory.join("beamed-eighths.svg")).expect("read SVG");
     assert_eq!(svg.matches("class=\"beam\"").count(), 1, "{svg}");
     assert_eq!(svg.matches("class=\"flag\"").count(), 0, "{svg}");
+    let beam = svg
+        .lines()
+        .find(|line| line.contains("class=\"beam\""))
+        .expect("beam path");
+    assert!(
+        beam.contains("d=\"M97.25 41.50L118.75 41.50\""),
+        "beam edges should meet the outer stem edges with a flush top border: {beam}"
+    );
+    assert!(beam.contains("stroke-linecap=\"butt\""), "{beam}");
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
@@ -1146,6 +1155,11 @@ fn preserves_beam_hooks_and_the_default_beam_number() {
     let svg = fs::read_to_string(directory.join("forward-hook.svg")).expect("read SVG");
     assert_eq!(svg.matches("class=\"beam-hook\"").count(), 1, "{svg}");
     assert_eq!(svg.matches("class=\"flag\"").count(), 0, "{svg}");
+    let hook = svg
+        .lines()
+        .find(|line| line.contains("class=\"beam-hook\""))
+        .expect("beam hook path");
+    assert!(hook.contains("stroke-linecap=\"butt\""), "{hook}");
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
