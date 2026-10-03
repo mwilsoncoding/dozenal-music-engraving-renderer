@@ -353,6 +353,8 @@
       transform: rotate(180deg);
     }
 
+    .font-reference.mirrored-horizontal { transform: scaleX(-1); }
+
     .custom-sample small {
       color: var(--muted);
       font-size: 11px;
@@ -515,17 +517,19 @@
     <section class="specimen-section">
       <div>
         <h2 class="section-label">Turned Tonehead sketches</h2>
-        <p class="section-note">DejaVu Sans Bold 2 and 3 rotated 180° are the visual references for dek and el. Compare the current paths with heavier, softer hand-drawn forms.</p>
+        <p class="section-note">Keep the dek treatment you liked; compare two orientations for el using DejaVu Sans Bold 3.</p>
       </div>
       <div class="sample-area">
-        <p class="sample-caption">2 → dek · 3 → el</p>
+        <p class="sample-caption">Dek · retained comparison</p>
         <div class="custom-row">
           <div class="custom-sample"><span class="font-reference" aria-label="DejaVu Sans Bold 2 rotated 180 degrees">2</span><small>DejaVu 2 · rotated</small></div>
           <div class="custom-sample existing"><svg viewBox="0 0 12 20" aria-label="Current dek path"><path d="M10 16H2V9H10V2H2"/></svg><small>Current dek</small></div>
           <div class="custom-sample"><svg viewBox="0 0 12 20" aria-label="Thicker dek path"><path d="M9.5 15.5H3Q2 15.5 2 14.5V10Q2 9 3 9H9Q10 9 10 8V3Q10 2 9 2H2.5"/></svg><small>Thicker dek</small></div>
-          <div class="custom-sample"><span class="font-reference" aria-label="DejaVu Sans Bold 3 rotated 180 degrees">3</span><small>DejaVu 3 · rotated</small></div>
-          <div class="custom-sample existing"><svg viewBox="0 0 12 20" aria-label="Current el path"><path d="M10 16H2V2H10M10 9H2"/></svg><small>Current el</small></div>
-          <div class="custom-sample"><svg viewBox="0 0 12 20" aria-label="Thicker el path"><path d="M9.5 15.5H3Q2 15.5 2 14.5V3.5Q2 2 3 2H9.5M9.5 9H3"/></svg><small>Thicker el</small></div>
+        </div>
+        <p class="sample-caption">El · choose orientation</p>
+        <div class="custom-row">
+          <div class="custom-sample"><span class="font-reference" aria-label="DejaVu Sans Bold 3 rotated 180 degrees">3</span><small>3 rotated 180°</small></div>
+          <div class="custom-sample"><span class="font-reference mirrored-horizontal" aria-label="DejaVu Sans Bold 3 mirrored horizontally">3</span><small>3 mirrored horizontally</small></div>
         </div>
       </div>
     </section>
