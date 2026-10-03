@@ -69,6 +69,263 @@ fn renders_fixture_to_default_and_explicit_svg_paths() {
 }
 
 #[test]
+fn applies_chromatic_transposition_before_mapping_pitch() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("transposed.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "</attributes>",
+        "<transpose><chromatic>2</chromatic></transpose></attributes>",
+    );
+    fs::write(&input, fixture).expect("write transposed score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "transposed score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("transposed.svg")).expect("read SVG");
+    assert!(
+        svg.contains("data-tone=\"2\""),
+        "C4 + 2 semitones should map to Tone 2"
+    );
+    assert!(
+        svg.contains("transform=\"translate(92 49)\""),
+        "result remains in octave 4"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn applies_chromatic_octave_change_and_double_transposition() {
+    let cases = [
+        ("chromatic-down-two", "<chromatic>-2</chromatic>", 10, 3),
+        (
+            "octave-change-up",
+            "<chromatic>0</chromatic><octave-change>1</octave-change>",
+            0,
+            5,
+        ),
+        (
+            "double-above",
+            "<chromatic>0</chromatic><double above=\"yes\"/>",
+            0,
+            5,
+        ),
+        ("double-below", "<chromatic>0</chromatic><double/>", 0, 3),
+    ];
+
+    for (name, transpose_children, expected_tone, expected_octave) in cases {
+        let directory = scratch_dir();
+        fs::create_dir_all(&directory).expect("create test directory");
+        let input = directory.join(format!("{name}.musicxml"));
+        let fixture = include_str!("fixtures/minimal.musicxml").replace(
+            "</attributes>",
+            &format!("<transpose>{transpose_children}</transpose></attributes>"),
+        );
+        fs::write(&input, fixture).expect("write transposed score");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(
+            output.status.success(),
+            "{name} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let svg = fs::read_to_string(directory.join(format!("{name}.svg"))).expect("read SVG");
+        assert!(
+            svg.contains(&format!("data-tone=\"{expected_tone}\"")),
+            "{name}: {svg}"
+        );
+        assert!(
+            svg.contains(&format!("data-octave=\"{expected_octave}\"")),
+            "{name}: {svg}"
+        );
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+}
+
+#[test]
+fn maps_enharmonic_alterations_across_octave_boundaries() {
+    let cases = [
+        (
+            "c-flat-crosses-down",
+            "<step>C</step><octave>4</octave>",
+            "<step>C</step><alter>-1</alter><octave>4</octave>",
+            11,
+            3,
+        ),
+        (
+            "b-sharp-crosses-up",
+            "<step>C</step><octave>4</octave>",
+            "<step>B</step><alter>1</alter><octave>4</octave>",
+            0,
+            5,
+        ),
+        (
+            "c-double-flat",
+            "<step>C</step><octave>4</octave>",
+            "<step>C</step><alter>-2</alter><octave>4</octave>",
+            10,
+            3,
+        ),
+        (
+            "c-double-sharp",
+            "<step>C</step><octave>4</octave>",
+            "<step>C</step><alter>2</alter><octave>4</octave>",
+            2,
+            4,
+        ),
+    ];
+
+    for (name, old_pitch, new_pitch, expected_tone, expected_octave) in cases {
+        let directory = scratch_dir();
+        fs::create_dir_all(&directory).expect("create test directory");
+        let input = directory.join(format!("{name}.musicxml"));
+        let fixture = include_str!("fixtures/minimal.musicxml").replace(old_pitch, new_pitch);
+        fs::write(&input, fixture).expect("write pitch-boundary score");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(
+            output.status.success(),
+            "{name} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let svg = fs::read_to_string(directory.join(format!("{name}.svg"))).expect("read SVG");
+        assert!(
+            svg.contains(&format!("data-tone=\"{expected_tone}\"")),
+            "{name}: {svg}"
+        );
+        assert!(
+            svg.contains(&format!("data-octave=\"{expected_octave}\"")),
+            "{name}: {svg}"
+        );
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+}
+
+#[test]
+fn renders_all_ten_octave_lanes_with_ledger_lines_and_fitting_viewbox() {
+    for octave in 0..=9 {
+        let directory = scratch_dir();
+        fs::create_dir_all(&directory).expect("create test directory");
+        let input = directory.join(format!("octave-{octave}.musicxml"));
+        let fixture = include_str!("fixtures/minimal.musicxml")
+            .replace("<octave>4</octave>", &format!("<octave>{octave}</octave>"));
+        fs::write(&input, fixture).expect("write octave fixture");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(
+            output.status.success(),
+            "octave {octave} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let svg =
+            fs::read_to_string(directory.join(format!("octave-{octave}.svg"))).expect("read SVG");
+        assert!(svg.contains(&format!("data-octave=\"{octave}\"")), "{svg}");
+        let expected_ledger_lines = if octave < 4 {
+            (4 - octave) as usize
+        } else if octave > 5 {
+            (octave - 5) as usize
+        } else {
+            0
+        };
+        assert_eq!(
+            svg.matches("id=\"ledger-line-octave-").count(),
+            expected_ledger_lines,
+            "octave {octave}: {svg}"
+        );
+        assert!(svg.contains("viewBox=\"0 "), "missing viewBox: {svg}");
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+}
+
+#[test]
+fn rejects_normalized_pitch_outside_octaves_zero_through_nine() {
+    let cases = [
+        (
+            "below-zero",
+            "<step>C</step><octave>4</octave>",
+            "<step>C</step><octave>0</octave>",
+            "<transpose><chromatic>-1</chromatic></transpose>",
+        ),
+        (
+            "above-nine",
+            "<step>C</step><octave>4</octave>",
+            "<step>B</step><alter>1</alter><octave>9</octave>",
+            "",
+        ),
+    ];
+
+    for (name, old_pitch, new_pitch, transpose) in cases {
+        let directory = scratch_dir();
+        fs::create_dir_all(&directory).expect("create test directory");
+        let input = directory.join(format!("{name}.musicxml"));
+        let mut fixture = include_str!("fixtures/minimal.musicxml").replace(old_pitch, new_pitch);
+        if !transpose.is_empty() {
+            fixture = fixture.replace("</attributes>", &format!("{transpose}</attributes>"));
+        }
+        fs::write(&input, fixture).expect("write out-of-range score");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(!output.status.success(), "{name} was accepted");
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            diagnostic.contains("unsupported concert pitch octave"),
+            "{diagnostic}"
+        );
+        assert!(!directory.join(format!("{name}.svg")).exists());
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+}
+
+#[test]
+fn rejects_transposition_integer_overflow_without_panicking() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("transposition-overflow.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "</attributes>",
+        "<transpose><chromatic>0</chromatic><octave-change>2147483647</octave-change><double above=\"yes\"/></transpose></attributes>",
+    );
+    fs::write(&input, fixture).expect("write overflowing transposition");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostic.contains("transposition is out of range"),
+        "{diagnostic}"
+    );
+    assert!(!directory.join("transposition-overflow.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn rejects_unsupported_score_shape_without_creating_svg() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
