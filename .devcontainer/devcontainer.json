@@ -39,13 +39,13 @@
       "ghcr.io/devcontainers-extra/features/lefthook-asdf": {},
       "ghcr.io/devcontainers-extra/features/ripgrep": {},
       "ghcr.io/devcontainers-extra/features/shellcheck": {}
-    }
+    },
+
+    // Use 'postCreateCommand' to run commands after the container is created.
+    "postCreateCommand": ".devcontainer/post-create-command"
 
     // Use 'forwardPorts' to make a list of ports inside the container available locally.
     // "forwardPorts": [],
-
-    // Use 'postCreateCommand' to run commands after the container is created.
-    // "postCreateCommand": "rustc --version",
 
     // Configure tool-specific properties.
     // "customizations": {},
