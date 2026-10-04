@@ -50,8 +50,8 @@ fn assert_measure_barline_layout(svg: &str) {
         "expected one barline per 4/4 measure: {svg}"
     );
     assert!(
-        barlines.iter().all(|line| line.contains(" 28V108")),
-        "measure barlines should span only the three staff lines: {svg}"
+        barlines.iter().all(|line| line.contains(" 27.5V108.5")),
+        "measure barline borders should meet the outer staff-line borders: {svg}"
     );
     let final_barline_x = barlines[8]
         .split(" d=\"M")
@@ -289,7 +289,7 @@ fn enforces_minimum_clearance_between_vertically_overlapping_event_geometry() {
         .find(|line| line.contains("id=\"barline-1\""))
         .expect("final measure barline");
     assert!(
-        barline.contains(" 28V108"),
+        barline.contains(" 27.5V108.5"),
         "barline must span the staff only: {barline}"
     );
     let barline_x = barline
@@ -1265,10 +1265,13 @@ fn preserves_explicit_musicxml_eighth_note_beams() {
         .find(|line| line.contains("class=\"beam\""))
         .expect("beam path");
     assert!(
-        beam.contains("d=\"M97.25 40.50L118.75 40.50\""),
-        "beam edges should meet the outer stem edges with a flush top border: {beam}"
+        beam.contains("d=\"M98.75 39.00L117.25 39.00L117.25 42.00L98.75 42.00Z\""),
+        "flat beam should meet the outer stem borders with a flush top edge: {beam}"
     );
-    assert!(beam.contains("stroke-linecap=\"butt\""), "{beam}");
+    assert!(
+        beam.contains("fill=\"#171717\"") && !beam.contains("stroke="),
+        "{beam}"
+    );
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
@@ -1294,9 +1297,9 @@ fn renders_multi_octave_beaming_fixture_geometry() {
         String::from_utf8_lossy(&output.stderr)
     );
     let svg = fs::read_to_string(directory.join("multi-octave-beaming.svg")).expect("read SVG");
-    assert_eq!(svg.matches("class=\"tonehead\"").count(), 13, "{svg}");
-    assert_eq!(svg.matches("class=\"stem\"").count(), 12, "{svg}");
-    assert_eq!(svg.matches("class=\"beam\"").count(), 7, "{svg}");
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 17, "{svg}");
+    assert_eq!(svg.matches("class=\"stem\"").count(), 16, "{svg}");
+    assert_eq!(svg.matches("class=\"beam\"").count(), 9, "{svg}");
     assert_eq!(svg.matches("class=\"beam-hook\"").count(), 1, "{svg}");
     assert_eq!(svg.matches("class=\"flag\"").count(), 0, "{svg}");
 
@@ -1313,6 +1316,10 @@ fn renders_multi_octave_beaming_fixture_geometry() {
         (9, 68, 39),
         (10, 68, 97),
         (11, 48, 77),
+        (12, 88, 59),
+        (13, 68, 39),
+        (14, 68, 39),
+        (15, 88, 59),
     ];
     let rendered_stems = (0..expected_stems.len())
         .map(|event_index| {
@@ -1341,86 +1348,145 @@ fn renders_multi_octave_beaming_fixture_geometry() {
         })
         .collect::<Vec<_>>();
 
-    let mut behavior_mismatches = Vec::new();
-    for (beam_id, expected_path) in [
-        ("beam-1-1", "M96.19 96.69L117.69 75.19"),
-        ("beam-3-1", "M140.19 116.69L161.69 95.19"),
-        ("beam-5-1", "M186.31 95.19L207.81 116.69"),
-        ("beam-7-1", "M227.83 138.78L249.33 74.28"),
-        ("beam-9-1", "M271.94 -1.64L295.44 41.09"),
-        ("beam-11-1", "M318.16 96.76L338.66 75.18"),
-        ("beam-11-2", "M318.16 91.76L338.66 70.18"),
-    ] {
-        let beam = svg
-            .lines()
-            .find(|line| line.contains(&format!("id=\"{beam_id}\"")))
-            .expect("expected multi-octave beam");
-        if !beam.contains(&format!("d=\"{expected_path}\"")) {
-            behavior_mismatches.push(format!("{beam_id}: expected {expected_path}; got {beam}"));
-        }
-    }
-
-    let hook = svg
-        .lines()
-        .find(|line| line.contains("id=\"beam-hook-11-3\""))
-        .expect("backward third-level hook");
-    let hook_path = hook
-        .split(" d=\"")
-        .nth(1)
-        .and_then(|value| value.split('"').next())
-        .expect("hook path data");
-    let (hook_start, hook_end) = hook_path
-        .strip_prefix('M')
-        .and_then(|value| value.split_once('L'))
-        .expect("hook endpoints");
-    let (hook_start_x, hook_start_y) = hook_start.split_once(' ').expect("hook start point");
-    let (hook_end_x, hook_end_y) = hook_end.split_once(' ').expect("hook end point");
-    assert_eq!(
-        hook_start_y, hook_end_y,
-        "backward hook stays horizontal: {hook}"
-    );
-    assert_eq!(
-        hook_start_x.parse::<i32>().expect("hook start x")
-            - hook_end_x.parse::<i32>().expect("hook end x"),
-        9,
-        "backward hook extends left by its standard length: {hook}"
-    );
-
-    let beam_path = |level: u8| {
-        svg.lines()
-            .find(|line| line.contains(&format!("id=\"beam-11-{level}\"")))
-            .and_then(|line| line.split(" d=\"").nth(1))
-            .and_then(|value| value.split('"').next())
-            .expect("mixed-duration beam path")
-            .to_owned()
-    };
-    let beam_points = |path: &str| {
-        let (start, end) = path
-            .strip_prefix('M')
-            .and_then(|value| value.split_once('L'))
-            .expect("beam endpoints");
-        let (_, start_y) = start.split_once(' ').expect("beam start point");
-        let (_, end_y) = end.split_once(' ').expect("beam end point");
-        (
-            start_y.parse::<f64>().expect("beam start y"),
-            end_y.parse::<f64>().expect("beam end y"),
-        )
-    };
-    let primary = beam_points(&beam_path(1));
-    let secondary = beam_points(&beam_path(2));
-    assert!((primary.0 - secondary.0).abs() == 5.0);
-    assert!((primary.1 - secondary.1).abs() == 5.0);
-
-    if rendered_stems != expected_stems {
-        behavior_mismatches.push(format!(
-            "expected group-wide stem anchors {expected_stems:?}; got {rendered_stems:?}"
-        ));
-    }
     assert!(
-        behavior_mismatches.is_empty(),
-        "multi-octave beaming geometry differs from the agreed group-wide direction plan:\n{}",
-        behavior_mismatches.join("\n")
+        rendered_stems == expected_stems,
+        "multi-octave beamed groups should use the agreed group-wide stem directions"
     );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn angled_beams_are_flush_parallelograms_and_hooks_follow_the_beam_slope() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("multi-octave-beaming.musicxml");
+    fs::write(
+        &input,
+        include_str!("fixtures/multi-octave-beaming.musicxml"),
+    )
+    .expect("write multi-octave beaming fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "multi-octave beaming fixture failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("multi-octave-beaming.svg")).expect("read SVG");
+    let path_points = |path_id: &str| {
+        let line = svg
+            .lines()
+            .find(|line| line.contains(&format!("id=\"{path_id}\"")))
+            .expect("beam path");
+        assert!(
+            line.contains("fill=\"#171717\"") && !line.contains("stroke="),
+            "beam should be a filled parallelogram: {line}"
+        );
+        let path = line
+            .split(" d=\"")
+            .nth(1)
+            .and_then(|value| value.split('\"').next())
+            .and_then(|value| value.strip_prefix('M'))
+            .and_then(|value| value.strip_suffix('Z'))
+            .expect("closed parallelogram path");
+        path.split('L')
+            .map(|point| {
+                let (x, y) = point.split_once(' ').expect("path point");
+                (
+                    x.parse::<f64>().expect("point x"),
+                    y.parse::<f64>().expect("point y"),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let stem_anchors = (0..16)
+        .map(|event_index| {
+            let stem_id = if event_index == 0 {
+                "id=\"stem\"".to_owned()
+            } else {
+                format!("id=\"stem-{event_index}\"")
+            };
+            let line = svg
+                .lines()
+                .find(|line| line.contains(&stem_id))
+                .expect("beam stem");
+            let path = line
+                .split(" d=\"M")
+                .nth(1)
+                .and_then(|value| value.split('\"').next())
+                .expect("stem path");
+            let (start, end) = path.split_once('V').expect("stem endpoints");
+            let x = start
+                .split_whitespace()
+                .next()
+                .and_then(|value| value.parse::<f64>().ok())
+                .expect("stem x");
+            let start_y = start
+                .split_whitespace()
+                .nth(1)
+                .and_then(|value| value.parse::<f64>().ok())
+                .expect("stem start y");
+            let end_y = end.parse::<f64>().expect("stem end y");
+            (x, start_y, end_y)
+        })
+        .collect::<Vec<_>>();
+
+    for (end_event_index, level, edge_offset) in [
+        (1, 1, 0.75),
+        (3, 1, 0.75),
+        (5, 1, -0.75),
+        (7, 1, 0.75),
+        (9, 1, 0.75),
+        (11, 1, 0.75),
+        (11, 2, 0.75),
+        (13, 1, -0.75),
+        (15, 1, 0.75),
+    ] {
+        let points = path_points(&format!("beam-{end_event_index}-{level}"));
+        assert_eq!(points.len(), 4, "beam should have four corners: {points:?}");
+        let (outer_start, outer_end, inner_end, inner_start) =
+            (points[0], points[1], points[2], points[3]);
+        assert!((outer_start.0 - inner_start.0).abs() < 0.01);
+        assert!((outer_end.0 - inner_end.0).abs() < 0.01);
+
+        let (start_x, _, start_end_y) = stem_anchors[end_event_index - 1];
+        let (end_x, _, end_end_y) = stem_anchors[end_event_index];
+        let stems_up = stem_anchors[end_event_index].2 < stem_anchors[end_event_index].1;
+        let beam_direction = if stems_up { 1.0 } else { -1.0 };
+        let level_offset = f64::from(level - 1) * 5.0 * beam_direction;
+        let slope = (end_end_y - start_end_y) / (end_x - start_x);
+        assert!((outer_start.0 - (start_x + edge_offset)).abs() < 0.01);
+        assert!((outer_end.0 - (end_x + edge_offset)).abs() < 0.01);
+        assert!((outer_start.1 - (start_end_y + level_offset)).abs() < 0.02);
+        assert!((outer_end.1 - (end_end_y + level_offset)).abs() < 0.02);
+        let outer_edge = (outer_end.0 - outer_start.0, outer_end.1 - outer_start.1);
+        let inner_edge = (inner_end.0 - inner_start.0, inner_end.1 - inner_start.1);
+        assert!((outer_edge.0 * inner_edge.1 - outer_edge.1 * inner_edge.0).abs() < 0.05);
+        let inner_vector = (inner_start.0 - outer_start.0, inner_start.1 - outer_start.1);
+        let perpendicular_thickness =
+            (outer_edge.0 * inner_vector.1 - outer_edge.1 * inner_vector.0).abs()
+                / outer_edge.0.hypot(outer_edge.1);
+        assert!((perpendicular_thickness - 3.0).abs() < 0.02);
+        assert!((slope - outer_edge.1 / outer_edge.0).abs() < 0.01);
+    }
+
+    let primary = path_points("beam-11-1");
+    let hook = path_points("beam-hook-11-3");
+    assert_eq!(
+        hook.len(),
+        4,
+        "hook should also be a parallelogram: {hook:?}"
+    );
+    let stem_x = stem_anchors[11].0;
+    assert!((hook[0].0 - (stem_x - 9.0 + 0.75)).abs() < 0.01);
+    assert!((hook[1].0 - (stem_x + 0.75)).abs() < 0.01);
+    let beam_slope = (primary[1].1 - primary[0].1) / (primary[1].0 - primary[0].0);
+    let hook_slope = (hook[1].1 - hook[0].1) / (hook[1].0 - hook[0].0);
+    assert!((beam_slope - hook_slope).abs() < 0.001);
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
@@ -1481,8 +1547,14 @@ fn renders_forward_beam_hook_as_a_beam_segment() {
         .lines()
         .find(|line| line.contains("class=\"beam-hook\""))
         .expect("beam hook path");
-    assert!(hook.contains("d=\"M98 40.5L107 40.5\""), "{hook}");
-    assert!(hook.contains("stroke-linecap=\"butt\""), "{hook}");
+    assert!(
+        hook.contains("d=\"M98.75 39.00L106.25 39.00L106.25 42.00L98.75 42.00Z\""),
+        "forward hook should use the same filled beam geometry: {hook}"
+    );
+    assert!(
+        hook.contains("fill=\"#171717\"") && !hook.contains("stroke="),
+        "{hook}"
+    );
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }

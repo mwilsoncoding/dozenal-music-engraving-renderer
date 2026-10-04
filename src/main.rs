@@ -1420,17 +1420,16 @@ fn event_geometry(
         let level = usize::from(beam.level);
         let offset = i32::from(beam.level - 1) * 5 * beam_direction;
         let beam_y = stem_end + offset;
-        let beam_center_shift = f64::from(beam_direction) * 1.5;
         match beam.state {
             BeamState::Begin => {}
             BeamState::Continue | BeamState::End => {
                 if let Some((start_x, start_y)) = active_beams[level] {
-                    incoming.push(ComponentBounds::stroked(
-                        f64::from(start_x.min(stem_x)),
-                        f64::from(start_y.min(beam_y)) + beam_center_shift,
-                        f64::from(start_x.max(stem_x)),
-                        f64::from(start_y.max(beam_y)) + beam_center_shift,
-                        3.0,
+                    incoming.push(beam_segment_bounds(
+                        start_x,
+                        f64::from(start_y),
+                        stem_x,
+                        f64::from(beam_y),
+                        beam_direction,
                     ));
                 }
             }
@@ -1440,14 +1439,32 @@ fn event_geometry(
                 } else {
                     -1
                 };
-                let end_x = stem_x + direction * 9;
-                let beam_center_y = f64::from(beam_y) + beam_center_shift;
-                primary.push(ComponentBounds::stroked(
-                    f64::from(stem_x.min(end_x)),
-                    beam_center_y,
-                    f64::from(stem_x.max(end_x)),
-                    beam_center_y,
-                    3.0,
+                let group_slope = active_beams[1]
+                    .map(|(start_x, start_y)| {
+                        f64::from(stem_end - start_y) / f64::from(stem_x - start_x)
+                    })
+                    .unwrap_or(0.0);
+                let (start_x, start_y, end_x, end_y) = if direction > 0 {
+                    (
+                        stem_x,
+                        f64::from(beam_y),
+                        stem_x + 9,
+                        f64::from(beam_y) + group_slope * 9.0,
+                    )
+                } else {
+                    (
+                        stem_x - 9,
+                        f64::from(beam_y) - group_slope * 9.0,
+                        stem_x,
+                        f64::from(beam_y),
+                    )
+                };
+                primary.push(beam_segment_bounds(
+                    start_x,
+                    start_y,
+                    end_x,
+                    end_y,
+                    beam_direction,
                 ));
             }
         }
@@ -1706,9 +1723,7 @@ impl Scene {
             }
             PathStyle::FilledGlyph => svg.push_str(" fill=\"#171717\" fill-rule=\"evenodd\""),
             PathStyle::BravuraGlyph => svg.push_str(" fill=\"#171717\" fill-rule=\"nonzero\""),
-            PathStyle::Beam => svg.push_str(
-                " fill=\"none\" stroke=\"#171717\" stroke-width=\"3\" stroke-linecap=\"butt\"",
-            ),
+            PathStyle::Beam => svg.push_str(" fill=\"#171717\""),
             PathStyle::Solid => svg.push_str(" fill=\"#171717\""),
         }
         svg.push_str("/>\n");
@@ -1882,6 +1897,7 @@ fn render_svg(score: &Score) -> String {
                     );
                 }
             }
+            let mut primary_beam_slope = None;
             for beam in &event.beams {
                 let level = usize::from(beam.level);
                 let offset = i32::from(beam.level - 1) * 5 * beam_direction;
@@ -1891,6 +1907,10 @@ fn render_svg(score: &Score) -> String {
                     BeamState::Continue | BeamState::End => {
                         let (start_x, start_y) =
                             active_beams[level].expect("beam group is validated before rendering");
+                        if beam.level == 1 {
+                            primary_beam_slope =
+                                Some(f64::from(beam_y - start_y) / f64::from(stem_x - start_x));
+                        }
                         scene.add_path(
                             DrawLayer::Beam,
                             format!("beam-{index}-{level}"),
@@ -1898,7 +1918,13 @@ fn render_svg(score: &Score) -> String {
                             vec![PathMetadata::BeamLevel(beam.level)],
                             PathGeometry::new(
                                 None,
-                                beam_segment_path(start_x, start_y, stem_x, beam_y, beam_direction),
+                                beam_segment_path(
+                                    start_x,
+                                    f64::from(start_y),
+                                    stem_x,
+                                    f64::from(beam_y),
+                                    beam_direction,
+                                ),
                                 PathStyle::Beam,
                             ),
                         );
@@ -1914,8 +1940,22 @@ fn render_svg(score: &Score) -> String {
                         } else {
                             -1
                         };
-                        let end_x = stem_x + direction * 9;
-                        let beam_center_y = f64::from(beam_y) + f64::from(beam_direction) * 1.5;
+                        let slope = primary_beam_slope.unwrap_or(0.0);
+                        let (start_x, start_y, end_x, end_y) = if direction > 0 {
+                            (
+                                stem_x,
+                                f64::from(beam_y),
+                                stem_x + 9,
+                                f64::from(beam_y) + slope * 9.0,
+                            )
+                        } else {
+                            (
+                                stem_x - 9,
+                                f64::from(beam_y) - slope * 9.0,
+                                stem_x,
+                                f64::from(beam_y),
+                            )
+                        };
                         scene.add_path(
                             DrawLayer::Beam,
                             format!("beam-hook-{index}-{level}"),
@@ -1923,7 +1963,7 @@ fn render_svg(score: &Score) -> String {
                             vec![PathMetadata::BeamLevel(beam.level)],
                             PathGeometry::new(
                                 None,
-                                format!("M{stem_x} {beam_center_y:.1}L{end_x} {beam_center_y:.1}"),
+                                beam_segment_path(start_x, start_y, end_x, end_y, beam_direction),
                                 PathStyle::Beam,
                             ),
                         );
@@ -2101,7 +2141,7 @@ fn render_svg(score: &Score) -> String {
         }
         let mut barline_x = x;
         if let Some(geometry) = &previous_event_geometry {
-            let barline_span = ComponentBounds::filled(0.0, 28.0, 0.0, 108.0);
+            let barline_span = ComponentBounds::filled(0.0, 27.5, 0.0, 108.5);
             for component in geometry.all() {
                 if component.overlaps_vertically(barline_span) {
                     barline_x = barline_x.max((component.right + 5.0).ceil() as i32);
@@ -2113,7 +2153,11 @@ fn render_svg(score: &Score) -> String {
             format!("barline-{}", measure_index + 1),
             None,
             Vec::new(),
-            PathGeometry::new(None, format!("M{barline_x} 28V108"), PathStyle::StaffLine),
+            PathGeometry::new(
+                None,
+                format!("M{barline_x} 27.5V108.5"),
+                PathStyle::StaffLine,
+            ),
         );
         final_barline_x = barline_x;
         right = right.max(barline_x + 12);
@@ -2262,26 +2306,76 @@ fn stem_endpoints(tonehead_y: i32, stems_up: bool) -> (i32, i32) {
     }
 }
 
+fn beam_segment_points(
+    start_x: i32,
+    start_y: f64,
+    end_x: i32,
+    end_y: f64,
+    beam_direction: i32,
+) -> [(f64, f64); 4] {
+    let center_dx = f64::from(end_x - start_x);
+    let slope = (end_y - start_y) / center_dx;
+    let (left_offset, right_offset) = if slope == 0.0 {
+        (0.75, -0.75)
+    } else {
+        let beam_rises = slope < 0.0;
+        let stems_up = beam_direction > 0;
+        let edge_offset = if stems_up != beam_rises { 0.75 } else { -0.75 };
+        (edge_offset, edge_offset)
+    };
+    let left_x = f64::from(start_x) + left_offset;
+    let right_x = f64::from(end_x) + right_offset;
+    let left_y = start_y;
+    let right_y = end_y;
+    let vertical_thickness = 3.0 * slope.hypot(1.0);
+    let inner_offset = f64::from(beam_direction) * vertical_thickness;
+    [
+        (left_x, left_y),
+        (right_x, right_y),
+        (right_x, right_y + inner_offset),
+        (left_x, left_y + inner_offset),
+    ]
+}
+
+fn beam_segment_bounds(
+    start_x: i32,
+    start_y: f64,
+    end_x: i32,
+    end_y: f64,
+    beam_direction: i32,
+) -> ComponentBounds {
+    let points = beam_segment_points(start_x, start_y, end_x, end_y, beam_direction);
+    let left = points
+        .iter()
+        .map(|point| point.0)
+        .fold(f64::INFINITY, f64::min);
+    let top = points
+        .iter()
+        .map(|point| point.1)
+        .fold(f64::INFINITY, f64::min);
+    let right = points
+        .iter()
+        .map(|point| point.0)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let bottom = points
+        .iter()
+        .map(|point| point.1)
+        .fold(f64::NEG_INFINITY, f64::max);
+    ComponentBounds::filled(left, top, right, bottom)
+}
+
 fn beam_segment_path(
     start_x: i32,
-    start_y: i32,
+    start_y: f64,
     end_x: i32,
-    end_y: i32,
+    end_y: f64,
     beam_direction: i32,
 ) -> String {
-    let dx = f64::from(end_x - start_x);
-    let dy = f64::from(end_y - start_y);
-    let length = dx.hypot(dy);
-    let normal_x = -dy / length;
-    let normal_y = dx / length;
-    let stem_half_width = 0.75;
-    let beam_half_width = 1.5;
-    let centerline_offset = f64::from(beam_direction) * beam_half_width;
-    let start_x = f64::from(start_x) - stem_half_width + normal_x * centerline_offset;
-    let start_y = f64::from(start_y) - dy / dx * stem_half_width + normal_y * centerline_offset;
-    let end_x = f64::from(end_x) + stem_half_width + normal_x * centerline_offset;
-    let end_y = f64::from(end_y) + dy / dx * stem_half_width + normal_y * centerline_offset;
-    format!("M{start_x:.2} {start_y:.2}L{end_x:.2} {end_y:.2}")
+    let [(left_x, left_y), (right_x, right_y), (inner_right_x, inner_right_y), (inner_left_x, inner_left_y)] =
+        beam_segment_points(start_x, start_y, end_x, end_y, beam_direction);
+    format!(
+        "M{left_x:.2} {left_y:.2}L{right_x:.2} {right_y:.2}L{inner_right_x:.2} {inner_right_y:.2}L{inner_left_x:.2} {inner_left_y:.2}Z"
+    )
 }
 
 fn glyph_path(value: u8) -> &'static str {
@@ -2356,14 +2450,14 @@ mod tests {
         assert!(
             svg.lines().any(|line| {
                 line.contains("id=\"beam-7-1\"")
-                    && line.contains("d=\"M493.25 40.50L508.75 40.50\"")
+                    && line.contains("d=\"M494.75 39.00L507.25 39.00L507.25 42.00L494.75 42.00Z\"")
             }),
             "primary mixed-duration beam: {svg}"
         );
         assert!(
             svg.lines().any(|line| {
                 line.contains("id=\"beam-7-2\"")
-                    && line.contains("d=\"M493.25 45.50L508.75 45.50\"")
+                    && line.contains("d=\"M494.75 44.00L507.25 44.00L507.25 47.00L494.75 47.00Z\"")
             }),
             "secondary beam should keep a 2-unit gap: {svg}"
         );
@@ -2377,7 +2471,8 @@ mod tests {
         );
         assert!(
             svg.lines().any(|line| {
-                line.contains("id=\"beam-hook-7-3\"") && line.contains("d=\"M508 50.5L499 50.5\"")
+                line.contains("id=\"beam-hook-7-3\"")
+                    && line.contains("d=\"M499.75 49.00L507.25 49.00L507.25 52.00L499.75 52.00Z\"")
             }),
             "partial hook should stay parallel with the same gap: {svg}"
         );
