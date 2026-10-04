@@ -2337,6 +2337,7 @@ fn rejects_input_over_64_mib_as_a_resource_limit() {
     OpenOptions::new()
         .create(true)
         .write(true)
+        .truncate(false)
         .open(&input)
         .expect("create oversized input")
         .set_len(64 * 1024 * 1024 + 1)
