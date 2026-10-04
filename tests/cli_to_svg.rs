@@ -1457,8 +1457,8 @@ fn angled_beams_are_flush_parallelograms_and_hooks_follow_the_beam_slope() {
         let (end_x, _, end_end_y) = stem_anchors[end_event_index];
         let stems_up = stem_anchors[end_event_index].2 < stem_anchors[end_event_index].1;
         let beam_direction = if stems_up { 1.0 } else { -1.0 };
-        let level_offset = f64::from(level - 1) * 5.0 * beam_direction;
         let slope = (end_end_y - start_end_y) / (end_x - start_x);
+        let level_offset = f64::from(level - 1) * (4.0 * slope.hypot(1.0)).round() * beam_direction;
         assert!((outer_start.0 - (start_x + edge_offset)).abs() < 0.01);
         assert!((outer_end.0 - (end_x + edge_offset)).abs() < 0.01);
         assert!((outer_start.1 - (start_end_y + level_offset)).abs() < 0.02);
@@ -1475,6 +1475,14 @@ fn angled_beams_are_flush_parallelograms_and_hooks_follow_the_beam_slope() {
     }
 
     let primary = path_points("beam-11-1");
+    let secondary = path_points("beam-11-2");
+    let beam_slope = (primary[1].1 - primary[0].1) / (primary[1].0 - primary[0].0);
+    let start_edge_gap = (primary[3].1 - secondary[0].1).abs() / beam_slope.hypot(1.0);
+    let end_edge_gap = (primary[2].1 - secondary[1].1).abs() / beam_slope.hypot(1.0);
+    assert!(
+        (0.5..2.0).contains(&start_edge_gap) && (0.5..2.0).contains(&end_edge_gap),
+        "angled beam edge gaps should remain wider than the original and below the earlier wide spacing (start={start_edge_gap:.2}, end={end_edge_gap:.2})"
+    );
     let hook = path_points("beam-hook-11-3");
     assert_eq!(
         hook.len(),
@@ -1484,10 +1492,8 @@ fn angled_beams_are_flush_parallelograms_and_hooks_follow_the_beam_slope() {
     let stem_x = stem_anchors[11].0;
     assert!((hook[0].0 - (stem_x - 9.0 + 0.75)).abs() < 0.01);
     assert!((hook[1].0 - (stem_x + 0.75)).abs() < 0.01);
-    let beam_slope = (primary[1].1 - primary[0].1) / (primary[1].0 - primary[0].0);
     let hook_slope = (hook[1].1 - hook[0].1) / (hook[1].0 - hook[0].0);
     assert!((beam_slope - hook_slope).abs() < 0.001);
-
     fs::remove_dir_all(directory).expect("remove test directory");
 }
 

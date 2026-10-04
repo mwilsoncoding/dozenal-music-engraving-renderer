@@ -1416,9 +1416,12 @@ fn event_geometry(
     }
 
     let beam_direction = if stems_up { 1 } else { -1 };
+    let primary_beam_slope = active_beams[1]
+        .map(|(start_x, start_y)| f64::from(stem_end - start_y) / f64::from(stem_x - start_x))
+        .unwrap_or(0.0);
     for beam in &event.beams {
         let level = usize::from(beam.level);
-        let offset = i32::from(beam.level - 1) * 5 * beam_direction;
+        let offset = beam_level_offset(beam.level, primary_beam_slope, beam_direction);
         let beam_y = stem_end + offset;
         match beam.state {
             BeamState::Begin => {}
@@ -1426,7 +1429,7 @@ fn event_geometry(
                 if let Some((start_x, start_y)) = active_beams[level] {
                     incoming.push(beam_segment_bounds(
                         start_x,
-                        f64::from(start_y),
+                        f64::from(start_y + offset),
                         stem_x,
                         f64::from(beam_y),
                         beam_direction,
@@ -1439,22 +1442,17 @@ fn event_geometry(
                 } else {
                     -1
                 };
-                let group_slope = active_beams[1]
-                    .map(|(start_x, start_y)| {
-                        f64::from(stem_end - start_y) / f64::from(stem_x - start_x)
-                    })
-                    .unwrap_or(0.0);
                 let (start_x, start_y, end_x, end_y) = if direction > 0 {
                     (
                         stem_x,
                         f64::from(beam_y),
                         stem_x + 9,
-                        f64::from(beam_y) + group_slope * 9.0,
+                        f64::from(beam_y) + primary_beam_slope * 9.0,
                     )
                 } else {
                     (
                         stem_x - 9,
-                        f64::from(beam_y) - group_slope * 9.0,
+                        f64::from(beam_y) - primary_beam_slope * 9.0,
                         stem_x,
                         f64::from(beam_y),
                     )
@@ -1897,20 +1895,20 @@ fn render_svg(score: &Score) -> String {
                     );
                 }
             }
-            let mut primary_beam_slope = None;
+            let primary_beam_slope = active_beams[1]
+                .map(|(start_x, start_y)| {
+                    f64::from(stem_end - start_y) / f64::from(stem_x - start_x)
+                })
+                .unwrap_or(0.0);
             for beam in &event.beams {
                 let level = usize::from(beam.level);
-                let offset = i32::from(beam.level - 1) * 5 * beam_direction;
+                let offset = beam_level_offset(beam.level, primary_beam_slope, beam_direction);
                 let beam_y = stem_end + offset;
                 match beam.state {
-                    BeamState::Begin => active_beams[level] = Some((stem_x, beam_y)),
+                    BeamState::Begin => active_beams[level] = Some((stem_x, stem_end)),
                     BeamState::Continue | BeamState::End => {
                         let (start_x, start_y) =
                             active_beams[level].expect("beam group is validated before rendering");
-                        if beam.level == 1 {
-                            primary_beam_slope =
-                                Some(f64::from(beam_y - start_y) / f64::from(stem_x - start_x));
-                        }
                         scene.add_path(
                             DrawLayer::Beam,
                             format!("beam-{index}-{level}"),
@@ -1920,7 +1918,7 @@ fn render_svg(score: &Score) -> String {
                                 None,
                                 beam_segment_path(
                                     start_x,
-                                    f64::from(start_y),
+                                    f64::from(start_y + offset),
                                     stem_x,
                                     f64::from(beam_y),
                                     beam_direction,
@@ -1929,7 +1927,7 @@ fn render_svg(score: &Score) -> String {
                             ),
                         );
                         if beam.state == BeamState::Continue {
-                            active_beams[level] = Some((stem_x, beam_y));
+                            active_beams[level] = Some((stem_x, stem_end));
                         } else {
                             active_beams[level] = None;
                         }
@@ -1940,7 +1938,7 @@ fn render_svg(score: &Score) -> String {
                         } else {
                             -1
                         };
-                        let slope = primary_beam_slope.unwrap_or(0.0);
+                        let slope = primary_beam_slope;
                         let (start_x, start_y, end_x, end_y) = if direction > 0 {
                             (
                                 stem_x,
@@ -2337,6 +2335,11 @@ fn beam_segment_points(
     ]
 }
 
+fn beam_level_offset(level: u8, slope: f64, beam_direction: i32) -> i32 {
+    let per_level_spacing = (4.0 * slope.hypot(1.0)).round() as i32;
+    i32::from(level - 1) * per_level_spacing * beam_direction
+}
+
 fn beam_segment_bounds(
     start_x: i32,
     start_y: f64,
@@ -2457,9 +2460,9 @@ mod tests {
         assert!(
             svg.lines().any(|line| {
                 line.contains("id=\"beam-7-2\"")
-                    && line.contains("d=\"M494.75 44.00L507.25 44.00L507.25 47.00L494.75 47.00Z\"")
+                    && line.contains("d=\"M494.75 43.00L507.25 43.00L507.25 46.00L494.75 46.00Z\"")
             }),
-            "secondary beam should keep a 2-unit gap: {svg}"
+            "secondary beam should keep a 1-unit edge gap: {svg}"
         );
         assert!(
             !svg.contains("id=\"flag-6\""),
@@ -2472,7 +2475,7 @@ mod tests {
         assert!(
             svg.lines().any(|line| {
                 line.contains("id=\"beam-hook-7-3\"")
-                    && line.contains("d=\"M499.75 49.00L507.25 49.00L507.25 52.00L499.75 52.00Z\"")
+                    && line.contains("d=\"M499.75 47.00L507.25 47.00L507.25 50.00L499.75 50.00Z\"")
             }),
             "partial hook should stay parallel with the same gap: {svg}"
         );
