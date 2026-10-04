@@ -33,9 +33,10 @@
 
     // Features to add to the dev container. More info: https://containers.dev/features.
     "features": {
+      "ghcr.io/devcontainers/features/git-lfs": {},
       "ghcr.io/devcontainers/features/github-cli": {},
       "ghcr.io/devcontainers/features/node": {},
-      "ghcr.io/devcontainers/features/git-lfs": {},
+      "ghcr.io/devcontainers-extra/features/lefthook-asdf": {},
       "ghcr.io/devcontainers-extra/features/ripgrep": {},
       "ghcr.io/devcontainers-extra/features/shellcheck": {}
     }
