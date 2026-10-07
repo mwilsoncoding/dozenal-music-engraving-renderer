@@ -36,6 +36,10 @@ _Avoid_: Five-line staff, chromatic staff, staves
 A horizontal row of one or more staves aligned across a score.
 _Avoid_: Page, staff
 
+**Page**:
+A physical print surface with dimensions and orientation, margins, and a printable area for one or more Systems.
+_Avoid_: Canvas, System
+
 **Octave Indicator**:
 A pair of vertically stacked dozenal digits flanking the center staff line at the start of a staff to establish register.
 _Avoid_: Clef, key signature, clef sign
