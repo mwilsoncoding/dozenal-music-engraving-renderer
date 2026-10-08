@@ -1,0 +1,11 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "automerge": false,
+  "enabledManagers": [
+    "cargo",
+    "github-actions",
+    "rust-toolchain"
+  ],
+  "minimumReleaseAge": "14 days",
+  "extends": ["config:recommended"]
+}
