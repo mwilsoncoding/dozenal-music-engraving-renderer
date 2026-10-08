@@ -1,4 +1,4 @@
-# Dozenal Music Engraving Renderer
+# Dozenal Music Notation Renderer
 
 Software product that renders sheet music according to dozenal music notation from structured musical input.
 
