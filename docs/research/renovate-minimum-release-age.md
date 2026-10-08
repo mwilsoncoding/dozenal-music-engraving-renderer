@@ -1,0 +1,33 @@
+# Renovate Minimum Release Age and Repository Coverage
+
+Research for [Research Renovate minimum release age and repository support](https://github.com/mwilsoncoding/dozenal-music-engraving-renderer/issues/79). Issue 79 is the context pointer; this report does not resolve it. Checked 2026-10-08 against Renovate 44.146.1 documentation and source.
+
+## Finding
+
+The global setting for a 14-day delay is:
+
+```json
+{
+  "minimumReleaseAge": "14 days"
+}
+```
+
+`minimumReleaseAge` is a duration string, defaults to unset, and can be set globally or in a `packageRules` entry. A global setting needs no manager-specific `packageRules`; add rules only to scope the policy or apply a separate behavior to a subset of packages. Renovate's default `minimumReleaseAgeBuffer` adds 30 minutes to the configured wait. [Configuration options: `minimumReleaseAge`](https://docs.renovatebot.com/configuration-options/#minimumreleaseage), [`minimumReleaseAgeBuffer`](https://docs.renovatebot.com/configuration-options/#minimumreleaseagebuffer), [`packageRules`](https://docs.renovatebot.com/configuration-options/#packagerules), [option schema at 44.146.1](https://github.com/renovatebot/renovate/blob/44.146.1/lib/config/options/index.ts).
+
+Renovate measures from the dependency update's `releaseTimestamp`. Its schema default is `minimumReleaseAgeBehaviour: "timestamp-required"`: an update without a release timestamp is withheld, not treated as old enough. The other value, `timestamp-optional`, allows timestamp-less updates through. With automerge enabled, Renovate may open the PR immediately, but its pending `renovate/stability-days` check prevents it from going green for automerge until the wait has passed. The docs/schema define a duration and no maximum age; they do not promise timestamps for every source. [Age behavior docs](https://docs.renovatebot.com/configuration-options/#minimumreleaseagebehaviour), [age option schema](https://github.com/renovatebot/renovate/blob/44.146.1/lib/config/options/index.ts).
+
+## Repository Coverage
+
+| Surface | Renovate support and 14-day applicability |
+| --- | --- |
+| Cargo dependencies | The manager is `cargo`; it reads `Cargo.toml` and updates `Cargo.lock`. Registry dependencies use datasource `crate`, whose release timestamp comes from the crates.io index `pubtime` or API `created_at`, so the age gate can apply. This repo's [Cargo.toml](../../Cargo.toml) has no third-party dependencies and [Cargo.lock](../../Cargo.lock) contains only the root package, so there are no current crate releases to gate. The manager also supports Git-based datasources; assess those timestamps per source rather than assuming crates.io behavior. [Cargo manager](https://docs.renovatebot.com/modules/manager/cargo/), [`crate` datasource](https://docs.renovatebot.com/modules/datasource/crate/). |
+| GitHub Actions | The manager is `github-actions`; it scans workflow/action YAML, including this repo's [ci.yml](../../.github/workflows/ci.yml). Version-shaped action references use `github-tags`, which supports release timestamps. The current `actions/checkout@v4` and `dtolnay/rust-toolchain@1.98.1` references therefore have an age source when Renovate resolves their tags. Non-version refs such as `@main` route to `github-digest` and support digest updates rather than version updates; do not treat the 14-day release-age rule as a maturity guarantee for moving branches. [GitHub Actions manager and routing examples](https://docs.renovatebot.com/modules/manager/github-actions/), [`github-tags` datasource](https://docs.renovatebot.com/modules/datasource/github-tags/). |
+| `rust-toolchain.toml` | The distinct manager is `rust-toolchain`, matching `rust-toolchain.toml`; its datasource is `rust-version`, which does provide release timestamps. Renovate derives them from the official Rust release manifest URL at midnight UTC, so timestamp precision is one day. This repo's pinned `channel = "1.98.1"` is in the supported file. No package rule is needed for the global age gate. The manager docs' `packageRules` example (`matchManagers: ["rust-toolchain"]`, `matchDepTypes: ["toolchain"]`) configures `rangeStrategy: "pin"`; that is for pinning policy, not required for release age. [Rust toolchain manager](https://docs.renovatebot.com/modules/manager/rust-toolchain/), [`rust-version` datasource](https://docs.renovatebot.com/modules/datasource/rust-version/). |
+
+The relevant manager identifiers are therefore `cargo`, `github-actions`, and `rust-toolchain`; `crate`, `github-tags`, and `rust-version` are datasources, not manager names. For all three current surfaces, the timestamp is documented, so the default timestamp-required behavior can enforce the wait. Other Cargo sources or future action-reference forms without timestamps will be withheld until timestamp data exists or policy is deliberately changed. [Cargo manager](https://docs.renovatebot.com/modules/manager/cargo/), [GitHub Actions manager](https://docs.renovatebot.com/modules/manager/github-actions/), [Rust toolchain manager](https://docs.renovatebot.com/modules/manager/rust-toolchain/), [timestamp behavior](https://docs.renovatebot.com/configuration-options/#minimumreleaseagebehaviour).
+
+## Rollout and Risk Limits
+
+For the Mend-hosted Renovate GitHub App, yes: installing the app and granting it access to this repository is a separate prerequisite; adding Renovate configuration does not install or authorize the app. Installation requires an account with the necessary repository or organization administration rights, subject to organization policy. This research did not verify whether the app is already installed here. [Renovate App listing](https://github.com/marketplace/renovate), [GitHub: installing a third-party GitHub App](https://docs.github.com/en/apps/using-github-apps/installing-a-github-app-from-a-third-party).
+
+A 14-day age gate reduces exposure to a newly published malicious or compromised version being proposed and merged immediately, leaving time for reports, analysis, or publisher response. It does not establish that a release is safe: a malicious release can remain undetected beyond 14 days, and the setting governs Renovate-managed updates with timestamps, not already-pinned dependencies, manual changes, or the security of code fetched from moving refs. Timestamp-required behavior also trades coverage for caution by withholding updates with missing timestamps. [Renovate's age and automerge behavior](https://docs.renovatebot.com/configuration-options/#minimumreleaseage), [timestamp behavior](https://docs.renovatebot.com/configuration-options/#minimumreleaseagebehaviour), [GitHub Actions ref routing](https://docs.renovatebot.com/modules/manager/github-actions/).
