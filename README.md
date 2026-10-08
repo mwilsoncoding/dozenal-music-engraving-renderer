@@ -8,7 +8,11 @@ Any source code found therein is exploratory and local to that repo, not a recom
 
 ## Dependencies
 
-None
+The runtime dependency set is currently empty. Prefer a small, deliberate
+runtime dependency footprint: add a dependency when its product value justifies
+its maintenance, security, and distribution costs. Development and repository
+automation tools may use external dependencies without changing this runtime
+policy.
 
 ## Bootstrap CLI
 
