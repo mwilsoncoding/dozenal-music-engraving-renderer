@@ -76,6 +76,10 @@ _Avoid_: Tail, stick
 One or more dots accompanying a tonehead indicating duration under mensural rhythmic rules (`.` for dotted quarter, `:` for half, `:.` for dotted half).
 _Avoid_: Augmentation dot, colon, rest marker
 
+**Grace Note**:
+A non-duration-bearing ornamental note whose pitch is shown with a Tonehead, placed before or after a principal note.
+_Avoid_: Acciaccatura, appoggiatura
+
 **Tuplet**:
 A rhythmic grouping where a specified number of events fits the time normally occupied by a different number of notated values.
 _Avoid_: Triplet, time-modification
