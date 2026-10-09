@@ -50,6 +50,10 @@ _Avoid_: Clef change, 8va, octave shift
 
 ### Score Structure
 
+**Part**:
+A score-level sequence of measures identified in the part list, containing one or more Staves and Voices.
+_Avoid_: Staff, Voice
+
 **Voice**:
 An independent sequence of musical events within a part; an event may contain one tone or simultaneous tones.
 _Avoid_: Part, chord
