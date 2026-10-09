@@ -51,8 +51,12 @@ _Avoid_: Clef change, 8va, octave shift
 ### Score Structure
 
 **Part**:
-A score-level sequence of measures identified in the part list, containing one or more Staves and Voices.
+A score-level sequence of measures identified in the part list, represented by one Dozenal Staff and containing one or more Voices.
 _Avoid_: Staff, Voice
+
+**Input Staff**:
+A numbered staff in MusicXML input used to locate source events within a Part; all Input Staves in a Part map to that Part's single Dozenal Staff.
+_Avoid_: Dozenal Staff
 
 **Voice**:
 An independent sequence of musical events within a part; an event may contain one tone or simultaneous tones.
