@@ -68,6 +68,10 @@ _Avoid_: Part, chord
 A single dozenal digit glyph placed within an octave lane representing a sounded pitch.
 _Avoid_: Notehead, hollow notehead, oval
 
+**Unpitched Mark**:
+ An X-shaped glyph marking an unpitched event without indicating a Tone.
+ _Avoid_: X tonehead, pitch marker
+
 **Stem**:
 A vertical line attached to a tonehead; every duration except a whole note uses a stem.
 _Avoid_: Tail, stick
