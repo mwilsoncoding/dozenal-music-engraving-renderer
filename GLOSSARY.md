@@ -76,6 +76,10 @@ _Avoid_: Tail, stick
 One or more dots accompanying a tonehead indicating duration under mensural rhythmic rules (`.` for dotted quarter, `:` for half, `:.` for dotted half).
 _Avoid_: Augmentation dot, colon, rest marker
 
+**Tuplet**:
+A rhythmic grouping where a specified number of events fits the time normally occupied by a different number of notated values.
+_Avoid_: Triplet, time-modification
+
 **Chord Bracket**:
 A curved delimiter enclosing simultaneous toneheads within an octave or beat.
 _Avoid_: Notehead cluster, chord paren, chord enclosure
