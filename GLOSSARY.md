@@ -80,6 +80,10 @@ _Avoid_: Tail, stick
 One or more dots accompanying a tonehead indicating duration under mensural rhythmic rules (`.` for dotted quarter, `:` for half, `:.` for dotted half).
 _Avoid_: Augmentation dot, colon, rest marker
 
+**Multi-measure Rest**:
+A notated period of silence spanning a specified number of consecutive Measures within one Part.
+_Avoid_: Multi-bar rest, multiple-rest
+
 **Grace Note**:
 A non-duration-bearing ornamental note whose pitch is shown with a Tonehead, placed before or after a principal note.
 _Avoid_: Acciaccatura, appoggiatura
