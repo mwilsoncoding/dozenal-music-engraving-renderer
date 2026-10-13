@@ -259,7 +259,7 @@ fn applies_harmony_add_alter_and_subtract_degrees() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
     let input = directory.join("harmony-degrees.musicxml");
-    let degrees = "<degree><degree-value>9</degree-value><degree-alter>0</degree-alter><degree-type>add</degree-type></degree>\n        <degree><degree-value>5</degree-value><degree-alter>-1</degree-alter><degree-type>alter</degree-type></degree>\n        <degree><degree-value>3</degree-value><degree-alter>0</degree-alter><degree-type>subtract</degree-type></degree>";
+    let degrees = "<degree><degree-value>9</degree-value><degree-alter>0</degree-alter><degree-type>add</degree-type></degree>\n        <degree><degree-value>5</degree-value><degree-alter>-1</degree-alter><degree-type>alter</degree-type></degree>\n        <degree><degree-value>3</degree-value><degree-alter>-1</degree-alter><degree-type>subtract</degree-type></degree>";
     let fixture = include_str!("fixtures/chord-symbols.musicxml")
         .replace(
             "</kind>\n      </harmony>",
@@ -582,6 +582,77 @@ fn warns_and_omits_numeral_harmony_forms() {
 }
 
 #[test]
+fn warns_and_omits_function_harmony_forms() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("function-harmony.musicxml");
+    let fixture = include_str!("fixtures/chord-symbols.musicxml").replace(
+        "<root><root-step>C</root-step></root>",
+        "<function>V</function>",
+    );
+    fs::write(&input, fixture).expect("write function-harmony score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "valid function harmony should not fail: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("<function> harmony"));
+    let svg = fs::read_to_string(directory.join("function-harmony.svg")).expect("read SVG");
+    assert!(!svg.contains("class=\"chord-symbol-root\""), "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn warns_and_ignores_harmony_position_and_staff_hints() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("harmony-hints.musicxml");
+    let fixture = include_str!("fixtures/chord-symbols.musicxml")
+        .replacen(
+            "<harmony>",
+            "<harmony placement=\"below\" default-x=\"12\" default-y=\"4\" relative-x=\"1\" relative-y=\"-1\">",
+            1,
+        )
+        .replacen("</harmony>", "<staff>2</staff></harmony>", 1);
+    fs::write(&input, fixture).expect("write harmony-hints score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "valid position/staff hints failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("placement"), "{stderr}");
+    assert!(stderr.contains("default-x"), "{stderr}");
+    assert!(stderr.contains("default-y"), "{stderr}");
+    assert!(stderr.contains("relative-x"), "{stderr}");
+    assert!(stderr.contains("relative-y"), "{stderr}");
+    assert!(stderr.contains("single Dozenal Staff"), "{stderr}");
+    let svg = fs::read_to_string(directory.join("harmony-hints.svg")).expect("read SVG");
+    assert_eq!(
+        svg.matches("class=\"chord-symbol-root\"").count(),
+        2,
+        "{svg}"
+    );
+    assert!(
+        svg.contains("transform=\"translate(92 -20) scale(2)\""),
+        "{svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn rejects_fractional_harmony_alterations() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
@@ -604,6 +675,45 @@ fn rejects_fractional_harmony_alterations() {
         String::from_utf8_lossy(&output.stderr).contains("pitch alteration must be an integer"),
         "{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+
+    let fractional_bass = directory.join("fractional-bass.musicxml");
+    fs::write(
+        &fractional_bass,
+        include_str!("fixtures/chord-symbols.musicxml").replace(
+            "<bass-step>B</bass-step>",
+            "<bass-step>B</bass-step><bass-alter>0.5</bass-alter>",
+        ),
+    )
+    .expect("write fractional-bass score");
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&fractional_bass)
+        .output()
+        .expect("run CLI");
+    assert!(
+        !output.status.success(),
+        "fractional bass alteration was accepted"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("pitch alteration must be an integer"));
+
+    let fractional_degree = directory.join("fractional-degree.musicxml");
+    let degree = "<degree><degree-value>9</degree-value><degree-alter>0.5</degree-alter><degree-type>add</degree-type></degree>";
+    fs::write(
+        &fractional_degree,
+        include_str!("fixtures/chord-symbols.musicxml")
+            .replace("</kind>", &format!("</kind>{degree}")),
+    )
+    .expect("write fractional-degree score");
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&fractional_degree)
+        .output()
+        .expect("run CLI");
+    assert!(
+        !output.status.success(),
+        "fractional degree alteration was accepted"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("degree alteration must be an integer")
     );
 
     fs::remove_dir_all(directory).expect("remove test directory");

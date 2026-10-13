@@ -62,7 +62,41 @@ struct ChordSymbol {
 
 struct ChordTone {
     interval: i32,
-    pitch_class: u8,
+    tone: u8,
+}
+
+struct ChordDegree {
+    number: u32,
+    interval: i32,
+}
+
+impl ChordDegree {
+    fn new(number: u32, interval: i32) -> Self {
+        Self { number, interval }
+    }
+}
+
+struct DegreeChange {
+    number: u32,
+    alteration: i32,
+    operation: DegreeOperation,
+}
+
+#[derive(Clone, Copy)]
+enum DegreeOperation {
+    Add,
+    Alter,
+    Subtract,
+}
+
+impl DegreeOperation {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Alter => "alter",
+            Self::Subtract => "subtract",
+        }
+    }
 }
 
 struct PositionedHarmony {
@@ -587,18 +621,67 @@ fn parse_chord_symbol(
         ));
     }
     let kind = kind_element.text.trim();
-    let mut degrees: Vec<(u32, i32)> = match kind {
-        "major" => vec![(1, 0), (3, 4), (5, 7)],
-        "minor" => vec![(1, 0), (3, 3), (5, 7)],
-        "augmented" => vec![(1, 0), (3, 4), (5, 8)],
-        "diminished" => vec![(1, 0), (3, 3), (5, 6)],
-        "dominant" => vec![(1, 0), (3, 4), (5, 7), (7, 10)],
-        "major-seventh" => vec![(1, 0), (3, 4), (5, 7), (7, 11)],
-        "minor-seventh" => vec![(1, 0), (3, 3), (5, 7), (7, 10)],
-        "half-diminished" => vec![(1, 0), (3, 3), (5, 6), (7, 10)],
-        "diminished-seventh" => vec![(1, 0), (3, 3), (5, 6), (7, 9)],
-        "suspended-second" => vec![(1, 0), (2, 2), (5, 7)],
-        "suspended-fourth" => vec![(1, 0), (4, 5), (5, 7)],
+    let mut degrees: Vec<ChordDegree> = match kind {
+        "major" => vec![
+            ChordDegree::new(1, 0),
+            ChordDegree::new(3, 4),
+            ChordDegree::new(5, 7),
+        ],
+        "minor" => vec![
+            ChordDegree::new(1, 0),
+            ChordDegree::new(3, 3),
+            ChordDegree::new(5, 7),
+        ],
+        "augmented" => vec![
+            ChordDegree::new(1, 0),
+            ChordDegree::new(3, 4),
+            ChordDegree::new(5, 8),
+        ],
+        "diminished" => vec![
+            ChordDegree::new(1, 0),
+            ChordDegree::new(3, 3),
+            ChordDegree::new(5, 6),
+        ],
+        "dominant" => vec![
+            ChordDegree::new(1, 0),
+            ChordDegree::new(3, 4),
+            ChordDegree::new(5, 7),
+            ChordDegree::new(7, 10),
+        ],
+        "major-seventh" => vec![
+            ChordDegree::new(1, 0),
+            ChordDegree::new(3, 4),
+            ChordDegree::new(5, 7),
+            ChordDegree::new(7, 11),
+        ],
+        "minor-seventh" => vec![
+            ChordDegree::new(1, 0),
+            ChordDegree::new(3, 3),
+            ChordDegree::new(5, 7),
+            ChordDegree::new(7, 10),
+        ],
+        "half-diminished" => vec![
+            ChordDegree::new(1, 0),
+            ChordDegree::new(3, 3),
+            ChordDegree::new(5, 6),
+            ChordDegree::new(7, 10),
+        ],
+        "diminished-seventh" => vec![
+            ChordDegree::new(1, 0),
+            ChordDegree::new(3, 3),
+            ChordDegree::new(5, 6),
+            ChordDegree::new(7, 9),
+        ],
+        "suspended-second" => vec![
+            ChordDegree::new(1, 0),
+            ChordDegree::new(2, 2),
+            ChordDegree::new(5, 7),
+        ],
+        "suspended-fourth" => vec![
+            ChordDegree::new(1, 0),
+            ChordDegree::new(4, 5),
+            ChordDegree::new(5, 7),
+        ],
         "augmented-seventh" | "dominant-11th" | "dominant-13th" | "dominant-ninth" | "French"
         | "German" | "Italian" | "major-11th" | "major-13th" | "major-minor" | "major-ninth"
         | "major-sixth" | "minor-11th" | "minor-13th" | "minor-ninth" | "minor-sixth"
@@ -652,74 +735,77 @@ fn parse_chord_symbol(
         .is_some_and(|child| elements[*child].name == "degree")
     {
         let degree_element = children[next_child];
-        let (degree, alteration, operation) = parse_chord_degree(elements, degree_element)?;
-        if seen_degrees.contains(&degree) {
+        let change = parse_chord_degree(elements, degree_element)?;
+        if seen_degrees.contains(&change.number) {
             warnings.push(element_diagnostic(
                 &elements[degree_element],
-                format!("conflicting operations for chord degree {degree}; Chord Symbol omitted"),
+                format!(
+                    "conflicting operations for chord degree {}; Chord Symbol omitted",
+                    change.number
+                ),
             ));
             return Ok(None);
         }
-        seen_degrees.push(degree);
         if let Some(position) = degrees
             .iter()
-            .position(|(existing_degree, _)| *existing_degree == degree)
+            .position(|degree| degree.number == change.number)
         {
-            match operation {
-                "add" => {
+            match change.operation {
+                DegreeOperation::Add => {
                     warnings.push(element_diagnostic(
                         &elements[degree_element],
-                        format!("added chord degree {degree} already exists; Chord Symbol omitted"),
+                        format!(
+                            "added chord degree {} already exists; Chord Symbol omitted",
+                            change.number
+                        ),
                     ));
                     return Ok(None);
                 }
-                "alter" => {
-                    let Some(altered_interval) = degrees[position].1.checked_add(alteration) else {
+                DegreeOperation::Alter => {
+                    let Some(altered_interval) =
+                        degrees[position].interval.checked_add(change.alteration)
+                    else {
                         return Err(element_diagnostic(
                             &elements[degree_element],
                             "altered degree is outside the supported numeric range".to_owned(),
                         ));
                     };
-                    degrees[position].1 = altered_interval;
+                    degrees[position].interval = altered_interval;
                 }
-                "subtract" => {
-                    if alteration != 0 {
-                        warnings.push(element_diagnostic(
-                            &elements[degree_element],
-                            format!(
-                                "subtract alteration does not match degree {degree} in kind {kind:?}; Chord Symbol omitted"
-                            ),
-                        ));
-                        return Ok(None);
-                    }
+                DegreeOperation::Subtract => {
                     degrees.remove(position);
                 }
-                _ => unreachable!("degree type is validated"),
             }
-        } else if operation != "add" {
+        } else if !matches!(change.operation, DegreeOperation::Add) {
             warnings.push(element_diagnostic(
                 &elements[degree_element],
                 format!(
-                    "{operation} targets chord degree {degree}, absent from kind {kind:?}; Chord Symbol omitted"
+                    "{} targets chord degree {}, absent from kind {kind:?}; Chord Symbol omitted",
+                    change.operation.name(),
+                    change.number
                 ),
             ));
             return Ok(None);
         } else {
-            let Some(base_interval) = added_degree_interval(degree) else {
+            let Some(base_interval) = added_degree_interval(change.number) else {
                 warnings.push(element_diagnostic(
                     &elements[degree_element],
-                    format!("unsupported added chord degree {degree}; Chord Symbol omitted"),
+                    format!(
+                        "unsupported added chord degree {}; Chord Symbol omitted",
+                        change.number
+                    ),
                 ));
                 return Ok(None);
             };
-            let Some(added_interval) = base_interval.checked_add(alteration) else {
+            let Some(added_interval) = base_interval.checked_add(change.alteration) else {
                 return Err(element_diagnostic(
                     &elements[degree_element],
                     "added degree is outside the supported numeric range".to_owned(),
                 ));
             };
-            degrees.push((degree, added_interval));
+            degrees.push(ChordDegree::new(change.number, added_interval));
         }
+        seen_degrees.push(change.number);
         next_child += 1;
     }
     if children
@@ -797,29 +883,26 @@ fn parse_chord_symbol(
     }
     let mut tones = degrees
         .iter()
-        .map(|(_, interval)| ChordTone {
-            interval: *interval,
-            pitch_class: (i64::from(root) + i64::from(*interval)).rem_euclid(12) as u8,
+        .map(|degree| ChordTone {
+            interval: degree.interval,
+            tone: (i64::from(root) + i64::from(degree.interval)).rem_euclid(12) as u8,
         })
-        .filter(|tone| tone.pitch_class != root && Some(tone.pitch_class) != bass)
+        .filter(|tone| tone.tone != root && Some(tone.tone) != bass)
         .collect::<Vec<_>>();
     tones.sort_by_key(|tone| tone.interval);
-    let mut seen_pitch_classes = Vec::new();
+    let mut seen_tones = Vec::new();
     tones.retain(|tone| {
-        if seen_pitch_classes.contains(&tone.pitch_class) {
+        if seen_tones.contains(&tone.tone) {
             false
         } else {
-            seen_pitch_classes.push(tone.pitch_class);
+            seen_tones.push(tone.tone);
             true
         }
     });
     Ok(Some((ChordSymbol { root, bass, tones }, offset_x)))
 }
 
-fn parse_chord_degree(
-    elements: &[Element],
-    degree: usize,
-) -> Result<(u32, i32, &'static str), String> {
+fn parse_chord_degree(elements: &[Element], degree: usize) -> Result<DegreeChange, String> {
     let element = &elements[degree];
     require_no_attributes(element)?;
     require_container_text(element)?;
@@ -844,9 +927,9 @@ fn parse_chord_degree(
         "degree alteration must be an integer number of semitones",
     )?;
     let operation = match leaf_text(&elements[degree_type])? {
-        "add" => "add",
-        "alter" => "alter",
-        "subtract" => "subtract",
+        "add" => DegreeOperation::Add,
+        "alter" => DegreeOperation::Alter,
+        "subtract" => DegreeOperation::Subtract,
         value => {
             return Err(element_diagnostic(
                 &elements[degree_type],
@@ -854,7 +937,11 @@ fn parse_chord_degree(
             ));
         }
     };
-    Ok((value, alteration, operation))
+    Ok(DegreeChange {
+        number: value,
+        alteration,
+        operation,
+    })
 }
 
 fn added_degree_interval(degree: u32) -> Option<i32> {
@@ -2428,18 +2515,18 @@ fn add_chord_symbol(
             Some(PathClass::ChordSymbolTone),
             vec![
                 PathMetadata::ChordRole("tone"),
-                PathMetadata::Tone(tone.pitch_class),
+                PathMetadata::Tone(tone.tone),
             ],
             PathGeometry::new(
                 Some((
                     x + SMALL_DIGIT_X + tone_index as i32 * TONE_SPACING,
                     ROOT_TOP,
                 )),
-                glyph_path(tone.pitch_class),
+                glyph_path(tone.tone),
                 PathStyle::FilledGlyph,
             )
             .offset_x(offset_x)
-            .rotated_180_if(tone.pitch_class == 10),
+            .rotated_180_if(tone.tone == 10),
         );
     }
     *view_top = (*view_top).min(ROOT_TOP);
