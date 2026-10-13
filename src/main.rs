@@ -50,7 +50,25 @@ enum BeamState {
 
 struct Measure {
     events: Vec<Event>,
+    harmonies: Vec<PositionedHarmony>,
     meter: Option<Meter>,
+}
+
+struct ChordSymbol {
+    root: u8,
+    bass: Option<u8>,
+    tones: Vec<ChordTone>,
+}
+
+struct ChordTone {
+    interval: i32,
+    pitch_class: u8,
+}
+
+struct PositionedHarmony {
+    event_index: usize,
+    offset_x: f64,
+    symbol: ChordSymbol,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -61,6 +79,7 @@ struct Meter {
 
 struct Score {
     measures: Vec<Measure>,
+    warnings: Vec<String>,
 }
 
 fn main() {
@@ -76,6 +95,9 @@ fn run() -> Result<(), String> {
         .map_err(|error| format!("cannot read {}: {error}", input_path.display()))?;
     let score =
         parse_score(&source).map_err(|error| format!("{}: {error}", input_path.display()))?;
+    for warning in &score.warnings {
+        eprintln!("domunor: warning: {}: {warning}", input_path.display());
+    }
     let svg = render_svg(&score);
 
     if output_path
@@ -170,6 +192,7 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
     let mut pending_ties = Vec::new();
     let mut active_beams = [false; 5];
     let mut measures = Vec::new();
+    let mut warnings = Vec::new();
     for measure_id in &elements[part].children {
         let measure_element = &elements[*measure_id];
         if measure_element.name != "measure" {
@@ -181,6 +204,7 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
         required_attribute(measure_element, "number")?;
         require_container_text(measure_element)?;
         let mut events: Vec<Event> = Vec::new();
+        let mut harmonies = Vec::new();
         let mut event_sources = Vec::new();
         let mut chord_target = None;
         for child in &measure_element.children {
@@ -292,6 +316,17 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
                             .map(|_| events.len() - 1);
                     }
                 }
+                "harmony" => {
+                    if let Some((symbol, offset_x)) =
+                        parse_chord_symbol(&elements, *child, &mut warnings, divisions)?
+                    {
+                        harmonies.push(PositionedHarmony {
+                            event_index: events.len(),
+                            offset_x,
+                            symbol,
+                        });
+                    }
+                }
                 _ => {
                     return Err(element_diagnostic(
                         element,
@@ -312,6 +347,7 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
         }
         measures.push(Measure {
             events,
+            harmonies,
             meter: active_meter,
         });
     }
@@ -334,7 +370,566 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
         ));
     }
 
-    Ok(Score { measures })
+    Ok(Score { measures, warnings })
+}
+
+fn parse_chord_symbol(
+    elements: &[Element],
+    harmony: usize,
+    warnings: &mut Vec<String>,
+    divisions: Option<u32>,
+) -> Result<Option<(ChordSymbol, f64)>, String> {
+    let element = &elements[harmony];
+    validate_attributes(
+        element,
+        &[
+            "type",
+            "print-object",
+            "print-frame",
+            "placement",
+            "default-x",
+            "default-y",
+            "relative-x",
+            "relative-y",
+            "font-family",
+            "font-style",
+            "font-size",
+            "font-weight",
+            "color",
+            "halign",
+            "valign",
+            "id",
+        ],
+    )?;
+    require_container_text(element)?;
+    let harmony_type = optional_attribute(element, "type").unwrap_or("explicit");
+    if !matches!(harmony_type, "explicit" | "implied" | "alternate") {
+        return Err(element_diagnostic(
+            element,
+            format!("invalid harmony type {harmony_type:?}"),
+        ));
+    }
+    let print_object = optional_attribute(element, "print-object").unwrap_or("yes");
+    if !matches!(print_object, "yes" | "no") {
+        return Err(element_diagnostic(
+            element,
+            format!("print-object must be 'yes' or 'no', not {print_object:?}"),
+        ));
+    }
+    let print_frame = optional_attribute(element, "print-frame").unwrap_or("no");
+    if !matches!(print_frame, "yes" | "no") {
+        return Err(element_diagnostic(
+            element,
+            format!("print-frame must be 'yes' or 'no', not {print_frame:?}"),
+        ));
+    }
+    if let Some(placement) = optional_attribute(element, "placement") {
+        if !matches!(placement, "above" | "below") {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid harmony placement {placement:?}"),
+            ));
+        }
+        warnings.push(element_diagnostic(
+            element,
+            "harmony placement is not supported; symbol defaults above the staff".to_owned(),
+        ));
+    }
+    for attribute in ["default-x", "default-y", "relative-x", "relative-y"] {
+        if let Some(value) = optional_attribute(element, attribute) {
+            if !value.parse::<f64>().is_ok_and(f64::is_finite) {
+                return Err(element_diagnostic(
+                    element,
+                    format!("{attribute} must be a finite number"),
+                ));
+            }
+            warnings.push(element_diagnostic(
+                element,
+                format!("harmony {attribute} is not supported; ignored"),
+            ));
+        }
+    }
+    for (attribute, allowed) in [
+        ("font-style", &["normal", "italic"][..]),
+        ("font-weight", &["normal", "bold"][..]),
+        ("halign", &["left", "center", "right"][..]),
+        ("valign", &["top", "middle", "bottom", "baseline"][..]),
+    ] {
+        if let Some(value) = optional_attribute(element, attribute) {
+            if !allowed.contains(&value) {
+                return Err(element_diagnostic(
+                    element,
+                    format!("invalid harmony {attribute} value {value:?}"),
+                ));
+            }
+        }
+    }
+    if optional_attribute(element, "color").is_some_and(|color| !valid_musicxml_color(color)) {
+        return Err(element_diagnostic(
+            element,
+            "harmony color must be a six-digit hexadecimal color".to_owned(),
+        ));
+    }
+    if optional_attribute(element, "id").is_some_and(str::is_empty) {
+        return Err(element_diagnostic(
+            element,
+            "harmony id must not be empty".to_owned(),
+        ));
+    }
+    if element.attributes.iter().any(|(name, _)| {
+        matches!(
+            name.as_str(),
+            "font-family"
+                | "font-style"
+                | "font-size"
+                | "font-weight"
+                | "color"
+                | "halign"
+                | "valign"
+                | "id"
+        )
+    }) {
+        warnings.push(element_diagnostic(
+            element,
+            "harmony typography, color, alignment, and id attributes are not supported; ignored"
+                .to_owned(),
+        ));
+    }
+    if print_object == "no" {
+        return Ok(None);
+    }
+    if harmony_type != "explicit" {
+        warnings.push(element_diagnostic(
+            element,
+            format!("{harmony_type} harmony is not supported; omitted"),
+        ));
+        return Ok(None);
+    }
+    if print_frame == "yes" {
+        warnings.push(element_diagnostic(
+            element,
+            "harmony frames are not supported; omitted".to_owned(),
+        ));
+    }
+    let children = &element.children;
+    if children.len() < 2 {
+        return Err(element_diagnostic(
+            element,
+            "unsupported harmony shape; expected root-based <root> followed by <kind>".to_owned(),
+        ));
+    }
+    if matches!(elements[children[0]].name.as_str(), "numeral" | "function") {
+        warnings.push(element_diagnostic(
+            &elements[children[0]],
+            format!(
+                "MusicXML <{}> harmony is not supported; omitted",
+                elements[children[0]].name
+            ),
+        ));
+        return Ok(None);
+    }
+    if elements[children[0]].name != "root" {
+        return Err(element_diagnostic(
+            &elements[children[0]],
+            "unsupported harmony shape; expected root-based <root>".to_owned(),
+        ));
+    }
+    if elements[children[1]].name != "kind" {
+        return Err(element_diagnostic(
+            &elements[children[1]],
+            "root-based harmony requires <kind> after <root>".to_owned(),
+        ));
+    }
+    let root = parse_harmony_pitch(elements, children[0], "root-step", "root-alter")?;
+    let kind_element = &elements[children[1]];
+    validate_attributes(
+        kind_element,
+        &[
+            "use-symbols",
+            "text",
+            "stack-degrees",
+            "parentheses-degrees",
+            "bracket-degrees",
+            "font-family",
+            "font-style",
+            "font-size",
+            "font-weight",
+            "color",
+            "halign",
+            "valign",
+        ],
+    )?;
+    if !kind_element.children.is_empty() || kind_element.text.trim().is_empty() {
+        return Err(element_diagnostic(
+            kind_element,
+            "<kind> must contain a plain MusicXML kind value".to_owned(),
+        ));
+    }
+    for attribute in [
+        "use-symbols",
+        "stack-degrees",
+        "parentheses-degrees",
+        "bracket-degrees",
+    ] {
+        if let Some(value) = optional_attribute(kind_element, attribute) {
+            if !matches!(value, "yes" | "no") {
+                return Err(element_diagnostic(
+                    kind_element,
+                    format!("{attribute} must be 'yes' or 'no', not {value:?}"),
+                ));
+            }
+        }
+    }
+    if !kind_element.attributes.is_empty() {
+        warnings.push(element_diagnostic(
+            kind_element,
+            "MusicXML kind display attributes are not supported; ignored".to_owned(),
+        ));
+    }
+    let kind = kind_element.text.trim();
+    let mut degrees: Vec<(u32, i32)> = match kind {
+        "major" => vec![(1, 0), (3, 4), (5, 7)],
+        "minor" => vec![(1, 0), (3, 3), (5, 7)],
+        "augmented" => vec![(1, 0), (3, 4), (5, 8)],
+        "diminished" => vec![(1, 0), (3, 3), (5, 6)],
+        "dominant" => vec![(1, 0), (3, 4), (5, 7), (7, 10)],
+        "major-seventh" => vec![(1, 0), (3, 4), (5, 7), (7, 11)],
+        "minor-seventh" => vec![(1, 0), (3, 3), (5, 7), (7, 10)],
+        "half-diminished" => vec![(1, 0), (3, 3), (5, 6), (7, 10)],
+        "diminished-seventh" => vec![(1, 0), (3, 3), (5, 6), (7, 9)],
+        "suspended-second" => vec![(1, 0), (2, 2), (5, 7)],
+        "suspended-fourth" => vec![(1, 0), (4, 5), (5, 7)],
+        "augmented-seventh" | "dominant-11th" | "dominant-13th" | "dominant-ninth" | "French"
+        | "German" | "Italian" | "major-11th" | "major-13th" | "major-minor" | "major-ninth"
+        | "major-sixth" | "minor-11th" | "minor-13th" | "minor-ninth" | "minor-sixth"
+        | "Neapolitan" | "none" | "other" | "pedal" | "power" | "Tristan" => {
+            warnings.push(element_diagnostic(
+                &elements[children[1]],
+                format!("valid MusicXML harmony kind {kind:?} is not supported; omitted"),
+            ));
+            return Ok(None);
+        }
+        _ => {
+            return Err(element_diagnostic(
+                &elements[children[1]],
+                format!("invalid MusicXML harmony kind {kind:?}"),
+            ));
+        }
+    };
+    let mut next_child = 2;
+    if children
+        .get(next_child)
+        .is_some_and(|child| elements[*child].name == "inversion")
+    {
+        let inversion = children[next_child];
+        let value = leaf_text(&elements[inversion])?
+            .parse::<u32>()
+            .map_err(|_| {
+                element_diagnostic(
+                    &elements[inversion],
+                    "inversion must be a nonnegative integer".to_owned(),
+                )
+            })?;
+        warnings.push(element_diagnostic(
+            &elements[inversion],
+            format!("inversion {value} does not specify an explicit bass tone; ignored"),
+        ));
+        next_child += 1;
+    }
+    let bass = if children
+        .get(next_child)
+        .is_some_and(|child| elements[*child].name == "bass")
+    {
+        let bass = parse_harmony_pitch(elements, children[next_child], "bass-step", "bass-alter")?;
+        next_child += 1;
+        (bass != root).then_some(bass)
+    } else {
+        None
+    };
+    let mut seen_degrees = Vec::new();
+    while children
+        .get(next_child)
+        .is_some_and(|child| elements[*child].name == "degree")
+    {
+        let degree_element = children[next_child];
+        let (degree, alteration, operation) = parse_chord_degree(elements, degree_element)?;
+        if seen_degrees.contains(&degree) {
+            warnings.push(element_diagnostic(
+                &elements[degree_element],
+                format!("conflicting operations for chord degree {degree}; Chord Symbol omitted"),
+            ));
+            return Ok(None);
+        }
+        seen_degrees.push(degree);
+        if let Some(position) = degrees
+            .iter()
+            .position(|(existing_degree, _)| *existing_degree == degree)
+        {
+            match operation {
+                "add" => {
+                    warnings.push(element_diagnostic(
+                        &elements[degree_element],
+                        format!("added chord degree {degree} already exists; Chord Symbol omitted"),
+                    ));
+                    return Ok(None);
+                }
+                "alter" => {
+                    let Some(altered_interval) = degrees[position].1.checked_add(alteration) else {
+                        return Err(element_diagnostic(
+                            &elements[degree_element],
+                            "altered degree is outside the supported numeric range".to_owned(),
+                        ));
+                    };
+                    degrees[position].1 = altered_interval;
+                }
+                "subtract" => {
+                    if alteration != 0 {
+                        warnings.push(element_diagnostic(
+                            &elements[degree_element],
+                            format!(
+                                "subtract alteration does not match degree {degree} in kind {kind:?}; Chord Symbol omitted"
+                            ),
+                        ));
+                        return Ok(None);
+                    }
+                    degrees.remove(position);
+                }
+                _ => unreachable!("degree type is validated"),
+            }
+        } else if operation != "add" {
+            warnings.push(element_diagnostic(
+                &elements[degree_element],
+                format!(
+                    "{operation} targets chord degree {degree}, absent from kind {kind:?}; Chord Symbol omitted"
+                ),
+            ));
+            return Ok(None);
+        } else {
+            let Some(base_interval) = added_degree_interval(degree) else {
+                warnings.push(element_diagnostic(
+                    &elements[degree_element],
+                    format!("unsupported added chord degree {degree}; Chord Symbol omitted"),
+                ));
+                return Ok(None);
+            };
+            let Some(added_interval) = base_interval.checked_add(alteration) else {
+                return Err(element_diagnostic(
+                    &elements[degree_element],
+                    "added degree is outside the supported numeric range".to_owned(),
+                ));
+            };
+            degrees.push((degree, added_interval));
+        }
+        next_child += 1;
+    }
+    if children
+        .get(next_child)
+        .is_some_and(|child| elements[*child].name == "frame")
+    {
+        next_child += 1;
+        warnings.push(element_diagnostic(
+            &elements[children[next_child - 1]],
+            "harmony frame diagrams are not supported; omitted".to_owned(),
+        ));
+    }
+    let offset_x = if children
+        .get(next_child)
+        .is_some_and(|child| elements[*child].name == "offset")
+    {
+        let offset = children[next_child];
+        require_no_attributes(&elements[offset])?;
+        let ticks = leaf_text(&elements[offset])?.parse::<i32>().map_err(|_| {
+            element_diagnostic(&elements[offset], "offset must be an integer".to_owned())
+        })?;
+        let divisions = divisions.ok_or_else(|| {
+            element_diagnostic(
+                &elements[offset],
+                "a positive <divisions> value is required for harmony offsets".to_owned(),
+            )
+        })?;
+        next_child += 1;
+        f64::from(ticks) * 40.0 / f64::from(divisions)
+    } else {
+        0.0
+    };
+    while children
+        .get(next_child)
+        .is_some_and(|child| matches!(elements[*child].name.as_str(), "footnote" | "level"))
+    {
+        let unsupported = children[next_child];
+        warnings.push(element_diagnostic(
+            &elements[unsupported],
+            format!(
+                "harmony <{}> content is not supported; ignored",
+                elements[unsupported].name
+            ),
+        ));
+        next_child += 1;
+    }
+    if children
+        .get(next_child)
+        .is_some_and(|child| elements[*child].name == "staff")
+    {
+        let staff = children[next_child];
+        let value = leaf_text(&elements[staff])?
+            .parse::<u32>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                element_diagnostic(
+                    &elements[staff],
+                    "harmony staff must be a positive integer".to_owned(),
+                )
+            })?;
+        if value != 1 {
+            warnings.push(element_diagnostic(
+                &elements[staff],
+                "harmony staff references map to the Part's single Dozenal Staff".to_owned(),
+            ));
+        }
+        next_child += 1;
+    }
+    if next_child != children.len() {
+        return Err(element_diagnostic(
+            &elements[children[next_child]],
+            "unsupported harmony content".to_owned(),
+        ));
+    }
+    let mut tones = degrees
+        .iter()
+        .map(|(_, interval)| ChordTone {
+            interval: *interval,
+            pitch_class: (i64::from(root) + i64::from(*interval)).rem_euclid(12) as u8,
+        })
+        .filter(|tone| tone.pitch_class != root && Some(tone.pitch_class) != bass)
+        .collect::<Vec<_>>();
+    tones.sort_by_key(|tone| tone.interval);
+    let mut seen_pitch_classes = Vec::new();
+    tones.retain(|tone| {
+        if seen_pitch_classes.contains(&tone.pitch_class) {
+            false
+        } else {
+            seen_pitch_classes.push(tone.pitch_class);
+            true
+        }
+    });
+    Ok(Some((ChordSymbol { root, bass, tones }, offset_x)))
+}
+
+fn parse_chord_degree(
+    elements: &[Element],
+    degree: usize,
+) -> Result<(u32, i32, &'static str), String> {
+    let element = &elements[degree];
+    require_no_attributes(element)?;
+    require_container_text(element)?;
+    let [value, alteration, degree_type] = exact_children(
+        elements,
+        degree,
+        &["degree-value", "degree-alter", "degree-type"],
+    )?;
+    let value = leaf_text(&elements[value])?
+        .parse::<u32>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            element_diagnostic(
+                &elements[value],
+                "degree value must be a positive integer".to_owned(),
+            )
+        })?;
+    let alteration = parse_integral_semitones(
+        elements,
+        alteration,
+        "degree alteration must be an integer number of semitones",
+    )?;
+    let operation = match leaf_text(&elements[degree_type])? {
+        "add" => "add",
+        "alter" => "alter",
+        "subtract" => "subtract",
+        value => {
+            return Err(element_diagnostic(
+                &elements[degree_type],
+                format!("invalid chord degree type {value:?}"),
+            ));
+        }
+    };
+    Ok((value, alteration, operation))
+}
+
+fn added_degree_interval(degree: u32) -> Option<i32> {
+    let degree_offset = degree.checked_sub(1)?;
+    let octave = i32::try_from(degree_offset / 7).ok()?.checked_mul(12)?;
+    let simple = (degree_offset % 7) as usize;
+    Some(octave + [0, 2, 4, 5, 7, 9, 10][simple])
+}
+
+fn parse_integral_semitones(
+    elements: &[Element],
+    element: usize,
+    message: &str,
+) -> Result<i32, String> {
+    let value = leaf_text(&elements[element])?;
+    let (integer, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if fraction.chars().any(|digit| digit != '0') {
+        return Err(element_diagnostic(&elements[element], message.to_owned()));
+    }
+    integer
+        .parse::<i32>()
+        .map_err(|_| element_diagnostic(&elements[element], message.to_owned()))
+}
+
+fn parse_harmony_pitch(
+    elements: &[Element],
+    pitch: usize,
+    step_name: &str,
+    alter_name: &str,
+) -> Result<u8, String> {
+    let element = &elements[pitch];
+    require_no_attributes(element)?;
+    require_container_text(element)?;
+    let children = &element.children;
+    let step = children
+        .first()
+        .copied()
+        .ok_or_else(|| element_diagnostic(element, format!("<{step_name}> is required")))?;
+    if elements[step].name != step_name || children.len() > 2 {
+        return Err(element_diagnostic(
+            element,
+            format!("unsupported shape: expected <{step_name}> and optional <{alter_name}>"),
+        ));
+    }
+    let natural = match leaf_text(&elements[step])? {
+        "C" => 0i32,
+        "D" => 2,
+        "E" => 4,
+        "F" => 5,
+        "G" => 7,
+        "A" => 9,
+        "B" => 11,
+        value => {
+            return Err(element_diagnostic(
+                &elements[step],
+                format!("unsupported pitch step {value:?}"),
+            ));
+        }
+    };
+    let alteration = if let Some(alter) = children.get(1).copied() {
+        if elements[alter].name != alter_name {
+            return Err(element_diagnostic(
+                &elements[alter],
+                format!("expected <{alter_name}> after <{step_name}>"),
+            ));
+        }
+        parse_integral_semitones(
+            elements,
+            alter,
+            "pitch alteration must be an integer number of semitones",
+        )?
+    } else {
+        0
+    };
+    Ok((i64::from(natural) + i64::from(alteration)).rem_euclid(12) as u8)
 }
 
 fn parse_time(elements: &[Element], time: usize) -> Result<Meter, String> {
@@ -1180,6 +1775,40 @@ fn require_no_attributes(element: &Element) -> Result<(), String> {
     }
 }
 
+fn validate_attributes(element: &Element, allowed: &[&str]) -> Result<(), String> {
+    for (index, (name, _)) in element.attributes.iter().enumerate() {
+        if !allowed.contains(&name.as_str()) {
+            return Err(element_diagnostic(
+                element,
+                format!("unsupported attribute {name:?} on <{}>", element.name),
+            ));
+        }
+        if element.attributes[..index]
+            .iter()
+            .any(|(previous, _)| previous == name)
+        {
+            return Err(element_diagnostic(
+                element,
+                format!("duplicate {name:?} attribute on <{}>", element.name),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn optional_attribute<'a>(element: &'a Element, name: &str) -> Option<&'a str> {
+    element
+        .attributes
+        .iter()
+        .find_map(|(attribute, value)| (attribute == name).then_some(value.as_str()))
+}
+
+fn valid_musicxml_color(value: &str) -> bool {
+    value.len() == 7
+        && value.starts_with('#')
+        && value[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn leaf_text(element: &Element) -> Result<&str, String> {
     if !element.children.is_empty() || !element.attributes.is_empty() {
         return Err(element_diagnostic(
@@ -1219,6 +1848,9 @@ enum PathClass {
     DurationMark,
     ChordBracket,
     Tonehead,
+    ChordSymbolRoot,
+    ChordSymbolBass,
+    ChordSymbolTone,
     Tie,
 }
 
@@ -1229,6 +1861,7 @@ enum PathMetadata {
     Tone(u8),
     Octave(u8),
     Duration(&'static str),
+    ChordRole(&'static str),
     BeamLevel(u8),
 }
 
@@ -1650,6 +2283,9 @@ impl Scene {
                 PathClass::DurationMark => "duration-mark",
                 PathClass::ChordBracket => "chord-bracket",
                 PathClass::Tonehead => "tonehead",
+                PathClass::ChordSymbolRoot => "chord-symbol-root",
+                PathClass::ChordSymbolBass => "chord-symbol-bass",
+                PathClass::ChordSymbolTone => "chord-symbol-tone",
                 PathClass::Tie => "tie",
             };
             write!(svg, " class=\"{class}\"").expect("writing to a String cannot fail");
@@ -1661,6 +2297,7 @@ impl Scene {
                 PathMetadata::Tone(value) => write!(svg, " data-tone=\"{value}\""),
                 PathMetadata::Octave(value) => write!(svg, " data-octave=\"{value}\""),
                 PathMetadata::Duration(value) => write!(svg, " data-duration=\"{value}\""),
+                PathMetadata::ChordRole(value) => write!(svg, " data-chord-role=\"{value}\""),
                 PathMetadata::BeamLevel(value) => write!(svg, " data-level=\"{value}\""),
             }
             .expect("writing to a String cannot fail");
@@ -1739,6 +2376,80 @@ fn rest_origin_y(duration_name: &str, bounds: (f64, f64, f64, f64)) -> f64 {
     }
 }
 
+fn add_chord_symbol(
+    scene: &mut Scene,
+    symbol: &ChordSymbol,
+    x: i32,
+    offset_x: f64,
+    index: usize,
+    right: &mut i32,
+    view_top: &mut i32,
+) -> i32 {
+    const ROOT_TOP: i32 = -20;
+    const SMALL_DIGIT_X: i32 = 22;
+    const TONE_SPACING: i32 = 13;
+    let root_id = format!("chord-symbol-{index}-root");
+    scene.add_path(
+        DrawLayer::Event,
+        root_id,
+        Some(PathClass::ChordSymbolRoot),
+        vec![
+            PathMetadata::ChordRole("root"),
+            PathMetadata::Tone(symbol.root),
+        ],
+        PathGeometry::new(
+            Some((x, ROOT_TOP)),
+            glyph_path(symbol.root),
+            PathStyle::FilledGlyph,
+        )
+        .offset_x(offset_x)
+        .scaled(2.0)
+        .rotated_180_if(symbol.root == 10),
+    );
+    if let Some(bass) = symbol.bass {
+        scene.add_path(
+            DrawLayer::Event,
+            format!("chord-symbol-{index}-bass"),
+            Some(PathClass::ChordSymbolBass),
+            vec![PathMetadata::ChordRole("bass"), PathMetadata::Tone(bass)],
+            PathGeometry::new(
+                Some((x + SMALL_DIGIT_X, ROOT_TOP + 17)),
+                glyph_path(bass),
+                PathStyle::FilledGlyph,
+            )
+            .offset_x(offset_x)
+            .rotated_180_if(bass == 10),
+        );
+    }
+    for (tone_index, tone) in symbol.tones.iter().enumerate() {
+        scene.add_path(
+            DrawLayer::Event,
+            format!("chord-symbol-{index}-tone-{tone_index}"),
+            Some(PathClass::ChordSymbolTone),
+            vec![
+                PathMetadata::ChordRole("tone"),
+                PathMetadata::Tone(tone.pitch_class),
+            ],
+            PathGeometry::new(
+                Some((
+                    x + SMALL_DIGIT_X + tone_index as i32 * TONE_SPACING,
+                    ROOT_TOP,
+                )),
+                glyph_path(tone.pitch_class),
+                PathStyle::FilledGlyph,
+            )
+            .offset_x(offset_x)
+            .rotated_180_if(tone.pitch_class == 10),
+        );
+    }
+    *view_top = (*view_top).min(ROOT_TOP);
+    let last_tone_x =
+        symbol.tones.len().saturating_sub(1).min(i32::MAX as usize) as i32 * TONE_SPACING;
+    let symbol_width = SMALL_DIGIT_X + last_tone_x + 24;
+    *right = (*right).max((f64::from(x + symbol_width) + offset_x).ceil() as i32);
+    symbol_width
+}
+
 fn render_svg(score: &Score) -> String {
     let mut scene = Scene::new(0, 0, 0);
     let group_stem_directions = beamed_group_stem_directions(score);
@@ -1752,8 +2463,11 @@ fn render_svg(score: &Score) -> String {
     let mut pending_tie_paths: Vec<(Tone, i32, i32)> = Vec::new();
     let mut active_beams = [None; 5];
     let mut final_barline_x = 0;
+    let mut chord_symbol_index = 0;
     for (measure_index, measure) in score.measures.iter().enumerate() {
         let mut previous_event_geometry = None;
+        let mut harmony_index = 0;
+        let mut measure_harmony_right = None;
         if let Some(meter) = measure.meter {
             if active_meter != Some(meter) {
                 let numerator_id = if meter_index == 0 {
@@ -1817,6 +2531,32 @@ fn render_svg(score: &Score) -> String {
             } else {
                 event_geometry(event, x, &active_beams, &pending_tie_paths, stems_up)
             };
+            let mut harmony_advance = 0;
+            while measure
+                .harmonies
+                .get(harmony_index)
+                .is_some_and(|harmony| harmony.event_index == measure_event_index)
+            {
+                let symbol_x = x + harmony_advance;
+                harmony_advance += add_chord_symbol(
+                    &mut scene,
+                    &measure.harmonies[harmony_index].symbol,
+                    symbol_x,
+                    measure.harmonies[harmony_index].offset_x,
+                    chord_symbol_index,
+                    &mut right,
+                    &mut view_top,
+                );
+                measure_harmony_right = Some(
+                    measure_harmony_right.unwrap_or(i32::MIN).max(
+                        (f64::from(symbol_x + harmony_advance)
+                            + measure.harmonies[harmony_index].offset_x)
+                            .ceil() as i32,
+                    ),
+                );
+                harmony_index += 1;
+                chord_symbol_index += 1;
+            }
             for component in geometry.all() {
                 right = right.max(component.right.ceil() as i32);
             }
@@ -2137,7 +2877,30 @@ fn render_svg(score: &Score) -> String {
             x += (event.duration_units * 5).div_ceil(2) as i32;
             index += 1;
         }
+        let mut harmony_advance = 0;
+        while let Some(harmony) = measure.harmonies.get(harmony_index) {
+            let symbol_x = x + harmony_advance;
+            harmony_advance += add_chord_symbol(
+                &mut scene,
+                &harmony.symbol,
+                symbol_x,
+                harmony.offset_x,
+                chord_symbol_index,
+                &mut right,
+                &mut view_top,
+            );
+            measure_harmony_right = Some(
+                measure_harmony_right
+                    .unwrap_or(i32::MIN)
+                    .max((f64::from(symbol_x + harmony_advance) + harmony.offset_x).ceil() as i32),
+            );
+            harmony_index += 1;
+            chord_symbol_index += 1;
+        }
         let mut barline_x = x;
+        if let Some(harmony_right) = measure_harmony_right {
+            barline_x = barline_x.max(harmony_right + 5);
+        }
         if let Some(geometry) = &previous_event_geometry {
             let barline_span = ComponentBounds::filled(0.0, 27.5, 0.0, 108.5);
             for component in geometry.all() {

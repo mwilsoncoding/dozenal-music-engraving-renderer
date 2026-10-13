@@ -173,6 +173,305 @@ fn accepts_a_single_voice_with_a_nondefault_identifier() {
 }
 
 #[test]
+fn renders_root_position_and_bass_tone_chord_symbols() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("chord-symbols.musicxml");
+    fs::write(&input, include_str!("fixtures/chord-symbols.musicxml"))
+        .expect("write chord-symbol fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "chord-symbol score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("chord-symbols.svg")).expect("read SVG");
+    assert_eq!(
+        svg.matches("class=\"chord-symbol-root\"").count(),
+        2,
+        "{svg}"
+    );
+    assert_eq!(
+        svg.matches("class=\"chord-symbol-bass\"").count(),
+        1,
+        "{svg}"
+    );
+    assert_eq!(
+        svg.matches("class=\"chord-symbol-tone\"").count(),
+        5,
+        "{svg}"
+    );
+    assert!(
+        !svg.contains("data-chord-role=\"bass\" data-tone=\"0\""),
+        "root-position chord must not repeat its root as a bass tone: {svg}"
+    );
+    let path_x = |id: &str| {
+        svg.lines()
+            .find(|line| line.contains(&format!("id=\"{id}\"")))
+            .and_then(|line| line.split("translate(").nth(1))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<f64>().ok())
+            .expect("chord symbol x position")
+    };
+    assert!(
+        path_x("chord-symbol-1-root") >= path_x("chord-symbol-0-tone-2") + 22.0,
+        "measure boundary should leave clearance after the preceding chord symbol: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn warns_and_omits_valid_but_unsupported_harmony_kinds() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("unsupported-harmony.musicxml");
+    let fixture = include_str!("fixtures/chord-symbols.musicxml")
+        .replace("<kind>major-seventh</kind>", "<kind>minor-ninth</kind>");
+    fs::write(&input, fixture).expect("write unsupported-harmony score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "valid unsupported harmony should not fail: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("warning"), "expected a warning: {stderr}");
+    let svg = fs::read_to_string(directory.join("unsupported-harmony.svg")).expect("read SVG");
+    assert!(
+        !svg.contains("class=\"chord-symbol-root\""),
+        "unsupported chord symbols should be omitted: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn applies_harmony_add_alter_and_subtract_degrees() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("harmony-degrees.musicxml");
+    let degrees = "<degree><degree-value>9</degree-value><degree-alter>0</degree-alter><degree-type>add</degree-type></degree>\n        <degree><degree-value>5</degree-value><degree-alter>-1</degree-alter><degree-type>alter</degree-type></degree>\n        <degree><degree-value>3</degree-value><degree-alter>0</degree-alter><degree-type>subtract</degree-type></degree>";
+    let fixture = include_str!("fixtures/chord-symbols.musicxml")
+        .replace(
+            "</kind>\n      </harmony>",
+            &format!("</kind>\n        {degrees}\n      </harmony>"),
+        )
+        .replace(
+            "</bass>\n      </harmony>",
+            &format!("</bass>\n        {degrees}\n      </harmony>"),
+        );
+    fs::write(&input, fixture).expect("write degree-modified harmony score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "degree-modified harmony failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("harmony-degrees.svg")).expect("read SVG");
+    assert!(
+        svg.contains("class=\"chord-symbol-tone\" data-chord-role=\"tone\" data-tone=\"2\""),
+        "{svg}"
+    );
+    assert!(
+        svg.contains("class=\"chord-symbol-tone\" data-chord-role=\"tone\" data-tone=\"6\""),
+        "{svg}"
+    );
+    assert_eq!(
+        svg.matches("data-tone=\"11\"").count(),
+        2,
+        "root-position + bass deduplication: {svg}"
+    );
+    assert_eq!(
+        svg.matches("class=\"chord-symbol-tone\"").count(),
+        5,
+        "{svg}"
+    );
+    let first_symbol_tones = (0..3)
+        .map(|index| {
+            svg.lines()
+                .find(|line| line.contains(&format!("id=\"chord-symbol-0-tone-{index}\"")))
+                .and_then(|line| line.split("data-tone=\"").nth(1))
+                .and_then(|value| value.split('"').next())
+                .expect("tone pitch class")
+                .parse::<u8>()
+                .expect("numeric tone pitch class")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        first_symbol_tones,
+        [6, 11, 2],
+        "extensions follow interval order: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn maps_enharmonic_root_and_bass_to_the_same_tone() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("enharmonic-harmony.musicxml");
+    let fixture = include_str!("fixtures/chord-symbols.musicxml")
+        .replace(
+            "<root-step>C</root-step>",
+            "<root-step>D</root-step><root-alter>-1.0</root-alter>",
+        )
+        .replace("<kind>major-seventh</kind>", "<kind>major</kind>")
+        .replace(
+            "<bass-step>B</bass-step>",
+            "<bass-step>C</bass-step><bass-alter>1.0</bass-alter>",
+        );
+    fs::write(&input, fixture).expect("write enharmonic-harmony score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "enharmonic harmony failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("enharmonic-harmony.svg")).expect("read SVG");
+    assert_eq!(
+        svg.matches("class=\"chord-symbol-root\"").count(),
+        2,
+        "{svg}"
+    );
+    assert!(!svg.contains("class=\"chord-symbol-bass\""), "{svg}");
+    assert_eq!(svg.matches("data-tone=\"1\"").count(), 2, "{svg}");
+    assert_eq!(
+        svg.matches("class=\"chord-symbol-tone\"").count(),
+        4,
+        "{svg}"
+    );
+    assert!(
+        svg.contains("class=\"chord-symbol-tone\" data-chord-role=\"tone\" data-tone=\"5\""),
+        "{svg}"
+    );
+    assert!(
+        svg.contains("class=\"chord-symbol-tone\" data-chord-role=\"tone\" data-tone=\"8\""),
+        "{svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn positions_harmony_using_musicxml_offset() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("harmony-offset.musicxml");
+    let fixture = include_str!("fixtures/chord-symbols.musicxml")
+        .replace("</harmony>", "<offset>1</offset>\n      </harmony>");
+    fs::write(&input, fixture).expect("write harmony-offset score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "harmony offset failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("harmony-offset.svg")).expect("read SVG");
+    assert!(
+        svg.contains("id=\"chord-symbol-0-root\" class=\"chord-symbol-root\" data-chord-role=\"root\" data-tone=\"0\" transform=\"translate(132.00 -20) scale(2)\""),
+        "one division at divisions=1 should move the harmony 40 SVG units: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn honors_print_suppression_and_warns_for_implied_harmony() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("harmony-display-control.musicxml");
+    let fixture = include_str!("fixtures/chord-symbols.musicxml")
+        .replacen("<harmony>", "<harmony print-object=\"no\">", 1)
+        .replacen("<harmony>", "<harmony type=\"implied\">", 1);
+    fs::write(&input, fixture).expect("write display-control score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "valid harmony display controls failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("implied"),
+        "expected implied warning: {stderr}"
+    );
+    assert_eq!(stderr.matches("warning").count(), 1, "{stderr}");
+    let svg = fs::read_to_string(directory.join("harmony-display-control.svg")).expect("read SVG");
+    assert!(!svg.contains("class=\"chord-symbol-root\""), "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn separates_multiple_harmonies_at_the_same_score_position() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("multiple-harmonies.musicxml");
+    let fixture = include_str!("fixtures/chord-symbols.musicxml").replacen(
+        "</harmony>",
+        "</harmony>\n      <harmony><root><root-step>D</root-step></root><kind>minor</kind></harmony>",
+        1,
+    );
+    fs::write(&input, fixture).expect("write multiple-harmony score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "multiple harmonies failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("multiple-harmonies.svg")).expect("read SVG");
+    let root_x = |index| {
+        svg.lines()
+            .find(|line| line.contains(&format!("id=\"chord-symbol-{index}-root\"")))
+            .and_then(|line| line.split("translate(").nth(1))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<f64>().ok())
+            .expect("root x position")
+    };
+    assert_eq!(
+        svg.matches("class=\"chord-symbol-root\"").count(),
+        3,
+        "{svg}"
+    );
+    assert!(root_x(1) - root_x(0) >= 72.0, "symbols overlap: {svg}");
+    assert!(
+        svg.find("id=\"chord-symbol-0-root\"") < svg.find("id=\"chord-symbol-1-root\""),
+        "same-position symbols should preserve MusicXML order: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+#[test]
 fn rejects_an_empty_voice_identifier_without_writing_svg() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
@@ -199,6 +498,190 @@ fn rejects_an_empty_voice_identifier_without_writing_svg() {
     );
 
     fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn warns_for_valid_kind_display_options_and_rejects_malformed_values() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("kind-display.musicxml");
+    let fixture = include_str!("fixtures/chord-symbols.musicxml").replace(
+        "<kind>major-seventh</kind>",
+        "<kind text=\"M7\" use-symbols=\"no\">major-seventh</kind>",
+    );
+    fs::write(&input, fixture).expect("write kind-display score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "valid kind display attributes failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("display attributes"));
+    let svg = fs::read_to_string(directory.join("kind-display.svg")).expect("read SVG");
+    assert_eq!(
+        svg.matches("class=\"chord-symbol-root\"").count(),
+        2,
+        "{svg}"
+    );
+
+    let malformed = directory.join("malformed-kind-display.musicxml");
+    fs::write(
+        &malformed,
+        include_str!("fixtures/chord-symbols.musicxml").replace(
+            "<kind>major-seventh</kind>",
+            "<kind use-symbols=\"sometimes\">major-seventh</kind>",
+        ),
+    )
+    .expect("write malformed kind-display score");
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&malformed)
+        .output()
+        .expect("run CLI");
+    assert!(
+        !output.status.success(),
+        "invalid use-symbols value was accepted"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("use-symbols must be 'yes' or 'no'"),
+        "{stderr}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn warns_and_omits_numeral_harmony_forms() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("numeral-harmony.musicxml");
+    let fixture = include_str!("fixtures/chord-symbols.musicxml").replace(
+        "<root><root-step>C</root-step></root>",
+        "<numeral><numeral-root>5</numeral-root></numeral>",
+    );
+    fs::write(&input, fixture).expect("write numeral-harmony score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "valid numeral harmony should not fail: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("<numeral> harmony"));
+    let svg = fs::read_to_string(directory.join("numeral-harmony.svg")).expect("read SVG");
+    assert!(!svg.contains("class=\"chord-symbol-root\""), "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_fractional_harmony_alterations() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("fractional-harmony.musicxml");
+    let fixture = include_str!("fixtures/chord-symbols.musicxml").replace(
+        "<root-step>C</root-step>",
+        "<root-step>C</root-step><root-alter>0.5</root-alter>",
+    );
+    fs::write(&input, fixture).expect("write fractional-harmony score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        !output.status.success(),
+        "fractional pitch alteration was accepted"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("pitch alteration must be an integer"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn warns_and_omits_chords_with_absent_or_conflicting_degrees() {
+    for degree in [
+        "<degree><degree-value>9</degree-value><degree-alter>0</degree-alter><degree-type>alter</degree-type></degree>",
+        "<degree><degree-value>4</degree-value><degree-alter>0</degree-alter><degree-type>add</degree-type></degree><degree><degree-value>4</degree-value><degree-alter>1</degree-alter><degree-type>alter</degree-type></degree>",
+    ] {
+        let directory = scratch_dir();
+        fs::create_dir_all(&directory).expect("create test directory");
+        let input = directory.join("invalid-degree.musicxml");
+        let fixture = include_str!("fixtures/chord-symbols.musicxml")
+            .replace("</kind>", &format!("</kind>{degree}"));
+        fs::write(&input, fixture).expect("write invalid-degree score");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(
+            output.status.success(),
+            "unsupported degree should warn, not fail: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("warning"));
+        let svg = fs::read_to_string(directory.join("invalid-degree.svg")).expect("read SVG");
+        assert!(!svg.contains("class=\"chord-symbol-root\""), "{svg}");
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+}
+
+#[test]
+fn supports_the_agreed_musicxml_harmony_kinds() {
+    for kind in [
+        "major",
+        "minor",
+        "augmented",
+        "diminished",
+        "dominant",
+        "major-seventh",
+        "minor-seventh",
+        "half-diminished",
+        "diminished-seventh",
+        "suspended-second",
+        "suspended-fourth",
+    ] {
+        let directory = scratch_dir();
+        fs::create_dir_all(&directory).expect("create test directory");
+        let input = directory.join("supported-kind.musicxml");
+        let fixture =
+            include_str!("fixtures/chord-symbols.musicxml").replace("major-seventh", kind);
+        fs::write(&input, fixture).expect("write supported-kind score");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(
+            output.status.success(),
+            "supported kind {kind:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "supported kind {kind:?} should not warn: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let svg = fs::read_to_string(directory.join("supported-kind.svg")).expect("read SVG");
+        assert_eq!(
+            svg.matches("class=\"chord-symbol-root\"").count(),
+            2,
+            "{kind}: {svg}"
+        );
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
 }
 
 #[test]
