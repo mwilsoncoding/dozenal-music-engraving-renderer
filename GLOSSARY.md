@@ -95,11 +95,11 @@ _Avoid_: Notehead cluster, chord paren, chord enclosure
 ### Harmony
 
 **Chord Symbol**:
-A harmonic label positioned above the staff consisting of a large root tone digit and superscript quality or extension digits.
+A harmonic label positioned above the staff. A large root Tone digit is followed to its right by smaller digits for the other chord tones: quality and extension tones occupy the upper half of the root's height in ascending interval order, and a distinct bass Tone occupies the lower half. Each smaller digit is half the root digit's size; duplicate tones, including the root, appear only once.
 _Avoid_: Lead sheet symbol, Roman numeral, Nashville number
 
 **Slash Chord**:
-A chord symbol containing a subscript digit designating an explicit bass tone.
+A Chord Symbol with a smaller bass Tone digit below the root, indicating a bass Tone different from the root.
 _Avoid_: Inversion symbol, bass slash
 
 ### Input & Output
