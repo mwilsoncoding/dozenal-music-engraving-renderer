@@ -553,12 +553,47 @@ fn parse_chord_symbol(
         ));
     }
     if matches!(elements[children[0]].name.as_str(), "numeral" | "function") {
+        let form = &elements[children[0]];
+        if elements[children[1]].name != "kind" {
+            return Err(element_diagnostic(
+                &elements[children[1]],
+                "numeral/function harmony requires <kind> after its form".to_owned(),
+            ));
+        }
+        if form.name == "function" {
+            if let Some(child) = form.children.first() {
+                return Err(element_diagnostic(
+                    &elements[*child],
+                    "elements are not allowed inside MusicXML <function>".to_owned(),
+                ));
+            }
+            if form.text.trim().is_empty() {
+                return Err(element_diagnostic(
+                    form,
+                    "MusicXML <function> content must not be empty".to_owned(),
+                ));
+            }
+        } else {
+            let Some(numeral_root) = form.children.first() else {
+                return Err(element_diagnostic(
+                    form,
+                    "MusicXML <numeral> requires <numeral-root>".to_owned(),
+                ));
+            };
+            let numeral_root = &elements[*numeral_root];
+            if numeral_root.name != "numeral-root"
+                || !numeral_root.children.is_empty()
+                || numeral_root.text.trim().is_empty()
+            {
+                return Err(element_diagnostic(
+                    numeral_root,
+                    "MusicXML <numeral> requires a plain, nonempty <numeral-root>".to_owned(),
+                ));
+            }
+        }
         warnings.push(element_diagnostic(
-            &elements[children[0]],
-            format!(
-                "MusicXML <{}> harmony is not supported; omitted",
-                elements[children[0]].name
-            ),
+            form,
+            format!("MusicXML <{}> harmony is not supported; omitted", form.name),
         ));
         return Ok(None);
     }

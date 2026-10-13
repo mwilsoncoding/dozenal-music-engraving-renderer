@@ -609,6 +609,60 @@ fn warns_and_omits_function_harmony_forms() {
 }
 
 #[test]
+fn rejects_malformed_function_harmony_content() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("malformed-function-harmony.musicxml");
+    let fixture = include_str!("fixtures/chord-symbols.musicxml").replace(
+        "<root><root-step>C</root-step></root>",
+        "<function><unexpected/></function>",
+    );
+    fs::write(&input, fixture).expect("write malformed function-harmony score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        !output.status.success(),
+        "malformed function harmony was accepted"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("<function>"), "{stderr}");
+    assert!(stderr.contains("unexpected"), "{stderr}");
+    assert!(!directory.join("malformed-function-harmony.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_numeral_harmony_without_required_root() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("malformed-numeral-harmony.musicxml");
+    let fixture = include_str!("fixtures/chord-symbols.musicxml").replace(
+        "<root><root-step>C</root-step></root>",
+        "<numeral></numeral>",
+    );
+    fs::write(&input, fixture).expect("write malformed numeral-harmony score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        !output.status.success(),
+        "malformed numeral harmony was accepted"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("<numeral>"), "{stderr}");
+    assert!(stderr.contains("numeral-root"), "{stderr}");
+    assert!(!directory.join("malformed-numeral-harmony.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn warns_and_ignores_harmony_position_and_staff_hints() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
