@@ -1,0 +1,32 @@
+# Research: MusicXML 4.0 text and rehearsal directions
+
+**Scope:** MusicXML 4.0 structure and presentation data for `<words>` and `<rehearsal>` within `<direction-type>`. These findings describe the official reference and XSD, not renderer behavior or product scope.
+
+## Direction structure
+
+`<direction>` contains one or more `<direction-type>` elements, followed in schema order by optional `<offset>`, editorial `<footnote>`/`<level>`/`<voice>` content, optional `<staff>`, optional `<sound>`, and optional `<listening>`. The required one-or-more `direction-type` elements come first; for example, an `<offset>` before them is schema-invalid. A `<direction-type>` contains one or more direction-type choices, including `<rehearsal>` and `<words>`. Its text-direction choice allows repeated `<words>` elements; `<rehearsal>` is independently repeatable. The `direction-type` annotation says formatting attributes apply to each individual direction type, not to the overall `<direction>`. ([`direction`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/direction/), [`direction-type`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/direction-type/), [XSD](https://www.w3.org/2021/06/musicxml40/listings/musicxml.xsd/))
+
+## Text and rehearsal content
+
+Both `<words>` and `<rehearsal>` use the XSD `formatted-text-id` type: simple string content with `text-formatting` attributes and an optional unique `id`. They are text content, not containers for nested XML elements. The XSD defines `text-formatting` as `justify`, `print-style-align`, `text-decoration`, `text-rotation`, `letter-spacing`, `line-height`, `xml:lang`, `xml:space`, `text-direction`, and `enclosure`. In turn, `print-style-align` includes position, font, color, horizontal alignment, and vertical alignment. Position includes `default-x`, `default-y`, `relative-x`, and `relative-y`; font includes `font-family`, `font-style`, `font-size`, and `font-weight`; color is `color`. Thus these text elements can carry the formatting, position, color, font, enclosure, language, and line-height data through their type. ([`words`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/words/), [`rehearsal`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/rehearsal/), [XSD](https://www.w3.org/2021/06/musicxml40/listings/musicxml.xsd/))
+
+The reference/XSD documentation gives element-specific defaults: `<words>` has no enclosure if unspecified; `<rehearsal>` has a square enclosure if unspecified. Both document Italian (`it`) as the default language and left justification if unspecified. These are documented defaults, not required explicit attributes. The optional `id` is the unique-ID attribute group. ([`words`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/words/), [`rehearsal`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/rehearsal/), [XSD](https://www.w3.org/2021/06/musicxml40/listings/musicxml.xsd/))
+
+## Direction-level data and interaction
+
+- `placement` on `<direction>` is an above/below attribute. The reference defines direction placement at the direction level; it is distinct from text's `default-y`/`relative-y` positioning attributes on an individual `<words>` or `<rehearsal>`.
+- `<offset>` is a signed score-time displacement from the current musical position. It has `sound`, which controls whether the offset affects playback; an offset does not change the measure's rhythmic duration. It appears after all `<direction-type>` elements and before voice/staff in the direction sequence.
+- `<voice>` and `<staff>` are optional direction children, after `<offset>` in that order. They identify the voice and staff to which the direction applies; the staff value is a positive integer.
+- The direction annotation describes association with the first following note in score order that is not in a different voice, when an indication is associated with a specific note.
+- `print-object` is not part of the XSD attribute groups on `<direction>`, `<direction-type>`, `<words>`, or `<rehearsal>`. `print-object` exists as a reusable XSD attribute group, but these declarations do not reference it. The text elements' formatting attributes do not themselves provide a print-object switch.
+
+([`direction`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/direction/), [`offset`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/offset/), [`voice`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/voice/), [`staff`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/staff/), [XSD](https://www.w3.org/2021/06/musicxml40/listings/musicxml.xsd/))
+
+## Schema validity boundary
+
+The XSD requires at least one `<direction-type>` in a `<direction>` and at least one selected child in each `<direction-type>`. Its ordering and occurrence constraints make a direction with no direction-type, a misplaced later child (such as offset before direction-type), or a nested element inside simple-text `<words>`/`<rehearsal>` schema-invalid. The declared content types and attribute groups also constrain allowed attributes and values (including enumeration/type restrictions); syntactically well-formed XML that violates these constraints is not valid against the MusicXML 4.0 XSD. This states schema validity only, not broader document conformance or application behavior. ([XSD](https://www.w3.org/2021/06/musicxml40/listings/musicxml.xsd/))
+
+## Sources
+
+- [MusicXML 4.0 element reference: `direction`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/direction/), [`direction-type`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/direction-type/), [`words`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/words/), [`rehearsal`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/rehearsal/), [`offset`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/offset/), [`voice`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/voice/), and [`staff`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/staff/).
+- [Official MusicXML 4.0 XSD listing](https://www.w3.org/2021/06/musicxml40/listings/musicxml.xsd/).
