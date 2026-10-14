@@ -88,6 +88,10 @@ _Avoid_: Tail, stick
 One or more dots accompanying a tonehead indicating duration under mensural rhythmic rules (`.` for dotted quarter, `:` for half, `:.` for dotted half).
 _Avoid_: Augmentation dot, colon, rest marker
 
+**Metronome Mark**:
+A score mark showing a beat unit's rate or its equivalence to another beat unit.
+_Avoid_: Playback tempo
+
 **Multi-measure Rest**:
 A notated period of silence spanning a specified number of consecutive Measures within one Part.
 _Avoid_: Multi-bar rest, multiple-rest
