@@ -84,6 +84,10 @@ _Avoid_: Augmentation dot, colon, rest marker
 A notated period of silence spanning a specified number of consecutive Measures within one Part.
 _Avoid_: Multi-bar rest, multiple-rest
 
+**Measure Repeat**:
+A notation in which slash marks replace visible events in one or more Measures to indicate repetition of a preceding Measure pattern.
+_Avoid_: Measure-repeat glyph, bar repeat
+
 **Grace Note**:
 A non-duration-bearing ornamental note whose pitch is shown with a Tonehead, placed before or after a principal note.
 _Avoid_: Acciaccatura, appoggiatura
