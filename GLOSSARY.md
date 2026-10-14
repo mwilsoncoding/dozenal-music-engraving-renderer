@@ -112,6 +112,10 @@ _Avoid_: Triplet, time-modification
 A curved delimiter enclosing simultaneous toneheads within an octave or beat.
 _Avoid_: Notehead cluster, chord paren, chord enclosure
 
+**Ornament Mark**:
+A note-attached sign indicating a conventional pitch embellishment such as a trill, turn, or mordent.
+_Avoid_: Articulation Mark
+
 **Articulation Mark**:
 A note-attached sign indicating the manner of attack or duration for a sounded event.
 _Avoid_: Performance instruction, ornament
