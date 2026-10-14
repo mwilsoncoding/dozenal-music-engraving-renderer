@@ -136,6 +136,14 @@ _Avoid_: Performance instruction, ornament
 A score mark indicating a pause or lengthening at a note, rest, or barline.
 _Avoid_: Playback duration
 
+**Glissando**:
+A score span connecting two note events to indicate movement between pitches, conventionally shown with a wavy line.
+_Avoid_: Slide, playback control
+
+**Slide**:
+A score span connecting two note events to indicate continuous movement between pitches, conventionally shown with a solid line.
+_Avoid_: Glissando, playback control
+
 **Dynamic Mark**:
 A score symbol indicating the relative loudness or intensity of a musical passage or event.
 _Avoid_: Articulation Mark, playback velocity
