@@ -62,6 +62,14 @@ _Avoid_: Dozenal Staff
 An independent sequence of musical events within a part; an event may contain one tone or simultaneous tones.
 _Avoid_: Part, chord
 
+**Repeat Barline**:
+A barline marking the beginning or end of a section to be repeated.
+_Avoid_: Repeat sign, repeat bar
+
+**Ending**:
+A labeled passage associated with one or more passes through a repeated section.
+_Avoid_: Volta, alternate ending
+
 ### Rhythm & Glyphs
 
 **Tonehead**:
