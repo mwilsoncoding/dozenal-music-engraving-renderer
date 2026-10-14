@@ -20,6 +20,19 @@ The OFL is not a permissive MIT/Apache/BSD-style license: it has a font-specific
 
 For an alternative with permissive licensing, the existing [font asset survey](font-assets.md) verifies Bravura and Noto Sans Symbols 2 only under OFL, and GNU Unifont under OFL or GPL-2-or-later with an embedding exception. The [glyph-reference survey](font-glyph-references.md) verifies DejaVu Sans 2.37’s decimal digits but not U+218A/U+218B, and its bundled Bitstream Vera/Arev terms are not MIT, Apache, or BSD. **No font was verified from authoritative release binaries and license texts as both permissively licensed (MIT/Apache/BSD) and covering the complete agreed repertoire.** This is a research gap, not a claim that no such font exists. A candidate must be checked in its exact release binary, including every required codepoint, before selection.
 
+### Text-font candidate scan
+
+A further exact-binary scan checked Basic Latin U+0020–007E, Latin-1 Supplement U+00A0–00FF, Latin Extended-A U+0100–017F, and U+218A/U+218B. Coverage was checked from each binary's cmap with Fontconfig; it is not a claim about visual quality.
+
+| Candidate | License | Coverage | Notes |
+| --- | --- | --- | --- |
+| Noto Sans 2.015 variable TTF | OFL 1.1 | 319/321; lacks U+218A and U+218B | Strong primary text-font candidate; include OFL notice. [Pinned binary and license](https://github.com/google/fonts/tree/2984c575fdce412ee02b2baaba67672b9a9434d8/ofl/notosans). |
+| Source Sans 3 variable TTF | OFL 1.1 | 319/321; lacks U+218A and U+218B | Alternative humanist sans; same OFL notice requirement. [Pinned snapshot](https://github.com/google/fonts/tree/4591e3457ab8be6d70167aa6818922b91e78ab2d/ofl/sourcesans3). |
+| DejaVu Sans 2.37 regular TTF | Bitstream Vera-derived license | 319/321; lacks U+218A and U+218B | Redistribution requires notices and modified fonts must be renamed. [Release archive](https://github.com/dejavu-fonts/dejavu-fonts/releases/tag/version_2_37). |
+| GNU Unifont 18.0.01 OTF | OFL 1.1 or GPL-2-or-later with font-embedding exception | 321/321 | Only single-font full-coverage candidate in this scan, but its pixel-grid-derived appearance may not suit polished score text. [Release files](https://ftp.gnu.org/gnu/unifont/unifont-18.0.01/). |
+
+Noto Sans with a separately licensed/drawn source for U+218A and U+218B avoids Unifont's style mismatch, but requires a glyph-design/source decision. Using Unifont only for those two characters is another possible fallback, subject to visual comparison. These candidates are OFL or notice-bearing licenses, not MIT/Apache/BSD. Extracted reusable outline packaging remains subject to the earlier legal caveat.
+
 ## SVG behavior in reference engravers
 
 The source snapshots below are version-pinned: MuseScore Studio 4.5.2 commit [`ac9d3bcd`](https://github.com/musescore/MuseScore/commit/ac9d3bcd3df7a19d16d7ef505db9e2b54235c022), and LilyPond 2.25.2 commit [`e01b9d8`](https://github.com/lilypond/lilypond/commit/e01b9d8b7d4fc0d8a3ca033c74d2bbbeeeb85cfd). These findings describe those snapshots, not every release or configuration.
