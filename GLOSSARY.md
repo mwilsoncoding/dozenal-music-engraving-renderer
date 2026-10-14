@@ -132,6 +132,10 @@ _Avoid_: Articulation Mark
 A note-attached sign indicating the manner of attack or duration for a sounded event.
 _Avoid_: Performance instruction, ornament
 
+**Fermata**:
+A score mark indicating a pause or lengthening at a note, rest, or barline.
+_Avoid_: Playback duration
+
 **Dynamic Mark**:
 A score symbol indicating the relative loudness or intensity of a musical passage or event.
 _Avoid_: Articulation Mark, playback velocity
