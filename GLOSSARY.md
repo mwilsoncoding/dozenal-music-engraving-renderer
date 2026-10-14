@@ -116,6 +116,10 @@ _Avoid_: Notehead cluster, chord paren, chord enclosure
 A note-attached sign indicating the manner of attack or duration for a sounded event.
 _Avoid_: Performance instruction, ornament
 
+**Slur**:
+A curved line connecting sounded events to indicate phrasing.
+_Avoid_: Tie, tie mark
+
 ### Harmony
 
 **Chord Symbol**:
