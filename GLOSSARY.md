@@ -120,6 +120,10 @@ _Avoid_: Acciaccatura, appoggiatura
 A rhythmic grouping where a specified number of events fits the time normally occupied by a different number of notated values.
 _Avoid_: Triplet, time-modification
 
+**Tremolo**:
+A score marking indicating rapid repetition of one note, alternation between two notes, or an unmeasured roll.
+_Avoid_: Repeater beam, playback effect
+
 **Chord Bracket**:
 A curved delimiter enclosing simultaneous toneheads within an octave or beat.
 _Avoid_: Notehead cluster, chord paren, chord enclosure
