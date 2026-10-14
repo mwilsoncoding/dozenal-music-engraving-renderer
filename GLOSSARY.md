@@ -70,6 +70,14 @@ _Avoid_: Repeat sign, repeat bar
 A labeled passage associated with one or more passes through a repeated section.
 _Avoid_: Volta, alternate ending
 
+**Segno Mark**:
+A conventional score symbol identifying a point to which a passage may return.
+_Avoid_: Repeat Barline, playback jump
+
+**Coda Mark**:
+A conventional score symbol identifying a passage to be entered after a jump.
+_Avoid_: Ending, repeat sign
+
 ### Rhythm & Glyphs
 
 **Tonehead**:
