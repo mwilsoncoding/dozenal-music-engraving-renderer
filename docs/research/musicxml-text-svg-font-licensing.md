@@ -1,0 +1,56 @@
+# Research: Font licensing and SVG text portability
+
+**Scope:** Research for the open choices in [issue #145](https://github.com/mwilsoncoding/dozenal-music-engraving-renderer/issues/145), which gates `<words>`/`<rehearsal>` support. This note does not select a license interpretation, font, or support policy. The agreed repertoire recorded in the [parent issue](https://github.com/mwilsoncoding/dozenal-music-engraving-renderer/issues/91) is Basic Latin, Latin-1 Supplement, Latin Extended-A, U+218A, and U+218B. Output is intended to be self-contained SVG paths, without runtime fonts or SVG text.
+
+## Licensing findings
+
+Bravura 1.482 is released under SIL Open Font License 1.1 with the Reserved Font Name “Bravura.” Its license expressly permits font software and derivatives to be bundled, embedded, redistributed, or sold with software, provided the font software stays under OFL and derivatives do not use reserved names. The OFL copyright notice and license must accompany copies of the font software. The license says its font-software licensing requirement does not apply to documents created using the font. ([Bravura 1.482 OFL](https://github.com/steinbergmedia/bravura/blob/bravura-1.482/redist/OFL.txt); [OFL 1.1 text](https://openfontlicense.org/open-font-license-official-text/))
+
+| Distribution/use | What the published terms establish | Remaining caveat |
+| --- | --- | --- |
+| Bundle original Bravura font files | Allowed with software; preserve license/copyright notice and reserved-name conditions. | None specific to ordinary bundling identified in the license. |
+| Modify, subset, or convert the font and distribute that font | A modified version is still Font Software; it must remain under OFL, include required notices, and not use a Reserved Font Name. The definition of Modified Version includes removing/substituting components and changing formats. | Whether a particular transformation creates a Modified Version can depend on what was changed, but subsetting and font-format conversion are font-file operations. |
+| Embed font in a document | Explicitly permitted. OFL FAQ says font embedding in documents does not make the document subject to OFL; the FAQ distinguishes embedding font software from converting text to outlines. | Embedding a font file still requires meeting the license terms for the embedded copy. |
+| Render glyphs to SVG paths in an output score | The license’s document carve-out supports ordinary score output made using Bravura. | OFL 1.1 and its FAQ do not expressly decide whether a reusable library of extracted glyph outlines is a “document,” a font component/derivative, or another work. A generated score and a separately shipped generic glyph-path asset are not safely assumed to be the same case. Counsel should review the intended packaging. |
+| Distribute the application | OFL does not require the application that uses a font to be licensed under OFL; the font-software terms apply to the font software. The application can have its own license. | This does not settle whether copied and redistributed outlines themselves are font-derived software. |
+
+These are readings of the text, not legal advice. Bravura’s reserved name applies to modified font software; it does not by itself answer naming or attribution questions for independently packaged paths.
+
+The OFL is not a permissive MIT/Apache/BSD-style license: it has a font-specific share-alike condition for modified Font Software. It does not impose an “equivalent license” requirement on applications or documents, but it does require notices when Font Software is redistributed. The user’s preference for fewer attribution obligations therefore is not fully met by Bravura, even though its musical shapes are preferred.
+
+For an alternative with permissive licensing, the existing [font asset survey](font-assets.md) verifies Bravura and Noto Sans Symbols 2 only under OFL, and GNU Unifont under OFL or GPL-2-or-later with an embedding exception. The [glyph-reference survey](font-glyph-references.md) verifies DejaVu Sans 2.37’s decimal digits but not U+218A/U+218B, and its bundled Bitstream Vera/Arev terms are not MIT, Apache, or BSD. **No font was verified from authoritative release binaries and license texts as both permissively licensed (MIT/Apache/BSD) and covering the complete agreed repertoire.** This is a research gap, not a claim that no such font exists. A candidate must be checked in its exact release binary, including every required codepoint, before selection.
+
+## SVG behavior in reference engravers
+
+The source snapshots below are version-pinned: MuseScore Studio 4.5.2 commit [`ac9d3bcd`](https://github.com/musescore/MuseScore/commit/ac9d3bcd3df7a19d16d7ef505db9e2b54235c022), and LilyPond 2.25.2 commit [`e01b9d8`](https://github.com/lilypond/lilypond/commit/e01b9d8b7d4fc0d8a3ca033c74d2bbbeeeb85cfd). These findings describe those snapshots, not every release or configuration.
+
+### MuseScore Studio 4.5.2
+
+MuseScore ships music and text fonts and permits notation-style font choices. Its pinned font README identifies Leland as the main music-symbol font as of MuseScore 3.6, Bravura as an included external font, and Edwin as its maintained text family; shipped font assets include Leland, Bravura, and Edwin. ([versioned `fonts/README.md`](https://github.com/musescore/MuseScore/blob/ac9d3bcd3df7a19d16d7ef505db9e2b54235c022/fonts/README.md); [font assets](https://github.com/musescore/MuseScore/tree/ac9d3bcd3df7a19d16d7ef505db9e2b54235c022/fonts))
+
+The SVG export path uses MuseScore’s custom `SvgGenerator`/`SvgPaintEngine`. Its `drawPath` implementation writes SVG `<path>` geometry from a `QPainterPath`, and `SvgWriter` renders score items through that generator. However, the inspected generator comments that a `drawTextItem()` override is not used and does not by itself establish how all ordinary text reaches the engine. Therefore the source confirms path serialization for painter paths, but this inspection does **not** conclusively establish that every `<words>`/`<rehearsal>` string is emitted as paths rather than `<text>`, nor whether an exported SVG embeds fonts. A generated SVG fixture or direct export is needed to close that implementation-specific point. ([`SvgWriter`](https://github.com/musescore/MuseScore/blob/ac9d3bcd3df7a19d16d7ef505db9e2b54235c022/src/importexport/imagesexport/internal/svgwriter.cpp); [`SvgGenerator`](https://github.com/musescore/MuseScore/blob/ac9d3bcd3df7a19d16d7ef505db9e2b54235c022/src/importexport/imagesexport/internal/svggenerator.cpp), especially `drawPath` and the `drawTextItem` comment)
+
+Practical selection tradeoff: MuseScore has selectable music-font families and separate score-text families, but its SVG exporter’s exact text portability behavior should be empirically checked rather than assumed from the path-writing code.
+
+### LilyPond 2.25.2
+
+LilyPond separates the music font from text families. The versioned manual documents Emmentaler as the default music font, and `set-global-fonts` allows the music font and roman/sans/typewriter text families to be configured. Text family resolution uses FontConfig and fallback families; this is flexible for shaping and language coverage, but can select fonts available on the rendering host. ([official 2.25 manual: font families](https://lilypond.org/doc/v2.25/Documentation/notation/fonts-for-text.html); [official manual source at pinned commit](https://github.com/lilypond/lilypond/blob/e01b9d8b7d4fc0d8a3ca033c74d2bbbeeeb85cfd/Documentation/en/notation/text.itely))
+
+The pinned SVG backend has explicit branches: its default font-smob route extracts glyph `d` data from SVG font files and writes `<path>` elements; the separate WOFF route emits `<text>` with `font-family` and `font-size`. The backend has an `svg-woff` option that selects the WOFF/text path. Thus path output avoids viewer font lookup for converted glyphs, while the WOFF/text route retains font-family and font-resource dependencies and the semantic/selectable text representation. The source does not establish that the WOFF font is embedded in the SVG itself. ([pinned `output-svg.scm`](https://github.com/lilypond/lilypond/blob/e01b9d8b7d4fc0d8a3ca033c74d2bbbeeeb85cfd/scm/output-svg.scm), see `font-smob-to-path`, `woff-font-smob-to-text`, `woff-glyph-string`, and `svg-woff` selection; [official SVG output documentation](https://lilypond.org/doc/v2.25/Documentation/usage/command_002dline-options-for-lilypond))
+
+Practical selection tradeoff: LilyPond demonstrates both goals as distinct output choices. Path conversion favors visual portability; text/WOFF favors text semantics and font-based rendering, with additional font-resource and fallback considerations. Its configurable family/FontConfig model is richer than a renderer that commits to a fixed path repertoire.
+
+## Open questions and source limits
+
+- No permissively licensed (MIT/Apache/BSD) font was verified for all five repertoire blocks/codepoints. Existing OFL and DejaVu surveys are useful near-matches but do not satisfy the combined requirement.
+- OFL plainly covers redistribution/modification of font files and document output, but does not plainly classify reusable extracted glyph-path assets. Get legal review of the intended form of distribution before treating Bravura outlines as a generally reusable app asset.
+- The pinned MuseScore source demonstrates SVG path writing but did not conclusively expose the ordinary text callback; its exact output for score text remains to be checked from a produced SVG. LilyPond’s alternate WOFF branch clearly emits `<text>`, but the cited source does not show the font embedded in that SVG.
+- No issue was commented on, resolved, or closed. No font or implementation policy is selected here.
+
+## Primary sources
+
+- SIL [OFL 1.1 official text](https://openfontlicense.org/open-font-license-official-text/) and [OFL FAQ](https://openfontlicense.org/ofl-faq/).
+- Steinberg [Bravura 1.482 source](https://github.com/steinbergmedia/bravura/tree/bravura-1.482), [release font](https://github.com/steinbergmedia/bravura/blob/bravura-1.482/redist/otf/Bravura.otf), and [release OFL](https://github.com/steinbergmedia/bravura/blob/bravura-1.482/redist/OFL.txt).
+- MuseScore Studio [4.5.2 source](https://github.com/musescore/MuseScore/tree/ac9d3bcd3df7a19d16d7ef505db9e2b54235c022), particularly [`svgwriter.cpp`](https://github.com/musescore/MuseScore/blob/ac9d3bcd3df7a19d16d7ef505db9e2b54235c022/src/importexport/imagesexport/internal/svgwriter.cpp), [`svggenerator.cpp`](https://github.com/musescore/MuseScore/blob/ac9d3bcd3df7a19d16d7ef505db9e2b54235c022/src/importexport/imagesexport/internal/svggenerator.cpp), and [`fonts/README.md`](https://github.com/musescore/MuseScore/blob/ac9d3bcd3df7a19d16d7ef505db9e2b54235c022/fonts/README.md).
+- LilyPond [2.25.2 source](https://github.com/lilypond/lilypond/tree/e01b9d8b7d4fc0d8a3ca033c74d2bbbeeeb85cfd), particularly [`scm/output-svg.scm`](https://github.com/lilypond/lilypond/blob/e01b9d8b7d4fc0d8a3ca033c74d2bbbeeeb85cfd/scm/output-svg.scm) and the [2.25 text-font manual](https://lilypond.org/doc/v2.25/Documentation/notation/fonts-for-text.html).
+- Existing repo surveys: [Redistributable font assets](font-assets.md) and [glyph-font references](font-glyph-references.md).
