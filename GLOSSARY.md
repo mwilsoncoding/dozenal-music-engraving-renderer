@@ -140,6 +140,14 @@ _Avoid_: Articulation Mark, playback velocity
 A pair of lines that opens or closes across a score span to indicate a gradual increase or decrease in intensity.
 _Avoid_: Hairpin, playback automation
 
+**Bracket Span**:
+A bracket-style line marking the extent of a score direction across a passage.
+_Avoid_: Brace
+
+**Dash Span**:
+A dashed line marking the extent of a score direction across a passage.
+_Avoid_: Pedal mark, Dynamic Wedge
+
 **Slur**:
 A curved line connecting sounded events to indicate phrasing.
 _Avoid_: Tie, tie mark
