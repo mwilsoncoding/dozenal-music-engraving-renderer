@@ -136,6 +136,10 @@ _Avoid_: Performance instruction, ornament
 A score symbol indicating the relative loudness or intensity of a musical passage or event.
 _Avoid_: Articulation Mark, playback velocity
 
+**Dynamic Wedge**:
+A pair of lines that opens or closes across a score span to indicate a gradual increase or decrease in intensity.
+_Avoid_: Hairpin, playback automation
+
 **Slur**:
 A curved line connecting sounded events to indicate phrasing.
 _Avoid_: Tie, tie mark
