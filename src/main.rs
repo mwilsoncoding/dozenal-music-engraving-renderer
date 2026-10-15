@@ -298,7 +298,8 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
                                 .to_owned(),
                         )
                     })?;
-                    let parsed = parse_note(&elements, *child, divisions, transposition)?;
+                    let parsed =
+                        parse_note(&elements, *child, divisions, transposition, &mut warnings)?;
                     if let Some(chord_marker) = parsed.chord_marker {
                         let Some(target) = chord_target else {
                             return Err(element_diagnostic(
@@ -1136,6 +1137,7 @@ fn parse_note(
     note: usize,
     divisions: u32,
     transposition: i32,
+    warnings: &mut Vec<String>,
 ) -> Result<ParsedNote, String> {
     let note_element = &elements[note];
     require_no_attributes(note_element)?;
@@ -1244,6 +1246,27 @@ fn parse_note(
     } else {
         None
     };
+    let accidental = children
+        .get(position)
+        .filter(|child| elements[**child].name == "accidental")
+        .copied();
+    if accidental.is_some() {
+        position += 1;
+    }
+    let stem = children
+        .get(position)
+        .filter(|child| elements[**child].name == "stem")
+        .copied();
+    if stem.is_some() {
+        position += 1;
+    }
+    let notehead = children
+        .get(position)
+        .filter(|child| elements[**child].name == "notehead")
+        .copied();
+    if notehead.is_some() {
+        position += 1;
+    }
     let mut beams = Vec::new();
     while children
         .get(position)
@@ -1332,6 +1355,33 @@ fn parse_note(
             ));
         }
     };
+    if let Some(accidental) = accidental {
+        if is_rest {
+            return Err(element_diagnostic(
+                &elements[accidental],
+                "accidental display marks require a pitched event".to_owned(),
+            ));
+        }
+        let pitch_alteration = elements[event_element]
+            .children
+            .iter()
+            .find(|child| elements[**child].name == "alter")
+            .map(|alter| elements[*alter].text.trim().parse::<i32>().unwrap_or(0))
+            .unwrap_or(0);
+        validate_accidental_display(elements, accidental, pitch_alteration, warnings)?;
+    }
+    if let Some(stem) = stem {
+        validate_explicit_stem(elements, stem, warnings)?;
+    }
+    if let Some(notehead) = notehead {
+        if is_rest {
+            return Err(element_diagnostic(
+                &elements[notehead],
+                "pitched notehead styles are not supported on rests".to_owned(),
+            ));
+        }
+        validate_pitched_notehead(elements, notehead, duration_name, warnings)?;
+    }
     let dots = usize::from(dot.is_some());
     if dots > 0 && !matches!(duration_name, "quarter" | "half") {
         return Err(element_diagnostic(
@@ -1422,6 +1472,368 @@ fn parse_note(
         },
         chord_marker,
     })
+}
+
+fn validate_explicit_stem(
+    elements: &[Element],
+    stem: usize,
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    let element = &elements[stem];
+    require_no_attributes(element)?;
+    let value = leaf_text(element)?;
+    match value {
+        "up" | "down" => warnings.push(element_diagnostic(
+            element,
+            "explicit stem direction is not supported; inferred direction is used".to_owned(),
+        )),
+        "double" | "none" => {
+            return Err(element_diagnostic(
+                element,
+                format!("stem direction {value:?} is not supported"),
+            ));
+        }
+        _ => {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid stem direction {value:?}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_pitched_notehead(
+    elements: &[Element],
+    notehead: usize,
+    duration_name: &str,
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    const NOTEHEAD_VALUES: &[&str] = &[
+        "slash",
+        "triangle",
+        "diamond",
+        "square",
+        "cross",
+        "x",
+        "circle-x",
+        "inverted triangle",
+        "arrow down",
+        "arrow up",
+        "circled",
+        "slashed",
+        "back slashed",
+        "normal",
+        "cluster",
+        "circle dot",
+        "left triangle",
+        "rectangle",
+        "none",
+        "do",
+        "re",
+        "mi",
+        "fa",
+        "fa up",
+        "so",
+        "la",
+        "ti",
+        "other",
+    ];
+    let element = &elements[notehead];
+    validate_attributes(
+        element,
+        &[
+            "filled",
+            "parentheses",
+            "font-family",
+            "font-style",
+            "font-size",
+            "font-weight",
+            "color",
+            "smufl",
+        ],
+    )?;
+    if !element.children.is_empty() {
+        return Err(element_diagnostic(
+            element,
+            "notehead must contain plain text".to_owned(),
+        ));
+    }
+    let value = element.text.trim();
+    if value.is_empty() || !NOTEHEAD_VALUES.contains(&value) {
+        return Err(element_diagnostic(
+            element,
+            format!("invalid notehead value {value:?}"),
+        ));
+    }
+
+    let mut has_unsupported_presentation = value != "normal";
+    let default_filled = !matches!(duration_name, "whole" | "half");
+    for (attribute, default) in [
+        ("filled", if default_filled { "yes" } else { "no" }),
+        ("parentheses", "no"),
+    ] {
+        if let Some(value) = optional_attribute(element, attribute) {
+            if !matches!(value, "yes" | "no") {
+                return Err(element_diagnostic(
+                    element,
+                    format!("{attribute} must be 'yes' or 'no', not {value:?}"),
+                ));
+            }
+            has_unsupported_presentation |= value != default;
+        }
+    }
+    for (attribute, allowed, default) in [
+        ("font-style", &["normal", "italic"][..], "normal"),
+        ("font-weight", &["normal", "bold"][..], "normal"),
+    ] {
+        if let Some(value) = optional_attribute(element, attribute) {
+            if !allowed.contains(&value) {
+                return Err(element_diagnostic(
+                    element,
+                    format!("invalid notehead {attribute} value {value:?}"),
+                ));
+            }
+            has_unsupported_presentation |= value != default;
+        }
+    }
+    if let Some(font_size) = optional_attribute(element, "font-size") {
+        if !valid_musicxml_font_size(font_size) {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid notehead font-size {font_size:?}"),
+            ));
+        }
+        has_unsupported_presentation |= font_size != "medium";
+    }
+    if optional_attribute(element, "font-family").is_some_and(|family| !family.is_empty()) {
+        has_unsupported_presentation = true;
+    }
+    if let Some(color) = optional_attribute(element, "color") {
+        if !valid_musicxml_color(color) {
+            return Err(element_diagnostic(
+                element,
+                "notehead color must be a six-digit hexadecimal color".to_owned(),
+            ));
+        }
+        has_unsupported_presentation |= !color.eq_ignore_ascii_case("#000000");
+    }
+    if let Some(smufl) = optional_attribute(element, "smufl") {
+        if !valid_smufl_glyph_name(smufl) {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid notehead SMuFL glyph name {smufl:?}"),
+            ));
+        }
+        has_unsupported_presentation = true;
+    }
+    if has_unsupported_presentation {
+        warnings.push(element_diagnostic(
+            element,
+            "notehead presentation is not supported; numeric Tonehead is retained".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_accidental_display(
+    elements: &[Element],
+    accidental: usize,
+    pitch_alteration: i32,
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    const ACCIDENTAL_VALUES: &[&str] = &[
+        "sharp",
+        "natural",
+        "flat",
+        "double-sharp",
+        "sharp-sharp",
+        "flat-flat",
+        "natural-sharp",
+        "natural-flat",
+        "quarter-flat",
+        "quarter-sharp",
+        "three-quarters-flat",
+        "three-quarters-sharp",
+        "sharp-down",
+        "sharp-up",
+        "natural-down",
+        "natural-up",
+        "flat-down",
+        "flat-up",
+        "double-sharp-down",
+        "double-sharp-up",
+        "flat-flat-down",
+        "flat-flat-up",
+        "arrow-down",
+        "arrow-up",
+        "triple-sharp",
+        "triple-flat",
+        "slash-quarter-sharp",
+        "slash-sharp",
+        "slash-flat",
+        "double-slash-flat",
+        "sharp-1",
+        "sharp-2",
+        "sharp-3",
+        "sharp-5",
+        "flat-1",
+        "flat-2",
+        "flat-3",
+        "flat-4",
+        "sori",
+        "koron",
+        "other",
+    ];
+    let element = &elements[accidental];
+    validate_attributes(
+        element,
+        &[
+            "cautionary",
+            "editorial",
+            "parentheses",
+            "bracket",
+            "size",
+            "default-x",
+            "default-y",
+            "relative-x",
+            "relative-y",
+            "font-family",
+            "font-style",
+            "font-size",
+            "font-weight",
+            "color",
+            "smufl",
+        ],
+    )?;
+    if !element.children.is_empty() {
+        return Err(element_diagnostic(
+            element,
+            "accidental must contain plain text".to_owned(),
+        ));
+    }
+    let value = element.text.trim();
+    if !ACCIDENTAL_VALUES.contains(&value) {
+        return Err(element_diagnostic(
+            element,
+            format!("invalid accidental value {value:?}"),
+        ));
+    }
+    for attribute in ["cautionary", "editorial", "parentheses", "bracket"] {
+        if let Some(value) = optional_attribute(element, attribute) {
+            if !matches!(value, "yes" | "no") {
+                return Err(element_diagnostic(
+                    element,
+                    format!("{attribute} must be 'yes' or 'no', not {value:?}"),
+                ));
+            }
+        }
+    }
+    if let Some(size) = optional_attribute(element, "size") {
+        if !matches!(size, "full" | "cue" | "grace-cue" | "large") {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid accidental size {size:?}"),
+            ));
+        }
+    }
+    for attribute in ["default-x", "default-y", "relative-x", "relative-y"] {
+        if let Some(value) = optional_attribute(element, attribute) {
+            if !value.parse::<f64>().is_ok_and(f64::is_finite) {
+                return Err(element_diagnostic(
+                    element,
+                    format!("accidental {attribute} must be a finite number"),
+                ));
+            }
+        }
+    }
+    for (attribute, allowed) in [
+        ("font-style", &["normal", "italic"][..]),
+        ("font-weight", &["normal", "bold"][..]),
+    ] {
+        if let Some(value) = optional_attribute(element, attribute) {
+            if !allowed.contains(&value) {
+                return Err(element_diagnostic(
+                    element,
+                    format!("invalid accidental {attribute} value {value:?}"),
+                ));
+            }
+        }
+    }
+    if optional_attribute(element, "font-size").is_some_and(|size| !valid_musicxml_font_size(size))
+    {
+        return Err(element_diagnostic(
+            element,
+            "invalid accidental font-size".to_owned(),
+        ));
+    }
+    if optional_attribute(element, "color").is_some_and(|color| !valid_musicxml_color(color)) {
+        return Err(element_diagnostic(
+            element,
+            "accidental color must be a six-digit hexadecimal color".to_owned(),
+        ));
+    }
+    if optional_attribute(element, "smufl")
+        .is_some_and(|glyph_name| !valid_smufl_accidental_glyph_name(glyph_name))
+    {
+        return Err(element_diagnostic(
+            element,
+            "invalid accidental SMuFL glyph name".to_owned(),
+        ));
+    }
+    let disagreement =
+        accidental_semitones(value).is_some_and(|alteration| alteration != pitch_alteration);
+    let warning = if disagreement {
+        "accidental display mark disagrees with the encoded pitch; pitch alteration remains authoritative"
+    } else {
+        "accidental display mark is not supported; omitted"
+    };
+    warnings.push(element_diagnostic(element, warning.to_owned()));
+    Ok(())
+}
+
+fn accidental_semitones(value: &str) -> Option<i32> {
+    match value {
+        "sharp" | "natural-sharp" => Some(1),
+        "natural" => Some(0),
+        "flat" | "natural-flat" => Some(-1),
+        "double-sharp" | "sharp-sharp" => Some(2),
+        "flat-flat" => Some(-2),
+        "triple-sharp" => Some(3),
+        "triple-flat" => Some(-3),
+        _ => None,
+    }
+}
+
+fn valid_musicxml_font_size(value: &str) -> bool {
+    matches!(
+        value,
+        "xx-small" | "x-small" | "small" | "medium" | "large" | "x-large" | "xx-large"
+    ) || (!value.contains(['e', 'E']) && value.parse::<f64>().is_ok_and(f64::is_finite))
+}
+
+fn valid_smufl_glyph_name(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(is_smufl_name_character)
+}
+
+fn valid_smufl_accidental_glyph_name(value: &str) -> bool {
+    [
+        "acc",
+        "medRenFla",
+        "medRenNatura",
+        "medRenShar",
+        "kievanAccidental",
+    ]
+    .iter()
+    .any(|prefix| {
+        value
+            .strip_prefix(prefix)
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(is_smufl_name_character))
+    })
+}
+
+fn is_smufl_name_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | ':')
 }
 
 fn same_beams(left: &[BeamMark], right: &[BeamMark]) -> bool {

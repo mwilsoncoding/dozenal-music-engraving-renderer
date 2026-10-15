@@ -2663,6 +2663,209 @@ fn rejects_unhandled_note_attributes_without_creating_svg() {
 }
 
 #[test]
+fn warns_and_ignores_valid_note_appearance_hints() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("note-appearance-hints.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<duration>1</duration><voice>1</voice><type>quarter</type>",
+        "<duration>1</duration><voice>1</voice><type>quarter</type><accidental cautionary=\"yes\" editorial=\"yes\" parentheses=\"yes\" bracket=\"yes\" size=\"cue\" default-x=\"1.5\" color=\"#123456\">sharp</accidental><stem>up</stem><notehead>diamond</notehead>",
+    );
+    fs::write(&input, fixture).expect("write score with note appearance hints");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "valid note appearance hints failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let warnings = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        warnings.contains("accidental"),
+        "missing accidental warning: {warnings}"
+    );
+    assert!(
+        warnings.contains("disagrees with the encoded pitch"),
+        "missing accidental/pitch disagreement warning: {warnings}"
+    );
+    assert!(
+        warnings.contains("stem"),
+        "missing stem warning: {warnings}"
+    );
+    assert!(
+        warnings.contains("notehead"),
+        "missing notehead warning: {warnings}"
+    );
+
+    let expected_input = directory.join("unhinted.musicxml");
+    fs::write(&expected_input, include_str!("fixtures/minimal.musicxml"))
+        .expect("write unhinted score");
+    let expected_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&expected_input)
+        .output()
+        .expect("run CLI for unhinted score");
+    assert!(
+        expected_output.status.success(),
+        "unhinted score failed: {}",
+        String::from_utf8_lossy(&expected_output.stderr)
+    );
+    let hinted_svg =
+        fs::read_to_string(directory.join("note-appearance-hints.svg")).expect("read hinted SVG");
+    let expected_svg =
+        fs::read_to_string(directory.join("unhinted.svg")).expect("read unhinted SVG");
+    assert_eq!(
+        hinted_svg, expected_svg,
+        "appearance hints must not alter engraving"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_malformed_note_appearance_values_without_writing_svg() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let cases = [
+        ("unsupported-stem", "<stem>double</stem>", "stem direction"),
+        ("stem-none", "<stem>none</stem>", "stem direction"),
+        (
+            "invalid-stem",
+            "<stem>sideways</stem>",
+            "invalid stem direction",
+        ),
+        (
+            "invalid-notehead",
+            "<notehead>made-up</notehead>",
+            "invalid notehead value",
+        ),
+        (
+            "invalid-notehead-filled",
+            "<notehead filled=\"maybe\">diamond</notehead>",
+            "filled must be",
+        ),
+        (
+            "invalid-notehead-color",
+            "<notehead color=\"#GGGGGG\">diamond</notehead>",
+            "notehead color",
+        ),
+        (
+            "invalid-notehead-font-size",
+            "<notehead font-size=\"giant\">diamond</notehead>",
+            "invalid notehead font-size",
+        ),
+        (
+            "invalid-accidental",
+            "<accidental>unicorn</accidental>",
+            "invalid accidental value",
+        ),
+        (
+            "invalid-accidental-modifier",
+            "<accidental cautionary=\"maybe\">sharp</accidental>",
+            "cautionary must be",
+        ),
+        (
+            "invalid-accidental-smufl",
+            "<accidental smufl=\"noteheadBlack\">sharp</accidental>",
+            "invalid accidental SMuFL glyph name",
+        ),
+    ];
+
+    for (name, hint, diagnostic_fragment) in cases {
+        let input = directory.join(format!("{name}.musicxml"));
+        let fixture = include_str!("fixtures/minimal.musicxml").replace(
+            "<duration>1</duration><voice>1</voice><type>quarter</type>",
+            &format!("<duration>1</duration><voice>1</voice><type>quarter</type>{hint}"),
+        );
+        fs::write(&input, fixture).expect("write score with malformed note hint");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(!output.status.success(), "{name} was accepted");
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            diagnostic.contains(diagnostic_fragment),
+            "{name} missing diagnostic {diagnostic_fragment:?}: {diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("/score-partwise/part[@id='P1']/measure[@number='1']/note/"),
+            "{name} missing note source context: {diagnostic}"
+        );
+        assert!(
+            !directory.join(format!("{name}.svg")).exists(),
+            "{name} wrote partial SVG"
+        );
+    }
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn default_notehead_modifiers_are_silent_and_nondefault_modifiers_are_ignored() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let baseline_input = directory.join("baseline.musicxml");
+    fs::write(&baseline_input, include_str!("fixtures/minimal.musicxml"))
+        .expect("write baseline score");
+    let baseline_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&baseline_input)
+        .output()
+        .expect("run CLI for baseline score");
+    assert!(
+        baseline_output.status.success(),
+        "baseline score failed: {}",
+        String::from_utf8_lossy(&baseline_output.stderr)
+    );
+    let baseline_svg =
+        fs::read_to_string(directory.join("baseline.svg")).expect("read baseline SVG");
+
+    let cases = [
+        (
+            "default-notehead",
+            "<notehead filled=\"yes\" parentheses=\"no\" font-style=\"normal\" font-weight=\"normal\" font-size=\"medium\" color=\"#000000\">normal</notehead>",
+            false,
+        ),
+        (
+            "styled-notehead",
+            "<notehead filled=\"no\" parentheses=\"yes\" color=\"#ff0000\">normal</notehead>",
+            true,
+        ),
+    ];
+    for (name, notehead, expect_warning) in cases {
+        let input = directory.join(format!("{name}.musicxml"));
+        let fixture = include_str!("fixtures/minimal.musicxml").replace(
+            "<duration>1</duration><voice>1</voice><type>quarter</type>",
+            &format!("<duration>1</duration><voice>1</voice><type>quarter</type>{notehead}"),
+        );
+        fs::write(&input, fixture).expect("write score with notehead modifiers");
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(
+            output.status.success(),
+            "{name} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let warnings = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            warnings.contains("notehead presentation"),
+            expect_warning,
+            "unexpected notehead warning for {name}: {warnings}"
+        );
+        let svg =
+            fs::read_to_string(directory.join(format!("{name}.svg"))).expect("read notehead SVG");
+        assert_eq!(svg, baseline_svg, "notehead modifiers changed the Tonehead");
+    }
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn processes_musicxml_doctype_and_internal_general_entity() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
