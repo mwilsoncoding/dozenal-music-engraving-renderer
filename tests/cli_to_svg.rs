@@ -39,6 +39,73 @@ fn assert_filled_glyph_paths(svg: &str) {
     }
 }
 
+fn text_path_y(svg: &str, id: &str) -> f64 {
+    svg.lines()
+        .find(|line| line.contains(&format!("id=\"{id}\"")))
+        .and_then(|line| line.split("transform=\"translate(").nth(1))
+        .and_then(|value| value.split(')').next())
+        .and_then(|value| value.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("missing translated path {id} in SVG: {svg}"))
+}
+
+fn svg_view_box_top(svg: &str) -> f64 {
+    svg.lines()
+        .next()
+        .and_then(|line| line.split("viewBox=\"0 ").nth(1))
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("missing SVG viewBox top: {svg}"))
+}
+
+fn svg_view_box_bottom(svg: &str) -> f64 {
+    let (top, height) = svg
+        .lines()
+        .next()
+        .and_then(|line| line.split("viewBox=\"0 ").nth(1))
+        .and_then(|value| {
+            let dimensions = value
+                .split('"')
+                .next()?
+                .split_whitespace()
+                .collect::<Vec<_>>();
+            Some((
+                dimensions[0].parse::<f64>().ok()?,
+                dimensions[2].parse::<f64>().ok()?,
+            ))
+        })
+        .unwrap_or_else(|| panic!("missing SVG viewBox dimensions: {svg}"));
+    top + height
+}
+
+fn svg_view_box_left(svg: &str) -> f64 {
+    svg.lines()
+        .next()
+        .and_then(|line| line.split("viewBox=\"").nth(1))
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("missing SVG viewBox left: {svg}"))
+}
+
+fn text_path_x(svg: &str, id: &str) -> f64 {
+    svg.lines()
+        .find(|line| line.contains(&format!("id=\"{id}\"")))
+        .and_then(|line| line.split("transform=\"translate(").nth(1))
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("missing translated path {id} in SVG: {svg}"))
+}
+
+fn path_move_y(svg: &str, id: &str) -> f64 {
+    svg.lines()
+        .find(|line| line.contains(&format!("id=\"{id}\"")))
+        .and_then(|line| line.split(" d=\"M").nth(1))
+        .and_then(|value| value.split('H').next())
+        .and_then(|value| value.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("missing path move for {id} in SVG: {svg}"))
+}
+
 fn assert_measure_barline_layout(svg: &str) {
     let barlines = svg
         .lines()
@@ -86,6 +153,651 @@ fn utf16_bytes(source: &str, little_endian: bool) -> Vec<u8> {
         });
     }
     bytes
+}
+
+#[test]
+fn renders_words_and_rehearsal_as_ordered_svg_paths() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("words-rehearsal.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml");
+    fs::write(&input, fixture).expect("write text direction score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "text directions failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("words-rehearsal.svg")).expect("read SVG");
+    assert!(
+        !svg.contains("<text"),
+        "text output must use glyph paths: {svg}"
+    );
+    assert_eq!(svg.matches("class=\"text-glyph\"").count(), 28, "{svg}");
+    assert_eq!(svg.matches("class=\"text-enclosure\"").count(), 2, "{svg}");
+    assert!(
+        svg.find("id=\"text-0-enclosure\"") < svg.find("id=\"text-1-glyph-0\""),
+        "rehearsal and words paths should retain source order: {svg}"
+    );
+    assert_ne!(
+        text_path_y(&svg, "text-0-glyph-0"),
+        text_path_y(&svg, "text-1-glyph-0"),
+        "overlapping text on the same side should stack"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn moves_text_away_from_nearby_extreme_register_notation() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml");
+    let normal_input = directory.join("normal-register.musicxml");
+    fs::write(&normal_input, fixture).expect("write normal-register score");
+    let high_fixture = fixture.replacen(
+        "<step>C</step><octave>4</octave>",
+        "<step>C</step><octave>8</octave>",
+        1,
+    );
+    let high_input = directory.join("high-register.musicxml");
+    fs::write(&high_input, high_fixture).expect("write high-register score");
+
+    for input in [&normal_input, &high_input] {
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(input)
+            .output()
+            .expect("run CLI");
+        assert!(
+            output.status.success(),
+            "score failed to render: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let normal_svg = fs::read_to_string(directory.join("normal-register.svg"))
+        .expect("read normal-register SVG");
+    let high_svg =
+        fs::read_to_string(directory.join("high-register.svg")).expect("read high-register SVG");
+    assert!(
+        text_path_y(&high_svg, "text-0-glyph-0") < text_path_y(&normal_svg, "text-0-glyph-0"),
+        "above-staff text should move away from extreme-register notation"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn moves_text_away_from_nearby_chord_symbols() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml");
+    let normal_input = directory.join("without-chord.musicxml");
+    fs::write(&normal_input, fixture).expect("write score without chord symbol");
+    let chord_fixture = fixture.replacen(
+        "</direction>\n      <note><pitch><step>C</step>",
+        "</direction>\n      <harmony><root><root-step>C</root-step></root><kind>major</kind></harmony>\n      <note><pitch><step>C</step>",
+        1,
+    );
+    let chord_input = directory.join("with-chord.musicxml");
+    fs::write(&chord_input, chord_fixture).expect("write score with chord symbol");
+
+    for input in [&normal_input, &chord_input] {
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(input)
+            .output()
+            .expect("run CLI");
+        assert!(
+            output.status.success(),
+            "score failed to render: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let normal_svg = fs::read_to_string(directory.join("without-chord.svg"))
+        .expect("read score without chord symbol");
+    let chord_svg =
+        fs::read_to_string(directory.join("with-chord.svg")).expect("read score with chord symbol");
+    assert!(
+        chord_svg.contains("class=\"chord-symbol-root\""),
+        "chord symbol should render: {chord_svg}"
+    );
+    assert!(
+        text_path_y(&chord_svg, "text-0-glyph-0") < text_path_y(&normal_svg, "text-0-glyph-0"),
+        "above-staff text should move away from a nearby chord symbol"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn moves_long_text_away_from_notation_in_the_next_measure() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml").replace(
+        "Andante, dolce",
+        "A very long direction sentence that extends across the measure boundary",
+    );
+    let (prefix, second_measure) = fixture
+        .split_once("<measure number=\"2\">")
+        .expect("second measure exists");
+    let high_fixture = format!(
+        "{prefix}<measure number=\"2\">{}",
+        second_measure.replacen(
+            "<step>G</step><octave>4</octave>",
+            "<step>G</step><octave>8</octave>",
+            1,
+        )
+    );
+    let normal_input = directory.join("normal-next-measure.musicxml");
+    let high_input = directory.join("high-next-measure.musicxml");
+    fs::write(&normal_input, fixture).expect("write normal score");
+    fs::write(&high_input, high_fixture).expect("write high-register score");
+
+    for input in [&normal_input, &high_input] {
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(input)
+            .output()
+            .expect("run CLI");
+        assert!(
+            output.status.success(),
+            "score failed to render: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let normal_svg =
+        fs::read_to_string(directory.join("normal-next-measure.svg")).expect("read normal score");
+    let high_svg =
+        fs::read_to_string(directory.join("high-next-measure.svg")).expect("read high score");
+    assert!(
+        text_path_y(&high_svg, "text-1-glyph-0") < text_path_y(&normal_svg, "text-1-glyph-0"),
+        "long text should move away from notation in the next measure"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn includes_expanded_rehearsal_enclosure_in_svg_view_box() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("wide-rehearsal.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml")
+        .replace("<rehearsal>A</rehearsal>", "<rehearsal>WWWWWW</rehearsal>");
+    fs::write(&input, fixture).expect("write wide rehearsal score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "wide rehearsal failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("wide-rehearsal.svg")).expect("read SVG");
+    let view_box_top = svg_view_box_top(&svg);
+    let enclosure_top = path_move_y(&svg, "text-0-enclosure");
+    assert!(
+        view_box_top <= enclosure_top - 0.75,
+        "viewBox top {view_box_top} must contain the enclosure stroke above {enclosure_top}"
+    );
+    let view_box_bottom = svg_view_box_bottom(&svg);
+    assert!(
+        view_box_bottom >= path_move_y(&svg, "text-0-enclosure") + 0.75,
+        "viewBox bottom {view_box_bottom} must contain the enclosure stroke below"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn includes_negative_text_coordinates_in_svg_view_box() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("negative-text-coordinate.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml").replace(
+        "<words font-size=\"large\">Andante, dolce</words>",
+        "<words default-x=\"-100\">Andante, dolce</words>",
+    );
+    fs::write(&input, fixture).expect("write negative-coordinate score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "negative text coordinate failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("negative-text-coordinate.svg")).expect("read SVG");
+    let view_box_left = svg_view_box_left(&svg);
+    let text_left = text_path_x(&svg, "text-1-glyph-0");
+    assert!(
+        view_box_left <= text_left,
+        "viewBox left {view_box_left} must include text path at x={text_left}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn moves_positioned_text_away_from_time_signature_glyphs() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("text-over-meter.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml").replace(
+        "<words font-size=\"large\">Andante, dolce</words>",
+        "<words default-x=\"-10\" default-y=\"7\">Meter</words>",
+    );
+    fs::write(&input, fixture).expect("write positioned text score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "positioned text failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("text-over-meter.svg")).expect("read SVG");
+    assert!(
+        text_path_y(&svg, "text-1-glyph-0") < 54.0,
+        "text overlapping the opening meter should move above its authored y position"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn keeps_explicitly_positioned_text_on_its_coordinate_side_when_colliding() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml")
+        .replace(
+            "<words font-size=\"large\">Andante, dolce</words>",
+            "<words default-x=\"-10\" default-y=\"7\">Meter</words>",
+        )
+        .replacen(
+            "<direction placement=\"above\">\n        <direction-type><words",
+            "<direction placement=\"below\">\n        <direction-type><words",
+            1,
+        );
+    let input = directory.join("explicit-side-collision.musicxml");
+    fs::write(&input, fixture).expect("write explicitly positioned score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "explicitly positioned text failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("explicit-side-collision.svg")).expect("read SVG");
+    assert!(
+        text_path_y(&svg, "text-1-glyph-0") < 54.0,
+        "text at default-y=7 should move upward away from the meter, regardless of direction placement"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn draws_bracket_enclosure_as_open_brackets() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml").replace(
+        "<rehearsal>A</rehearsal>",
+        "<rehearsal enclosure=\"bracket\">A</rehearsal>",
+    );
+    let input = directory.join("bracket-rehearsal.musicxml");
+    fs::write(&input, fixture).expect("write bracket-enclosure score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "bracket enclosure failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("bracket-rehearsal.svg")).expect("read SVG");
+    let enclosure = svg
+        .lines()
+        .find(|line| line.contains("id=\"text-0-enclosure\""))
+        .expect("bracket enclosure path");
+    let path = enclosure
+        .split(" d=\"")
+        .nth(1)
+        .expect("enclosure path data");
+    assert!(
+        !path.contains('Z'),
+        "brackets should be open paths: {enclosure}"
+    );
+    assert_eq!(
+        path.matches('M').count(),
+        2,
+        "expected two bracket strokes: {enclosure}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn scales_direction_offsets_consistently_with_divisions() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml")
+        .replace("<divisions>1</divisions>", "<divisions>4</divisions>")
+        .replace("<duration>1</duration>", "<duration>4</duration>");
+    let with_offset = directory.join("with-offset.musicxml");
+    let without_offset = directory.join("without-offset.musicxml");
+    fs::write(&with_offset, &fixture).expect("write score with direction offset");
+    fs::write(
+        &without_offset,
+        fixture.replace("<offset>1</offset>", "<offset>0</offset>"),
+    )
+    .expect("write score without direction offset");
+
+    for input in [&with_offset, &without_offset] {
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(input)
+            .output()
+            .expect("run CLI");
+        assert!(
+            output.status.success(),
+            "score failed to render: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let with_offset_svg =
+        fs::read_to_string(directory.join("with-offset.svg")).expect("read score with offset");
+    let without_offset_svg = fs::read_to_string(directory.join("without-offset.svg"))
+        .expect("read score without offset");
+    let offset_delta = text_path_x(&with_offset_svg, "text-2-glyph-0")
+        - text_path_x(&without_offset_svg, "text-2-glyph-0");
+    assert!(
+        (offset_delta - 10.0).abs() < 0.01,
+        "one division at divisions=4 should move text 10 SVG units, got {offset_delta}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn applies_relative_x_on_top_of_default_x() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml");
+    let with_relative_x = fixture.replace(
+        "font-size=\"large\"",
+        "default-x=\"10\" relative-x=\"5\" font-size=\"large\"",
+    );
+    let without_relative_x = fixture.replace(
+        "font-size=\"large\"",
+        "default-x=\"10\" font-size=\"large\"",
+    );
+    let relative_input = directory.join("relative-x.musicxml");
+    let default_input = directory.join("default-x.musicxml");
+    fs::write(&relative_input, with_relative_x).expect("write relative-x score");
+    fs::write(&default_input, without_relative_x).expect("write default-x score");
+
+    for input in [&relative_input, &default_input] {
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(input)
+            .output()
+            .expect("run CLI");
+        assert!(
+            output.status.success(),
+            "score failed to render: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let relative_svg =
+        fs::read_to_string(directory.join("relative-x.svg")).expect("read relative-x SVG");
+    let default_svg =
+        fs::read_to_string(directory.join("default-x.svg")).expect("read default-x SVG");
+    let x_delta =
+        text_path_x(&relative_svg, "text-1-glyph-0") - text_path_x(&default_svg, "text-1-glyph-0");
+    assert!(
+        (x_delta - 10.0).abs() < 0.01,
+        "relative-x=5 should add 10 SVG units on top of default-x, got {x_delta}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn separates_overlapping_text_with_opposite_authored_sides() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("opposite-side-text.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml")
+        .replace(
+            "<rehearsal>A</rehearsal>",
+            "<rehearsal default-y=\"-30\">A</rehearsal>",
+        )
+        .replace("font-size=\"large\"", "default-y=\"-30\"")
+        .replacen(
+            "</direction>\n      <note><pitch><step>C</step>",
+            "</direction>\n      <direction placement=\"below\"><direction-type><words default-y=\"-30\">Below</words></direction-type></direction>\n      <note><pitch><step>C</step>",
+            1,
+        );
+    fs::write(&input, fixture).expect("write opposite-side text score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "opposite-side text failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("opposite-side-text.svg")).expect("read SVG");
+    assert!(
+        text_path_y(&svg, "text-2-glyph-0") > 128.0,
+        "the later below-side item should move outward from its authored baseline"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn normalizes_text_to_nfc_before_glyph_lookup() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("normalized-text.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml")
+        .replace("Andante, dolce", "A\u{0301}");
+    fs::write(&input, fixture).expect("write decomposed text score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "decomposed text failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("normalized-text.svg")).expect("read SVG");
+    assert!(
+        svg.contains("id=\"text-1-glyph-0\""),
+        "normalized glyph missing: {svg}"
+    );
+    assert!(
+        !svg.contains("id=\"text-1-glyph-1\""),
+        "one NFC character should render as one glyph: {svg}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("unsupported text character"),
+        "composable text should not warn: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn collapses_default_xml_whitespace_in_text() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("collapsed-whitespace.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml")
+        .replace("Andante, dolce", "  Andante \n\t dolce  ");
+    fs::write(&input, fixture).expect("write whitespace text score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "default whitespace handling failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("collapsed-whitespace.svg")).expect("read SVG");
+    assert_eq!(svg.matches("id=\"text-1-glyph-").count(), 12, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn preserves_authored_whitespace_when_xml_space_is_preserve() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("preserved-whitespace.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml").replace(
+        "<words font-size=\"large\">Andante, dolce",
+        "<words xml:space=\"preserve\">A \nB",
+    );
+    fs::write(&input, fixture).expect("write preserved whitespace score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "preserved whitespace handling failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("preserved-whitespace.svg")).expect("read SVG");
+    assert!(
+        svg.contains("id=\"text-1-glyph-3\""),
+        "later line glyph missing: {svg}"
+    );
+    assert_ne!(
+        text_path_y(&svg, "text-1-glyph-0"),
+        text_path_y(&svg, "text-1-glyph-3"),
+        "preserved newline should start a new line"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn omits_an_entire_valid_text_item_when_a_glyph_is_unsupported() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("unsupported-text.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml")
+        .replace("Andante, dolce", "A \u{1f600}");
+    fs::write(&input, fixture).expect("write unsupported text score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "valid unsupported text should warn, not fail: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("unsupported-text.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"text-glyph\"").count(), 15, "{svg}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("U+1F600"),
+        "missing glyph warning: {stderr}"
+    );
+    assert!(
+        stderr.contains("XML path") && stderr.contains("direction-type/words"),
+        "warning should identify the XML path: {stderr}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_malformed_text_formatting_without_writing_svg() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("malformed-text.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml")
+        .replace("font-size=\"large\"", "font-size=\"smaller\"");
+    fs::write(&input, fixture).expect("write malformed text score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success(), "malformed font size must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid text font-size"), "{stderr}");
+    assert!(
+        stderr.contains("direction-type/words"),
+        "diagnostic should include the words XML path: {stderr}"
+    );
+    assert!(
+        !directory.join("malformed-text.svg").exists(),
+        "fatal text errors must not write partial SVG"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn warns_and_falls_back_for_valid_unsupported_text_formatting() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("text-formatting.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml").replace(
+        "font-size=\"large\"",
+        "font-family=\"Unbundled Face\" font-style=\"italic\" color=\"#AABBCC\" font-size=\"18pt\"",
+    );
+    fs::write(&input, fixture).expect("write formatted text score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "valid unsupported hints should warn and fall back: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("text-formatting.svg")).expect("read SVG");
+    assert!(
+        svg.contains("fill=\"#aabbcc\""),
+        "supported color was lost: {svg}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("font-family"),
+        "missing fallback warning: {stderr}"
+    );
+    assert!(stderr.contains("font-style is not supported"), "{stderr}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
 }
 
 #[test]

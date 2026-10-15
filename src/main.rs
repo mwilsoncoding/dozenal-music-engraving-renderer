@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::process;
 
 mod bravura_glyphs;
+mod noto_sans_glyphs;
+mod text_normalization;
 mod xml;
 use xml::Element;
 
@@ -51,7 +53,28 @@ enum BeamState {
 struct Measure {
     events: Vec<Event>,
     harmonies: Vec<PositionedHarmony>,
+    texts: Vec<PositionedText>,
     meter: Option<Meter>,
+}
+
+struct PositionedText {
+    event_index: usize,
+    offset_x: f64,
+    text: String,
+    placement: TextPlacement,
+    font_size: f64,
+    color: String,
+    enclosure: Option<String>,
+    default_x: Option<f64>,
+    default_y: Option<f64>,
+    relative_x: Option<f64>,
+    relative_y: Option<f64>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TextPlacement {
+    Above,
+    Below,
 }
 
 struct ChordSymbol {
@@ -129,10 +152,11 @@ fn run() -> Result<(), String> {
         .map_err(|error| format!("cannot read {}: {error}", input_path.display()))?;
     let score =
         parse_score(&source).map_err(|error| format!("{}: {error}", input_path.display()))?;
-    for warning in &score.warnings {
+    let mut warnings = score.warnings.clone();
+    let svg = render_svg(&score, &mut warnings);
+    for warning in &warnings {
         eprintln!("domunor: warning: {}: {warning}", input_path.display());
     }
-    let svg = render_svg(&score);
 
     if output_path
         .extension()
@@ -239,6 +263,7 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
         require_container_text(measure_element)?;
         let mut events: Vec<Event> = Vec::new();
         let mut harmonies = Vec::new();
+        let mut texts = Vec::new();
         let mut event_sources = Vec::new();
         let mut chord_target = None;
         for child in &measure_element.children {
@@ -362,6 +387,13 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
                         });
                     }
                 }
+                "direction" => texts.extend(parse_direction(
+                    &elements,
+                    *child,
+                    events.len(),
+                    divisions,
+                    &mut warnings,
+                )?),
                 _ => {
                     return Err(element_diagnostic(
                         element,
@@ -383,6 +415,7 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
         measures.push(Measure {
             events,
             harmonies,
+            texts,
             meter: active_meter,
         });
     }
@@ -406,6 +439,462 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
     }
 
     Ok(Score { measures, warnings })
+}
+
+fn parse_direction(
+    elements: &[Element],
+    direction: usize,
+    event_index: usize,
+    divisions: Option<u32>,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<PositionedText>, String> {
+    let element = &elements[direction];
+    validate_attributes(element, &["placement", "directive", "system", "id"])?;
+    require_container_text(element)?;
+    let placement = match optional_attribute(element, "placement").unwrap_or("above") {
+        "above" => TextPlacement::Above,
+        "below" => TextPlacement::Below,
+        value => {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid direction placement {value:?}"),
+            ));
+        }
+    };
+    for attribute in ["directive", "system"] {
+        if let Some(value) = optional_attribute(element, attribute) {
+            if !matches!(value, "yes" | "no") {
+                return Err(element_diagnostic(
+                    element,
+                    format!("direction {attribute} must be 'yes' or 'no', not {value:?}"),
+                ));
+            }
+            if value == "yes" {
+                warnings.push(element_diagnostic(
+                    element,
+                    format!("direction {attribute} hint is not supported; ignored"),
+                ));
+            }
+        }
+    }
+
+    let mut text_items = Vec::new();
+    let mut saw_direction_type = false;
+    let mut saw_offset = false;
+    let mut offset_ticks = 0i32;
+    let mut after_direction_types = false;
+    for child in &element.children {
+        let child_element = &elements[*child];
+        match child_element.name.as_str() {
+            "direction-type" if !after_direction_types => {
+                require_no_attributes(child_element)?;
+                require_container_text(child_element)?;
+                if child_element.children.is_empty() {
+                    return Err(element_diagnostic(
+                        child_element,
+                        "direction-type must contain at least one item".to_owned(),
+                    ));
+                }
+                saw_direction_type = true;
+                for item in &child_element.children {
+                    let text_element = &elements[*item];
+                    match text_element.name.as_str() {
+                        "words" | "rehearsal" => {
+                            if let Some(text) = parse_direction_text(
+                                elements,
+                                *item,
+                                event_index,
+                                placement,
+                                text_element.name == "rehearsal",
+                                warnings,
+                            )? {
+                                text_items.push(text);
+                            }
+                        }
+                        "metronome" | "dynamics" | "wedge" | "segno" | "coda" | "symbol"
+                        | "bracket" | "dashes" | "pedal" | "octave-shift" | "other-direction" => {
+                            warnings.push(element_diagnostic(
+                                text_element,
+                                format!(
+                                    "<{}> direction is not supported; omitted",
+                                    text_element.name
+                                ),
+                            ));
+                        }
+                        _ => {
+                            return Err(element_diagnostic(
+                                text_element,
+                                format!("unsupported direction-type item <{}>", text_element.name),
+                            ));
+                        }
+                    }
+                }
+            }
+            "offset" if !saw_offset && saw_direction_type => {
+                after_direction_types = true;
+                validate_attributes(child_element, &["sound"])?;
+                if let Some(sound) = optional_attribute(child_element, "sound") {
+                    if !matches!(sound, "yes" | "no") {
+                        return Err(element_diagnostic(
+                            child_element,
+                            format!("offset sound must be 'yes' or 'no', not {sound:?}"),
+                        ));
+                    }
+                }
+                offset_ticks = leaf_text(child_element)?.parse::<i32>().map_err(|_| {
+                    element_diagnostic(child_element, "offset must be a signed integer".to_owned())
+                })?;
+                saw_offset = true;
+            }
+            "voice" | "staff" if saw_direction_type => {
+                after_direction_types = true;
+                let value = leaf_text(child_element)?;
+                if child_element.name == "staff" {
+                    let staff = value
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|staff| *staff > 0)
+                        .ok_or_else(|| {
+                            element_diagnostic(
+                                child_element,
+                                "staff must be a positive integer".to_owned(),
+                            )
+                        })?;
+                    if staff != 1 {
+                        warnings.push(element_diagnostic(
+                            child_element,
+                            "direction staff other than 1 is not supported; routed to the single output Staff".to_owned(),
+                        ));
+                    }
+                }
+            }
+            "footnote" | "level" | "sound" | "listening" if saw_direction_type => {
+                after_direction_types = true;
+                warnings.push(element_diagnostic(
+                    child_element,
+                    format!(
+                        "<{}> direction content is not supported; ignored",
+                        child_element.name
+                    ),
+                ));
+            }
+            "direction-type" | "offset" | "voice" | "staff" | "footnote" | "level" | "sound"
+            | "listening" => {
+                return Err(element_diagnostic(
+                    child_element,
+                    format!(
+                        "malformed direction child order at <{}>",
+                        child_element.name
+                    ),
+                ));
+            }
+            _ => {
+                return Err(element_diagnostic(
+                    child_element,
+                    format!("unsupported direction child <{}>", child_element.name),
+                ));
+            }
+        }
+    }
+    if !saw_direction_type {
+        return Err(element_diagnostic(
+            element,
+            "direction must contain at least one direction-type".to_owned(),
+        ));
+    }
+    let offset_x = if offset_ticks == 0 {
+        0.0
+    } else {
+        let divisions = divisions.ok_or_else(|| {
+            element_diagnostic(
+                element,
+                "a positive divisions value is required for direction offset".to_owned(),
+            )
+        })?;
+        f64::from(offset_ticks) * 40.0 / f64::from(divisions)
+    };
+    for text in &mut text_items {
+        text.offset_x = offset_x;
+    }
+    Ok(text_items)
+}
+
+fn parse_direction_text(
+    elements: &[Element],
+    text_id: usize,
+    event_index: usize,
+    placement: TextPlacement,
+    is_rehearsal: bool,
+    warnings: &mut Vec<String>,
+) -> Result<Option<PositionedText>, String> {
+    let element = &elements[text_id];
+    validate_attributes(
+        element,
+        &[
+            "id",
+            "default-x",
+            "default-y",
+            "relative-x",
+            "relative-y",
+            "font-family",
+            "font-style",
+            "font-size",
+            "font-weight",
+            "color",
+            "halign",
+            "valign",
+            "justify",
+            "text-decoration",
+            "text-rotation",
+            "letter-spacing",
+            "line-height",
+            "xml:lang",
+            "xml:space",
+            "text-direction",
+            "enclosure",
+        ],
+    )?;
+    if !element.children.is_empty() {
+        return Err(element_diagnostic(
+            element,
+            format!("<{}> must contain plain text", element.name),
+        ));
+    }
+
+    let preserve_space = match optional_attribute(element, "xml:space").unwrap_or("default") {
+        "default" => false,
+        "preserve" => true,
+        value => {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid xml:space value {value:?}"),
+            ));
+        }
+    };
+    let text = if preserve_space {
+        element.text.clone()
+    } else {
+        collapse_xml_whitespace(&element.text)
+    };
+    let mut font_size = 16.0;
+    if let Some(value) = optional_attribute(element, "font-size") {
+        font_size = parse_text_font_size(value).ok_or_else(|| {
+            element_diagnostic(element, format!("invalid text font-size {value:?}"))
+        })?;
+    }
+    let mut color = "#171717".to_owned();
+    if let Some(value) = optional_attribute(element, "color") {
+        if !valid_musicxml_color(value) {
+            return Err(element_diagnostic(
+                element,
+                "text color must be a six-digit hexadecimal color".to_owned(),
+            ));
+        }
+        color = value.to_ascii_lowercase();
+    }
+    if let Some(family) = optional_attribute(element, "font-family") {
+        if family.trim().is_empty() {
+            return Err(element_diagnostic(
+                element,
+                "font-family may not be empty".to_owned(),
+            ));
+        }
+        if !family.eq_ignore_ascii_case("Noto Sans") {
+            warnings.push(element_diagnostic(
+                element,
+                format!("font-family {family:?} is not bundled; Noto Sans is used"),
+            ));
+        }
+    }
+    for (attribute, allowed) in [
+        ("font-style", &["normal", "italic", "oblique"][..]),
+        ("font-weight", &["normal", "bold"][..]),
+        ("halign", &["left", "center", "right"][..]),
+        ("valign", &["top", "middle", "bottom", "baseline"][..]),
+        ("justify", &["left", "center", "right"][..]),
+        ("text-direction", &["ltr", "rtl", "lro", "rlo"][..]),
+    ] {
+        if let Some(value) = optional_attribute(element, attribute) {
+            if !allowed.contains(&value) {
+                return Err(element_diagnostic(
+                    element,
+                    format!("invalid {attribute} value {value:?}"),
+                ));
+            }
+            warnings.push(element_diagnostic(
+                element,
+                format!("text {attribute} is not supported; default behavior is used"),
+            ));
+        }
+    }
+    let mut default_x = None;
+    let mut default_y = None;
+    let mut relative_x = None;
+    let mut relative_y = None;
+    for (attribute, output) in [
+        ("default-x", &mut default_x),
+        ("default-y", &mut default_y),
+        ("relative-x", &mut relative_x),
+        ("relative-y", &mut relative_y),
+    ] {
+        if let Some(value) = optional_attribute(element, attribute) {
+            *output = Some(
+                value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|number| number.is_finite())
+                    .ok_or_else(|| {
+                        element_diagnostic(
+                            element,
+                            format!("text {attribute} must be a finite number"),
+                        )
+                    })?,
+            );
+        }
+    }
+    for attribute in ["text-rotation", "letter-spacing", "line-height"] {
+        if let Some(value) = optional_attribute(element, attribute) {
+            if value.parse::<f64>().is_err_and(|_| value != "normal")
+                || value.parse::<f64>().is_ok_and(|number| !number.is_finite())
+            {
+                return Err(element_diagnostic(
+                    element,
+                    format!("text {attribute} must be a finite number"),
+                ));
+            }
+            warnings.push(element_diagnostic(
+                element,
+                format!("text {attribute} is not supported; default behavior is used"),
+            ));
+        }
+    }
+    if let Some(language) = optional_attribute(element, "xml:lang") {
+        if language.is_empty() || language.chars().any(char::is_whitespace) {
+            return Err(element_diagnostic(
+                element,
+                "invalid xml:lang value".to_owned(),
+            ));
+        }
+        warnings.push(element_diagnostic(
+            element,
+            "text language hint is not supported; ignored".to_owned(),
+        ));
+    }
+    let enclosure = match optional_attribute(element, "enclosure") {
+        Some("none") => None,
+        Some(value)
+            if matches!(
+                value,
+                "rectangle"
+                    | "square"
+                    | "oval"
+                    | "circle"
+                    | "bracket"
+                    | "triangle"
+                    | "diamond"
+                    | "pentagon"
+                    | "hexagon"
+                    | "heptagon"
+                    | "octagon"
+                    | "nonagon"
+                    | "decagon"
+            ) =>
+        {
+            Some(value.to_owned())
+        }
+        Some(value) => {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid text enclosure {value:?}"),
+            ))
+        }
+        None if is_rehearsal => Some("square".to_owned()),
+        None => None,
+    };
+    if optional_attribute(element, "text-decoration").is_some() {
+        warnings.push(element_diagnostic(
+            element,
+            "text-decoration is not supported; decoration is omitted".to_owned(),
+        ));
+    }
+    let text = if text.is_empty() {
+        text
+    } else {
+        match normalize_text_nfc(&text) {
+            Ok(normalized) => normalized,
+            Err(character) => {
+                warnings.push(element_diagnostic(
+                    element,
+                    format!(
+                        "unsupported text character U+{:04X}; text item omitted",
+                        u32::from(character)
+                    ),
+                ));
+                return Ok(None);
+            }
+        }
+    };
+    Ok(Some(PositionedText {
+        event_index,
+        offset_x: 0.0,
+        text,
+        placement,
+        font_size,
+        color,
+        enclosure,
+        default_x,
+        default_y,
+        relative_x,
+        relative_y,
+    }))
+}
+
+fn parse_text_font_size(value: &str) -> Option<f64> {
+    let (number, multiplier) = if let Some(number) = value.strip_suffix("pt") {
+        (number, 4.0 / 3.0)
+    } else if let Some(number) = value.strip_suffix("px") {
+        (number, 1.0)
+    } else {
+        match value {
+            "xx-small" => return Some(9.0),
+            "x-small" => return Some(10.0),
+            "small" => return Some(13.0),
+            "medium" => return Some(16.0),
+            "large" => return Some(18.0),
+            "x-large" => return Some(24.0),
+            "xx-large" => return Some(32.0),
+            _ => (value, 4.0 / 3.0),
+        }
+    };
+    let size = number.parse::<f64>().ok()? * multiplier;
+    (size.is_finite() && size > 0.0).then_some(size)
+}
+
+fn normalize_text_nfc(value: &str) -> Result<String, char> {
+    let normalized = text_normalization::normalize(value);
+    for character in normalized.chars() {
+        if !matches!(character, '\t' | '\n') && !noto_sans_glyphs::supports(character) {
+            return Err(character);
+        }
+    }
+    Ok(normalized)
+}
+
+fn collapse_xml_whitespace(value: &str) -> String {
+    let mut collapsed = String::new();
+    let mut pending_space = false;
+    for character in value.chars() {
+        if matches!(character, ' ' | '\t' | '\n' | '\r') {
+            pending_space = !collapsed.is_empty();
+        } else {
+            if pending_space {
+                collapsed.push(' ');
+                pending_space = false;
+            }
+            collapsed.push(character);
+        }
+    }
+    collapsed
 }
 
 fn parse_chord_symbol(
@@ -2369,6 +2858,7 @@ enum DrawLayer {
     Barline,
     Beam,
     Event,
+    Text,
     Tie,
 }
 
@@ -2385,6 +2875,8 @@ enum PathClass {
     ChordSymbolRoot,
     ChordSymbolBass,
     ChordSymbolTone,
+    TextGlyph,
+    TextEnclosure,
     Tie,
 }
 
@@ -2406,6 +2898,8 @@ enum PathStyle {
     MediumOutline,
     FilledGlyph,
     BravuraGlyph,
+    TextGlyph,
+    TextEnclosure,
     Beam,
     Solid,
 }
@@ -2426,6 +2920,7 @@ struct PathGeometry {
     rotation: Option<(i32, i32, i32)>,
     path_data: String,
     style: PathStyle,
+    color: Option<String>,
 }
 
 impl PathGeometry {
@@ -2438,6 +2933,7 @@ impl PathGeometry {
             rotation: None,
             path_data: path_data.into(),
             style,
+            color: None,
         }
     }
 
@@ -2453,6 +2949,11 @@ impl PathGeometry {
 
     fn offset_y(mut self, offset: f64) -> Self {
         self.y_offset = offset;
+        self
+    }
+
+    fn colored(mut self, color: &str) -> Self {
+        self.color = Some(color.to_owned());
         self
     }
 
@@ -2739,6 +3240,7 @@ fn next_event_x(preferred_x: i32, previous: &EventGeometry, current: &EventGeome
 }
 
 struct Scene {
+    view_left: i32,
     view_top: i32,
     view_width: i32,
     view_height: i32,
@@ -2748,6 +3250,7 @@ struct Scene {
 impl Scene {
     fn new(view_top: i32, view_width: i32, view_height: i32) -> Self {
         Self {
+            view_left: 0,
             view_top,
             view_width,
             view_height,
@@ -2776,14 +3279,14 @@ impl Scene {
         let mut svg = String::new();
         writeln!(
             svg,
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 {} {} {}\" role=\"img\">",
-            self.view_top, self.view_width, self.view_height
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{} {} {} {}\" role=\"img\">",
+            self.view_left, self.view_top, self.view_width, self.view_height
         )
         .expect("writing to a String cannot fail");
         writeln!(
             svg,
-            "<rect id=\"background\" x=\"0\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#fff\"/>",
-            self.view_top, self.view_width, self.view_height
+            "<rect id=\"background\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#fff\"/>",
+            self.view_left, self.view_top, self.view_width, self.view_height
         )
         .expect("writing to a String cannot fail");
         for layer in [
@@ -2791,6 +3294,7 @@ impl Scene {
             DrawLayer::Barline,
             DrawLayer::Beam,
             DrawLayer::Event,
+            DrawLayer::Text,
             DrawLayer::Tie,
         ] {
             for command in self
@@ -2820,6 +3324,8 @@ impl Scene {
                 PathClass::ChordSymbolRoot => "chord-symbol-root",
                 PathClass::ChordSymbolBass => "chord-symbol-bass",
                 PathClass::ChordSymbolTone => "chord-symbol-tone",
+                PathClass::TextGlyph => "text-glyph",
+                PathClass::TextEnclosure => "text-enclosure",
                 PathClass::Tie => "tie",
             };
             write!(svg, " class=\"{class}\"").expect("writing to a String cannot fail");
@@ -2892,6 +3398,18 @@ impl Scene {
             }
             PathStyle::FilledGlyph => svg.push_str(" fill=\"#171717\" fill-rule=\"evenodd\""),
             PathStyle::BravuraGlyph => svg.push_str(" fill=\"#171717\" fill-rule=\"nonzero\""),
+            PathStyle::TextGlyph => write!(
+                svg,
+                " fill=\"{}\" fill-rule=\"nonzero\"",
+                command.geometry.color.as_deref().unwrap_or("#171717")
+            )
+            .expect("writing to a String cannot fail"),
+            PathStyle::TextEnclosure => write!(
+                svg,
+                " fill=\"none\" stroke=\"{}\" stroke-width=\"1.5\"",
+                command.geometry.color.as_deref().unwrap_or("#171717")
+            )
+            .expect("writing to a String cannot fail"),
             PathStyle::Beam => svg.push_str(" fill=\"#171717\""),
             PathStyle::Solid => svg.push_str(" fill=\"#171717\""),
         }
@@ -2984,10 +3502,289 @@ fn add_chord_symbol(
     symbol_width
 }
 
-fn render_svg(score: &Score) -> String {
+fn chord_symbol_bounds(x: i32, width: i32, offset_x: f64) -> ComponentBounds {
+    ComponentBounds::filled(
+        f64::from(x) + offset_x,
+        -20.0,
+        f64::from(x + width) + offset_x,
+        14.0,
+    )
+}
+
+struct TextBounds {
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+}
+
+struct TextLayoutContext<'a> {
+    occupied: &'a mut Vec<TextBounds>,
+    notation_bounds: &'a [ComponentBounds],
+    warnings: &'a mut Vec<String>,
+    left: &'a mut i32,
+    right: &'a mut i32,
+    view_top: &'a mut i32,
+    view_bottom: &'a mut i32,
+}
+
+fn add_text_item(
+    scene: &mut Scene,
+    item: &PositionedText,
+    index: usize,
+    anchor_x: f64,
+    measure_start_x: f64,
+    layout: &mut TextLayoutContext<'_>,
+) {
+    let scale = item.font_size / noto_sans_glyphs::UNITS_PER_EM;
+    let mut glyphs = Vec::new();
+    let mut line_index = 0usize;
+    let mut line_x = 0.0;
+    let mut max_line_width: f64 = 0.0;
+    let line_height = item.font_size * 1.2;
+    let mut ink_bounds: Option<(f64, f64, f64, f64)> = None;
+    let space_advance = noto_sans_glyphs::glyph(' ')
+        .expect("supported text repertoire includes a space")
+        .advance
+        * scale;
+    for (glyph_index, character) in item.text.chars().enumerate() {
+        if character == '\n' {
+            max_line_width = max_line_width.max(line_x);
+            line_index += 1;
+            line_x = 0.0;
+            continue;
+        }
+        if character == '\t' {
+            line_x += space_advance * 4.0;
+            continue;
+        }
+        let glyph = noto_sans_glyphs::glyph(character)
+            .expect("text was checked against the bundled glyph repertoire");
+        if !glyph.path.is_empty() {
+            let y_offset = line_index as f64 * line_height;
+            let left = line_x + glyph.bounds[0] * scale;
+            let top = y_offset + glyph.bounds[1] * scale;
+            let glyph_right = line_x + glyph.bounds[2] * scale;
+            let bottom = y_offset + glyph.bounds[3] * scale;
+            ink_bounds = Some(match ink_bounds {
+                Some((min_left, min_top, max_right, max_bottom)) => (
+                    min_left.min(left),
+                    min_top.min(top),
+                    max_right.max(glyph_right),
+                    max_bottom.max(bottom),
+                ),
+                None => (left, top, glyph_right, bottom),
+            });
+            glyphs.push((glyph_index, glyph, line_x, y_offset));
+        }
+        line_x += glyph.advance * scale;
+    }
+    max_line_width = max_line_width.max(line_x);
+    let Some((ink_left, ink_top, ink_right, ink_bottom)) = ink_bounds else {
+        return;
+    };
+
+    let text_x = item
+        .default_x
+        .map(|value| measure_start_x + value * 2.0)
+        .unwrap_or(anchor_x)
+        + item.relative_x.unwrap_or(0.0) * 2.0;
+    let base_y = item
+        .default_y
+        .map(|value| 68.0 - value * 2.0)
+        .unwrap_or(match item.placement {
+            TextPlacement::Above => 16.0,
+            TextPlacement::Below => 140.0,
+        })
+        - item.relative_y.unwrap_or(0.0) * 2.0;
+    let left = text_x + ink_left.min(0.0);
+    let text_right = text_x + ink_right.max(max_line_width);
+    let padding = if item.enclosure.is_some() { 3.0 } else { 0.0 };
+    let step = (ink_bottom - ink_top + padding * 2.0 + 4.0).max(item.font_size + 4.0);
+    let mut shift = 0.0;
+    let (box_left, box_top, box_right, box_bottom) = loop {
+        let candidate = enclosure_bounds(
+            item.enclosure.as_deref(),
+            left - padding,
+            base_y + ink_top + shift - padding,
+            text_right + padding,
+            base_y + ink_bottom + shift + padding,
+        );
+        let overlaps_text = layout.occupied.iter().any(|previous| {
+            candidate.0 < previous.right + 2.0
+                && candidate.2 + 2.0 > previous.left
+                && candidate.1 < previous.bottom + 2.0
+                && candidate.3 + 2.0 > previous.top
+        });
+        let overlaps_notation = layout.notation_bounds.iter().any(|previous| {
+            candidate.0 < previous.right + 2.0
+                && candidate.2 + 2.0 > previous.left
+                && candidate.1 < previous.bottom + 2.0
+                && candidate.3 + 2.0 > previous.top
+        });
+        if !overlaps_text && !overlaps_notation {
+            break candidate;
+        }
+        if shift.abs() > 2000.0 {
+            layout.warnings.push(format!(
+                "text item {index} could not be separated from nearby text or notation"
+            ));
+            break candidate;
+        }
+        let collision_side = if base_y < 68.0 {
+            TextPlacement::Above
+        } else if base_y > 68.0 {
+            TextPlacement::Below
+        } else {
+            item.placement
+        };
+        shift += match collision_side {
+            TextPlacement::Above => -step,
+            TextPlacement::Below => step,
+        };
+    };
+    layout.occupied.push(TextBounds {
+        left: box_left,
+        top: box_top,
+        right: box_right,
+        bottom: box_bottom,
+    });
+
+    if let Some(enclosure) = &item.enclosure {
+        let path = text_enclosure_path(enclosure, box_left, box_top, box_right, box_bottom);
+        scene.add_path(
+            DrawLayer::Text,
+            format!("text-{index}-enclosure"),
+            Some(PathClass::TextEnclosure),
+            Vec::new(),
+            PathGeometry::new(None, path, PathStyle::TextEnclosure).colored(&item.color),
+        );
+    }
+    for (glyph_index, glyph, glyph_x, glyph_y) in glyphs {
+        let x = text_x + glyph_x;
+        let y = base_y + shift + glyph_y;
+        let x_integer = x.floor() as i32;
+        let y_integer = y.floor() as i32;
+        scene.add_path(
+            DrawLayer::Text,
+            format!("text-{index}-glyph-{glyph_index}"),
+            Some(PathClass::TextGlyph),
+            Vec::new(),
+            PathGeometry::new(
+                Some((x_integer, y_integer)),
+                glyph.path,
+                PathStyle::TextGlyph,
+            )
+            .scaled(scale)
+            .offset_x(x - f64::from(x_integer))
+            .offset_y(y - f64::from(y_integer))
+            .colored(&item.color),
+        );
+    }
+    *layout.right = (*layout.right).max(box_right.ceil() as i32 + 8);
+    *layout.left = (*layout.left).min(box_left.floor() as i32 - 8);
+    let enclosure_stroke_padding = if item.enclosure.is_some() { 0.75 } else { 0.0 };
+    *layout.view_top = (*layout.view_top).min((box_top - enclosure_stroke_padding).floor() as i32);
+    *layout.view_bottom =
+        (*layout.view_bottom).max((box_bottom + enclosure_stroke_padding).ceil() as i32);
+}
+
+fn enclosure_bounds(
+    shape: Option<&str>,
+    mut left: f64,
+    mut top: f64,
+    mut right: f64,
+    mut bottom: f64,
+) -> (f64, f64, f64, f64) {
+    if matches!(shape, Some("square" | "circle")) {
+        let side = (right - left).max(bottom - top);
+        let center_x = (left + right) / 2.0;
+        let center_y = (top + bottom) / 2.0;
+        left = center_x - side / 2.0;
+        right = center_x + side / 2.0;
+        top = center_y - side / 2.0;
+        bottom = center_y + side / 2.0;
+    }
+    (left, top, right, bottom)
+}
+
+fn text_enclosure_path(shape: &str, left: f64, top: f64, right: f64, bottom: f64) -> String {
+    let (left, top, right, bottom) = enclosure_bounds(Some(shape), left, top, right, bottom);
+    if shape == "bracket" {
+        let arm = ((bottom - top) / 3.0).min(3.0);
+        return format!(
+            "M{:.2} {top:.2}H{left:.2}V{bottom:.2}H{:.2}M{:.2} {top:.2}H{right:.2}V{bottom:.2}H{:.2}",
+            left + arm,
+            left + arm,
+            right - arm,
+            right - arm
+        );
+    }
+    if matches!(shape, "oval" | "circle") {
+        let center_x = (left + right) / 2.0;
+        let center_y = (top + bottom) / 2.0;
+        let radius_x = (right - left) / 2.0;
+        let radius_y = (bottom - top) / 2.0;
+        let kappa = 0.552_284_749_8;
+        return format!(
+            "M{center_x:.2} {top:.2}C{:.2} {top:.2} {right:.2} {:.2} {right:.2} {center_y:.2}C{right:.2} {:.2} {:.2} {bottom:.2} {center_x:.2} {bottom:.2}C{:.2} {bottom:.2} {left:.2} {:.2} {left:.2} {center_y:.2}C{left:.2} {:.2} {:.2} {top:.2} {center_x:.2} {top:.2}Z",
+            center_x + radius_x * kappa,
+            center_y - radius_y * kappa,
+            center_y + radius_y * kappa,
+            center_x + radius_x * kappa,
+            center_x - radius_x * kappa,
+            center_y + radius_y * kappa,
+            center_y - radius_y * kappa,
+            center_x - radius_x * kappa
+        );
+    }
+    if matches!(
+        shape,
+        "triangle"
+            | "diamond"
+            | "pentagon"
+            | "hexagon"
+            | "heptagon"
+            | "octagon"
+            | "nonagon"
+            | "decagon"
+    ) {
+        let sides = match shape {
+            "triangle" => 3,
+            "diamond" => 4,
+            "pentagon" => 5,
+            "hexagon" => 6,
+            "heptagon" => 7,
+            "octagon" => 8,
+            "nonagon" => 9,
+            "decagon" => 10,
+            _ => unreachable!(),
+        };
+        let center_x = (left + right) / 2.0;
+        let center_y = (top + bottom) / 2.0;
+        let radius_x = (right - left) / 2.0;
+        let radius_y = (bottom - top) / 2.0;
+        let points = (0..sides)
+            .map(|index| {
+                let angle = std::f64::consts::TAU * index as f64 / f64::from(sides)
+                    - std::f64::consts::FRAC_PI_2;
+                format!(
+                    "{:.2} {:.2}",
+                    center_x + radius_x * angle.cos(),
+                    center_y + radius_y * angle.sin()
+                )
+            })
+            .collect::<Vec<_>>();
+        return format!("M{}Z", points.join("L"));
+    }
+    format!("M{left:.2} {top:.2}H{right:.2}V{bottom:.2}H{left:.2}Z")
+}
+
+fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
     let mut scene = Scene::new(0, 0, 0);
     let group_stem_directions = beamed_group_stem_directions(score);
     let mut x = 92;
+    let mut left = 0;
     let mut right = 128;
     let mut view_top = 0;
     let mut view_bottom = 128;
@@ -2998,9 +3795,15 @@ fn render_svg(score: &Score) -> String {
     let mut active_beams = [None; 5];
     let mut final_barline_x = 0;
     let mut chord_symbol_index = 0;
+    let mut text_item_index = 0;
+    let mut occupied_text = Vec::new();
+    let mut pending_texts = Vec::new();
+    let mut notation_bounds = Vec::new();
     for (measure_index, measure) in score.measures.iter().enumerate() {
+        let measure_start_x = f64::from(x);
         let mut previous_event_geometry = None;
         let mut harmony_index = 0;
+        let mut text_index = 0;
         let mut measure_harmony_right = None;
         if let Some(meter) = measure.meter {
             if active_meter != Some(meter) {
@@ -3028,6 +3831,12 @@ fn render_svg(score: &Score) -> String {
                     .scaled(2.0)
                     .rotated_180_if(meter.beats == 10),
                 );
+                notation_bounds.push(ComponentBounds::filled(
+                    f64::from(meter_x),
+                    30.0,
+                    f64::from(meter_x + 24),
+                    66.0,
+                ));
                 scene.add_path(
                     DrawLayer::Event,
                     denominator_id,
@@ -3041,6 +3850,12 @@ fn render_svg(score: &Score) -> String {
                     .scaled(2.0)
                     .rotated_180_if(meter.beat_type == 10),
                 );
+                notation_bounds.push(ComponentBounds::filled(
+                    f64::from(meter_x),
+                    70.0,
+                    f64::from(meter_x + 24),
+                    106.0,
+                ));
                 x += 28;
                 meter_index += 1;
             }
@@ -3065,6 +3880,21 @@ fn render_svg(score: &Score) -> String {
             } else {
                 event_geometry(event, x, &active_beams, &pending_tie_paths, stems_up)
             };
+            notation_bounds.extend(geometry.all().copied());
+            while measure
+                .texts
+                .get(text_index)
+                .is_some_and(|text| text.event_index <= measure_event_index)
+            {
+                pending_texts.push((
+                    &measure.texts[text_index],
+                    text_item_index,
+                    f64::from(x) + measure.texts[text_index].offset_x,
+                    measure_start_x,
+                ));
+                text_index += 1;
+                text_item_index += 1;
+            }
             let mut harmony_advance = 0;
             while measure
                 .harmonies
@@ -3072,7 +3902,7 @@ fn render_svg(score: &Score) -> String {
                 .is_some_and(|harmony| harmony.event_index == measure_event_index)
             {
                 let symbol_x = x + harmony_advance;
-                harmony_advance += add_chord_symbol(
+                let symbol_width = add_chord_symbol(
                     &mut scene,
                     &measure.harmonies[harmony_index].symbol,
                     symbol_x,
@@ -3081,6 +3911,12 @@ fn render_svg(score: &Score) -> String {
                     &mut right,
                     &mut view_top,
                 );
+                notation_bounds.push(chord_symbol_bounds(
+                    symbol_x,
+                    symbol_width,
+                    measure.harmonies[harmony_index].offset_x,
+                ));
+                harmony_advance += symbol_width;
                 measure_harmony_right = Some(
                     measure_harmony_right.unwrap_or(i32::MIN).max(
                         (f64::from(symbol_x + harmony_advance)
@@ -3411,10 +4247,20 @@ fn render_svg(score: &Score) -> String {
             x += (event.duration_units * 5).div_ceil(2) as i32;
             index += 1;
         }
+        while let Some(text) = measure.texts.get(text_index) {
+            pending_texts.push((
+                text,
+                text_item_index,
+                f64::from(x) + text.offset_x,
+                measure_start_x,
+            ));
+            text_index += 1;
+            text_item_index += 1;
+        }
         let mut harmony_advance = 0;
         while let Some(harmony) = measure.harmonies.get(harmony_index) {
             let symbol_x = x + harmony_advance;
-            harmony_advance += add_chord_symbol(
+            let symbol_width = add_chord_symbol(
                 &mut scene,
                 &harmony.symbol,
                 symbol_x,
@@ -3423,6 +4269,12 @@ fn render_svg(score: &Score) -> String {
                 &mut right,
                 &mut view_top,
             );
+            notation_bounds.push(chord_symbol_bounds(
+                symbol_x,
+                symbol_width,
+                harmony.offset_x,
+            ));
+            harmony_advance += symbol_width;
             measure_harmony_right = Some(
                 measure_harmony_right
                     .unwrap_or(i32::MIN)
@@ -3443,6 +4295,13 @@ fn render_svg(score: &Score) -> String {
                 }
             }
         }
+        notation_bounds.push(ComponentBounds::stroked(
+            f64::from(barline_x),
+            27.5,
+            f64::from(barline_x),
+            108.5,
+            1.0,
+        ));
         scene.add_path(
             DrawLayer::Barline,
             format!("barline-{}", measure_index + 1),
@@ -3458,7 +4317,37 @@ fn render_svg(score: &Score) -> String {
         right = right.max(barline_x + 12);
         x = barline_x + 4;
     }
-    let view_width = right + 12;
+    for staff_y in [28.0, 68.0, 108.0] {
+        notation_bounds.push(ComponentBounds::stroked(
+            12.0,
+            staff_y,
+            f64::from(final_barline_x),
+            staff_y,
+            1.0,
+        ));
+    }
+    notation_bounds.push(ComponentBounds::filled(26.0, 49.0, 38.0, 67.0));
+    notation_bounds.push(ComponentBounds::filled(26.0, 69.0, 38.0, 87.0));
+    for (text, text_item_index, anchor_x, measure_start_x) in pending_texts {
+        add_text_item(
+            &mut scene,
+            text,
+            text_item_index,
+            anchor_x,
+            measure_start_x,
+            &mut TextLayoutContext {
+                occupied: &mut occupied_text,
+                notation_bounds: &notation_bounds,
+                warnings,
+                left: &mut left,
+                right: &mut right,
+                view_top: &mut view_top,
+                view_bottom: &mut view_bottom,
+            },
+        );
+    }
+    let view_width = right + 12 - left;
+    scene.view_left = left;
     scene.view_top = view_top;
     scene.view_width = view_width;
     scene.view_height = view_bottom - view_top;
@@ -3723,7 +4612,8 @@ mod tests {
             "<step>A</step><alter>1</alter><octave>4</octave>",
         );
         let score = parse_score(source.as_bytes()).expect("dek fixture should parse");
-        let svg = render_svg(&score);
+        let mut warnings = score.warnings.clone();
+        let svg = render_svg(&score, &mut warnings);
         let dek = svg
             .lines()
             .find(|line| line.contains("data-tone=\"10\""))
@@ -3739,7 +4629,8 @@ mod tests {
             "../tests/fixtures/no-transposition.musicxml"
         ))
         .expect("canonical beaming fixture should parse");
-        let svg = render_svg(&score);
+        let mut warnings = score.warnings.clone();
+        let svg = render_svg(&score, &mut warnings);
         assert!(
             svg.lines().any(|line| {
                 line.contains("id=\"beam-7-1\"")
