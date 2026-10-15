@@ -1211,16 +1211,17 @@ fn stems_extend_away_from_the_center_staff_line() {
 }
 
 #[test]
-fn chord_stem_direction_follows_the_majority_side_of_the_center_line() {
+fn chord_stem_direction_follows_the_midpoint_of_the_center_line() {
     for (octaves, should_extend_up, attachment_octave) in [
         (&[5, 6, 4][..], false, 4),
         (&[4, 3, 5][..], true, 5),
         (&[5, 4][..], true, 5),
+        (&[5, 5, 4][..], true, 5),
     ] {
         let directory = scratch_dir();
         fs::create_dir_all(&directory).expect("create test directory");
         let input = directory.join("chord-stem-direction.musicxml");
-        let steps = ["C", "C", "C"];
+        let steps = ["C", "D", "E"];
         let notes = octaves
             .iter()
             .zip(steps)

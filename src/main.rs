@@ -3048,7 +3048,7 @@ fn render_svg(score: &Score) -> String {
         }
         for (measure_event_index, event) in measure.events.iter().enumerate() {
             let stems_up = group_stem_directions[measure_index][measure_event_index]
-                .unwrap_or_else(|| stem_direction_is_up(&event.tones));
+                .unwrap_or_else(|| stem_direction_is_up(event.tones.iter()));
             let preferred_x = x;
             let preferred_geometry = event_geometry(
                 event,
@@ -3516,19 +3516,13 @@ fn lane_y(octave: u8) -> i32 {
     }
 }
 
-fn stem_direction_is_up(tones: &[ToneEvent]) -> bool {
-    let (above, below) = stem_direction_counts(tones.iter());
-    below >= above
-}
-
-fn stem_direction_counts<'a>(tones: impl Iterator<Item = &'a ToneEvent>) -> (usize, usize) {
-    tones.fold((0, 0), |(above, below), tone| {
-        if lane_y(tone.tone.octave) + 9 < 68 {
-            (above + 1, below)
-        } else {
-            (above, below + 1)
-        }
-    })
+fn stem_direction_is_up<'a>(tones: impl Iterator<Item = &'a ToneEvent>) -> bool {
+    let (top, bottom) = tones
+        .map(|tone| lane_y(tone.tone.octave) + 9)
+        .fold((i32::MAX, i32::MIN), |(top, bottom), tone_y| {
+            (top.min(tone_y), bottom.max(tone_y))
+        });
+    top + bottom >= 2 * 68
 }
 
 fn beamed_group_stem_directions(score: &Score) -> Vec<Vec<Option<bool>>> {
@@ -3558,14 +3552,13 @@ fn beamed_group_stem_directions(score: &Score) -> Vec<Vec<Option<bool>>> {
                 BeamState::End => {
                     if !group_events.is_empty() {
                         group_events.push(position);
-                        let (above, below) = stem_direction_counts(group_events.iter().flat_map(
+                        let stems_up = stem_direction_is_up(group_events.iter().flat_map(
                             |(measure_index, event_index)| {
                                 score.measures[*measure_index].events[*event_index]
                                     .tones
                                     .iter()
                             },
                         ));
-                        let stems_up = below > above;
                         for (measure_index, event_index) in group_events.drain(..) {
                             directions[measure_index][event_index] = Some(stems_up);
                         }
