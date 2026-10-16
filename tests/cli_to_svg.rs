@@ -171,6 +171,88 @@ fn scopes_numbered_transposition_to_its_input_staff() {
 }
 
 #[test]
+fn applies_unnumbered_staff_state_to_every_input_staff() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("unnumbered-input-staff-state.musicxml");
+    let source = include_str!("../examples/input-staff-routing/input-staff-routing.musicxml");
+    let fixture = source
+        .replace("<time number=\"2\">", "<time>")
+        .replace("<key number=\"1\">", "<key>")
+        .replace("<key number=\"2\">", "<key>")
+        .replace("<clef number=\"1\">", "<clef>")
+        .replace("<clef number=\"2\">", "<clef>")
+        .replace(
+            "<staves>2</staves>",
+            "<staves>2</staves><transpose><chromatic>12</chromatic></transpose>",
+        );
+    fs::write(&input, fixture).expect("write unnumbered-state score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--input-staff-mode")
+        .arg("separate")
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "unnumbered staff state failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let first_staff =
+        fs::read_to_string(directory.join("unnumbered-input-staff-state-staff-1.svg"))
+            .expect("read first staff SVG");
+    let second_staff =
+        fs::read_to_string(directory.join("unnumbered-input-staff-state-staff-2.svg"))
+            .expect("read second staff SVG");
+    assert!(first_staff.contains("data-octave=\"6\""), "{first_staff}");
+    assert!(second_staff.contains("data-octave=\"4\""), "{second_staff}");
+    let meter_path = |svg: &str| {
+        svg.lines()
+            .find(|line| line.contains("id=\"meter-numerator\""))
+            .map(str::to_owned)
+            .expect("meter numerator path")
+    };
+    assert_eq!(meter_path(&first_staff), meter_path(&second_staff));
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn keeps_divisions_part_wide_across_input_staffs() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("part-wide-divisions.musicxml");
+    let source = include_str!("../examples/input-staff-routing/input-staff-routing.musicxml");
+    let fixture = source
+        .replace("<divisions>1</divisions>", "<divisions>2</divisions>")
+        .replace("<duration>1</duration>", "<duration>2</duration>");
+    fs::write(&input, fixture).expect("write Part-wide divisions score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--input-staff-mode")
+        .arg("separate")
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "Part-wide divisions failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for staff_number in 1..=2 {
+        let svg = fs::read_to_string(
+            directory.join(format!("part-wide-divisions-staff-{staff_number}.svg")),
+        )
+        .expect("read staff SVG");
+        assert_eq!(svg.matches("class=\"tonehead\"").count(), 4, "{svg}");
+    }
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn splits_cross_input_staff_chords_only_in_separate_mode() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");

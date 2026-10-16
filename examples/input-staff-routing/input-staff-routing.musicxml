@@ -24,7 +24,7 @@
       <direction><direction-type><words>Lower</words></direction-type><staff>2</staff></direction>
       <note>
         <pitch><step>C</step><octave>5</octave></pitch>
-        <duration>1</duration><voice>1</voice><type>quarter</type><staff>1</staff>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
       </note>
       <note>
         <pitch><step>C</step><octave>3</octave></pitch>
