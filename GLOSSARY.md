@@ -40,9 +40,9 @@ _Avoid_: Page, staff
 A physical print surface with dimensions and orientation, margins, and a printable area for one or more Systems.
 _Avoid_: Canvas, System
 
-**Octave Indicator**:
-A pair of vertically stacked dozenal digits flanking the center staff line at the start of a staff to establish register.
-_Avoid_: Clef, key signature, clef sign
+**Dozenal Clef**:
+A pair of vertically stacked dozenal digits flanking the center staff line at the start of a staff to establish register; the pair serves as the clef for the staff.
+_Avoid_: Octave Indicator, key signature, conventional clef sign
 
 **Ledger Line**:
 An extension line drawn above the top staff line or below the bottom staff line to support notes in extreme octaves.
