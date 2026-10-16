@@ -1734,6 +1734,274 @@ fn accepts_a_single_voice_with_a_nondefault_identifier() {
 }
 
 #[test]
+fn renders_parallel_voices_using_backup_cursor_movement() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("parallel-voices.musicxml");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let notes = "      <note><pitch><step>C</step><octave>2</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>\n      <note><pitch><step>D</step><octave>2</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>\n      <backup><duration>2</duration></backup>\n      <note><pitch><step>G</step><octave>8</octave></pitch><duration>1</duration><voice>2</voice><type>quarter</type></note>\n      <note><pitch><step>A</step><octave>8</octave></pitch><duration>1</duration><voice>2</voice><type>quarter</type></note>";
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(original_note, notes);
+    fs::write(&input, fixture).expect("write parallel-voice score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "parallel Voices failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("parallel-voices.svg")).expect("read SVG");
+    let tonehead_xs = |octave| {
+        svg.lines()
+            .filter(|line| {
+                line.contains("class=\"tonehead\"")
+                    && line.contains(&format!("data-octave=\"{octave}\""))
+            })
+            .map(|line| {
+                line.split("transform=\"translate(")
+                    .nth(1)
+                    .and_then(|transform| transform.split_whitespace().next())
+                    .and_then(|x| x.parse::<f64>().ok())
+                    .expect("numeric tonehead position")
+            })
+            .collect::<Vec<_>>()
+    };
+    let first_voice_xs = tonehead_xs(2);
+    let second_voice_xs = tonehead_xs(8);
+    assert_eq!(first_voice_xs.len(), 2, "{svg}");
+    assert_eq!(second_voice_xs.len(), 2, "{svg}");
+    assert_eq!(first_voice_xs[0], second_voice_xs[0], "{svg}");
+    assert_eq!(first_voice_xs[1], second_voice_xs[1], "{svg}");
+    assert_eq!(first_voice_xs[1] - first_voice_xs[0], 40.0, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_multiple_voices_example() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("multiple-voices.musicxml");
+    fs::write(
+        &input,
+        include_str!("../examples/multiple-voices/multiple-voices.musicxml"),
+    )
+    .expect("write multiple-Voice example");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "multiple-Voice example failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("multiple-voices.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 9, "{svg}");
+    let first_barline_x = svg
+        .lines()
+        .find(|line| line.contains("id=\"barline-1\""))
+        .and_then(|line| line.split("d=\"M").nth(1))
+        .and_then(|path| path.split_whitespace().next())
+        .and_then(|x| x.parse::<f64>().ok())
+        .expect("first measure barline position");
+    let second_measure_start_x = svg
+        .lines()
+        .find(|line| {
+            line.contains("class=\"tonehead\"")
+                && line.contains("data-tone=\"5\"")
+                && line.contains("data-octave=\"4\"")
+        })
+        .and_then(|line| line.split("transform=\"translate(").nth(1))
+        .and_then(|transform| transform.split_whitespace().next())
+        .and_then(|x| x.parse::<f64>().ok())
+        .expect("first note of second measure position");
+    assert_eq!(second_measure_start_x, first_barline_x + 4.0, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn keeps_interleaved_beam_groups_independent_by_voice() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("voice-beams.musicxml");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let notes = "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>eighth</type><beam>begin</beam></note>\n      <backup><duration>1</duration></backup>\n      <note><pitch><step>G</step><octave>8</octave></pitch><duration>1</duration><voice>2</voice><type>eighth</type><beam>begin</beam></note>\n      <note><pitch><step>A</step><octave>8</octave></pitch><duration>1</duration><voice>2</voice><type>eighth</type><beam>end</beam></note>\n      <backup><duration>1</duration></backup>\n      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>eighth</type><beam>end</beam></note>";
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<divisions>1</divisions>", "<divisions>2</divisions>")
+        .replace(original_note, notes);
+    fs::write(&input, fixture).expect("write interleaved-beam score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "interleaved Voice beams failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("voice-beams.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"beam\"").count(), 2, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn does_not_match_ties_across_voices() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("cross-voice-tie.musicxml");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let notes = "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><tie type=\"start\"/><voice>1</voice><type>quarter</type></note>\n      <backup><duration>1</duration></backup>\n      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><tie type=\"stop\"/><voice>2</voice><type>quarter</type></note>";
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(original_note, notes);
+    fs::write(&input, fixture).expect("write cross-Voice-tie score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success(), "cross-Voice tie was accepted");
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostic.contains("tie stop has no preceding tie start"));
+    assert!(diagnostic.contains("/measure[@number='1']/note"));
+    assert!(!directory.join("cross-voice-tie.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_forward_cursor_without_creating_an_event() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("forward-cursor.musicxml");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let notes = "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>\n      <attributes><divisions>2</divisions></attributes>\n      <forward><duration>2</duration><voice>1</voice></forward>\n      <note><pitch><step>D</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>quarter</type></note>";
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(original_note, notes);
+    fs::write(&input, fixture).expect("write forward-cursor score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "forward cursor movement failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("forward-cursor.svg")).expect("read SVG");
+    let tonehead_xs = svg
+        .lines()
+        .filter(|line| line.contains("class=\"tonehead\""))
+        .map(|line| {
+            line.split("transform=\"translate(")
+                .nth(1)
+                .and_then(|transform| transform.split_whitespace().next())
+                .and_then(|x| x.parse::<f64>().ok())
+                .expect("numeric tonehead position")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tonehead_xs.len(),
+        2,
+        "forward must not create an event: {svg}"
+    );
+    assert_eq!(tonehead_xs[1] - tonehead_xs[0], 80.0, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn accepts_a_single_voice_without_voice_identifiers() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("implicit-voice.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace("<voice>1</voice>", "");
+    fs::write(&input, fixture).expect("write implicit-Voice score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "an omitted ID for a single Voice was rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(directory.join("implicit-voice.svg").is_file());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn requires_voice_identifiers_when_multiple_voices_exist() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("missing-voice-id.musicxml");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let notes = "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>\n      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>\n      <backup><duration>2</duration></backup>\n      <note><pitch><step>G</step><octave>8</octave></pitch><duration>1</duration><voice>2</voice><type>quarter</type></note>";
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(original_note, notes);
+    fs::write(&input, fixture).expect("write missing-Voice-ID score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success(), "missing Voice ID was accepted");
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostic.contains("multiple Voices require an explicit <voice>"));
+    assert!(diagnostic.contains("/measure[@number='1']/note"));
+    assert!(!directory.join("missing-voice-id.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_malformed_cursor_movement_without_output() {
+    let cases = [
+        (
+            "backup-underflow",
+            "<backup><duration>1</duration></backup>",
+            "before the measure start",
+        ),
+        (
+            "zero-forward",
+            "<forward><duration>0</duration></forward>",
+            "positive integer",
+        ),
+        (
+            "missing-forward-duration",
+            "<forward/>",
+            "requires <duration>",
+        ),
+    ];
+    for (name, movement, expected_message) in cases {
+        let directory = scratch_dir();
+        fs::create_dir_all(&directory).expect("create test directory");
+        let input = directory.join(format!("{name}.musicxml"));
+        let fixture = include_str!("fixtures/minimal.musicxml")
+            .replace("      <note>", &format!("      {movement}\n      <note>"));
+        fs::write(&input, fixture).expect("write malformed-cursor score");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(!output.status.success(), "{name} was accepted");
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(diagnostic.contains(expected_message), "{diagnostic}");
+        assert!(diagnostic.contains("/measure[@number='1']"), "{diagnostic}");
+        assert!(!directory.join(format!("{name}.svg")).exists());
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+}
+
+#[test]
 fn renders_root_position_and_bass_tone_chord_symbols() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");

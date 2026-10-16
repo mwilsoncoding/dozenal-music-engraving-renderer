@@ -16,13 +16,28 @@ struct Tone {
     value: u8,
 }
 
+#[derive(Clone, Default, PartialEq, Eq)]
+struct VoiceId(Option<String>);
+
+type VoiceState<T> = Vec<(VoiceId, T)>;
+type TiePath = (Tone, i32, i32);
+type BeamStart = (i32, i32);
+type BeamedStem = (String, i32, i32);
+type BeamEventPosition = (usize, usize);
+type VoiceTiePaths = VoiceState<Vec<TiePath>>;
+type VoiceBeamStates = VoiceState<[Option<BeamStart>; 5]>;
+type VoiceBeamedStems = VoiceState<Vec<BeamedStem>>;
+type VoiceBeamEvents = VoiceState<Vec<BeamEventPosition>>;
+
 #[derive(Clone)]
 struct Event {
     tones: Vec<ToneEvent>,
     duration_units: u32,
+    onset_units: f64,
     duration_name: &'static str,
     dots: u8,
     beams: Vec<BeamMark>,
+    voice_id: VoiceId,
     input_staff: u32,
     is_spacer: bool,
 }
@@ -612,9 +627,9 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
         let mut divisions = None;
         let mut input_staff_count = 1;
         let mut active_staff_states = vec![InputStaffState::default()];
-        let mut pending_ties = Vec::new();
+        let mut pending_ties: VoiceState<Vec<Tone>> = Vec::new();
         let mut active_ending: Option<String> = None;
-        let mut active_beams = [false; 5];
+        let mut active_beams: VoiceState<[bool; 5]> = Vec::new();
         let mut measures = Vec::new();
         for measure_id in &elements[part].children {
             let measure_element = &elements[*measure_id];
@@ -631,7 +646,8 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
             let mut texts = Vec::new();
             let mut barlines = Vec::new();
             let mut event_sources = Vec::new();
-            let mut chord_target = None;
+            let mut cursor_units = 0.0;
+            let mut chord_targets: VoiceState<usize> = Vec::new();
             for child in &measure_element.children {
                 let element = &elements[*child];
                 match element.name.as_str() {
@@ -779,7 +795,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                     .to_owned(),
                             )
                         })?;
-                        let parsed = parse_note(
+                        let mut parsed = parse_note(
                             &elements,
                             *child,
                             divisions,
@@ -787,14 +803,26 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                             input_staff_count,
                             &mut warnings,
                         )?;
+                        parsed.event.onset_units = cursor_units;
                         if let Some(chord_marker) = parsed.chord_marker {
-                            let Some(target) = chord_target else {
+                            let Some(target) = chord_targets
+                                .iter()
+                                .find(|(voice, _)| voice == &parsed.event.voice_id)
+                                .map(|(_, target)| *target)
+                            else {
                                 return Err(element_diagnostic(
                                     &elements[chord_marker],
                                     "<chord/> marker requires a preceding pitched event".to_owned(),
                                 ));
                             };
                             let event: &mut Event = &mut events[target];
+                            parsed.event.onset_units = event.onset_units;
+                            if event.voice_id != parsed.event.voice_id {
+                                return Err(element_diagnostic(
+                                    &elements[chord_marker],
+                                    "chord members must share a Voice".to_owned(),
+                                ));
+                            }
                             if event.duration_units != parsed.event.duration_units
                                 || event.duration_name != parsed.event.duration_name
                                 || event.dots != parsed.event.dots
@@ -838,12 +866,40 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                             }
                             event.tones.push(tone);
                         } else {
+                            let duration_units = parsed.event.duration_units;
+                            let voice_id = parsed.event.voice_id.clone();
+                            let is_pitched = !parsed.event.tones.is_empty();
                             events.push(parsed.event);
                             event_sources.push(*child);
-                            chord_target = events
-                                .last()
-                                .filter(|event| !event.tones.is_empty())
-                                .map(|_| events.len() - 1);
+                            if is_pitched {
+                                if let Some((_, target)) = chord_targets
+                                    .iter_mut()
+                                    .find(|(voice, _)| voice == &voice_id)
+                                {
+                                    *target = events.len() - 1;
+                                } else {
+                                    chord_targets.push((voice_id, events.len() - 1));
+                                }
+                            } else {
+                                chord_targets.retain(|(voice, _)| voice != &voice_id);
+                            }
+                            cursor_units += f64::from(duration_units);
+                        }
+                    }
+                    "backup" | "forward" => {
+                        let movement_units =
+                            parse_cursor_movement(&elements, *child, divisions, input_staff_count)?;
+                        if element.name == "backup" {
+                            if cursor_units < movement_units {
+                                return Err(element_diagnostic(
+                                    element,
+                                    "<backup> moves the Voice cursor before the measure start"
+                                        .to_owned(),
+                                ));
+                            }
+                            cursor_units -= movement_units;
+                        } else {
+                            cursor_units += movement_units;
                         }
                     }
                     "harmony" => {
@@ -916,7 +972,8 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                 ));
             }
             for (event, source) in events.iter().zip(event_sources) {
-                validate_beam_group(&elements[source], event, &mut active_beams)?;
+                let voice_index = voice_state_index(&mut active_beams, &event.voice_id);
+                validate_beam_group(&elements[source], event, &mut active_beams[voice_index].1)?;
                 validate_event_ties(&elements[source], event, &mut pending_ties)?;
             }
             measures.push(Measure {
@@ -934,13 +991,16 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                 "unsupported score: <part> must contain at least one measure".to_owned(),
             ));
         }
-        if !pending_ties.is_empty() {
+        if pending_ties.iter().any(|(_, ties)| !ties.is_empty()) {
             return Err(element_diagnostic(
                 &elements[part],
                 "tie start has no matching tie stop".to_owned(),
             ));
         }
-        if active_beams.iter().skip(1).any(|active| *active) {
+        if active_beams
+            .iter()
+            .any(|(_, active)| active.iter().skip(1).any(|active| *active))
+        {
             return Err(element_diagnostic(
                 &elements[part],
                 "beam group is missing an end marker".to_owned(),
@@ -2842,6 +2902,17 @@ fn parse_input_clef(elements: &[Element], clef: usize) -> Result<InputClef, Stri
     })
 }
 
+fn voice_state_index<T: Default>(states: &mut VoiceState<T>, voice_id: &VoiceId) -> usize {
+    if let Some(index) = states
+        .iter()
+        .position(|(existing_voice_id, _)| existing_voice_id == voice_id)
+    {
+        return index;
+    }
+    states.push((voice_id.clone(), T::default()));
+    states.len() - 1
+}
+
 fn validate_beam_group(
     note: &Element,
     event: &Event,
@@ -2893,6 +2964,73 @@ fn validate_beam_group(
         }
     }
     Ok(())
+}
+
+fn parse_cursor_movement(
+    elements: &[Element],
+    movement: usize,
+    divisions: Option<u32>,
+    input_staff_count: u32,
+) -> Result<f64, String> {
+    let element = &elements[movement];
+    let divisions = divisions.ok_or_else(|| {
+        element_diagnostic(
+            element,
+            "a positive <divisions> value is required before cursor movement".to_owned(),
+        )
+    })?;
+    require_no_attributes(element)?;
+    require_container_text(element)?;
+    let duration = element.children.first().copied().ok_or_else(|| {
+        element_diagnostic(element, "cursor movement requires <duration>".to_owned())
+    })?;
+    if elements[duration].name != "duration" {
+        return Err(element_diagnostic(
+            element,
+            "cursor movement must begin with <duration>".to_owned(),
+        ));
+    }
+    require_no_attributes(&elements[duration])?;
+    let ticks = leaf_text(&elements[duration])?
+        .parse::<u32>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            element_diagnostic(
+                &elements[duration],
+                "cursor movement duration must be a positive integer".to_owned(),
+            )
+        })?;
+    let mut saw_voice = false;
+    let mut saw_staff = false;
+    for child in element.children.iter().skip(1) {
+        let child_element = &elements[*child];
+        match child_element.name.as_str() {
+            "voice" if element.name == "forward" && !saw_voice && !saw_staff => {
+                require_no_attributes(child_element)?;
+                if leaf_text(child_element)?.is_empty() {
+                    return Err(element_diagnostic(
+                        child_element,
+                        "<voice> identifier must not be empty".to_owned(),
+                    ));
+                }
+                saw_voice = true;
+            }
+            "staff" if element.name == "forward" && !saw_staff => {
+                require_no_attributes(child_element)?;
+                let number = leaf_text(child_element)?;
+                parse_input_staff_index(child_element, number, input_staff_count)?;
+                saw_staff = true;
+            }
+            _ => {
+                return Err(element_diagnostic(
+                    child_element,
+                    "unsupported cursor movement content".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(f64::from(ticks) * 16.0 / f64::from(divisions))
 }
 
 fn parse_note(
@@ -2986,10 +3124,16 @@ fn parse_note(
         }
         position += 1;
     }
-    let voice = *children.get(position).ok_or_else(|| {
-        element_diagnostic(note_element, "note event requires <voice>".to_owned())
-    })?;
-    position += 1;
+    let voice_id = VoiceId(
+        children
+            .get(position)
+            .filter(|child| elements[**child].name == "voice")
+            .map(|voice| {
+                position += 1;
+                leaf_text(&elements[*voice]).map(|value| value.to_owned())
+            })
+            .transpose()?,
+    );
     let note_type = *children
         .get(position)
         .ok_or_else(|| element_diagnostic(note_element, "note event requires <type>".to_owned()))?;
@@ -3117,7 +3261,6 @@ fn parse_note(
             ));
         }
     }
-    leaf_text(&elements[voice])?;
     let (duration_name, base_units, mark_count) = match leaf_text(&elements[note_type])? {
         "whole" => ("whole", 64, 0),
         "half" => ("half", 32, 2),
@@ -3245,9 +3388,11 @@ fn parse_note(
         event: Event {
             tones,
             duration_units,
+            onset_units: 0.0,
             duration_name,
             dots: duration_marks,
             beams,
+            voice_id,
             input_staff,
             is_spacer: false,
         },
@@ -3627,9 +3772,10 @@ fn same_beams(left: &[BeamMark], right: &[BeamMark]) -> bool {
 fn validate_event_ties(
     note: &Element,
     event: &Event,
-    pending_ties: &mut Vec<Tone>,
+    pending_ties: &mut VoiceState<Vec<Tone>>,
 ) -> Result<(), String> {
-    let mut unmatched = std::mem::take(pending_ties);
+    let voice_index = voice_state_index(pending_ties, &event.voice_id);
+    let mut unmatched = std::mem::take(&mut pending_ties[voice_index].1);
     for tone in event.tones.iter().filter(|tone| tone.tie_stop) {
         let Some(position) = unmatched.iter().position(|expected| expected == &tone.tone) else {
             let message = if unmatched.is_empty() {
@@ -3647,7 +3793,7 @@ fn validate_event_ties(
             "tie start must connect to the next equal concert pitch".to_owned(),
         ));
     }
-    pending_ties.extend(
+    pending_ties[voice_index].1.extend(
         event
             .tones
             .iter()
@@ -3866,7 +4012,6 @@ fn element_diagnostic(element: &Element, message: String) -> String {
 }
 
 fn collect_voice_errors(elements: &[Element]) -> Vec<String> {
-    let mut voice_id = None;
     let mut errors = Vec::new();
     for element in elements.iter().filter(|element| element.name == "voice") {
         if !element.children.is_empty() || !element.attributes.is_empty() {
@@ -3878,15 +4023,41 @@ fn collect_voice_errors(elements: &[Element]) -> Vec<String> {
                 element,
                 "unsupported score: <voice> identifier must not be empty".to_owned(),
             ));
-        } else if let Some(existing_id) = voice_id {
-            if existing_id != value {
+        }
+    }
+    for part in elements.iter().filter(|element| element.name == "part") {
+        let mut voice_ids = Vec::new();
+        let mut notes_without_voice = Vec::new();
+        for measure in &part.children {
+            if elements[*measure].name != "measure" {
+                continue;
+            }
+            for note in &elements[*measure].children {
+                if elements[*note].name != "note" {
+                    continue;
+                }
+                let voice = elements[*note]
+                    .children
+                    .iter()
+                    .find(|child| elements[**child].name == "voice");
+                if let Some(voice) = voice {
+                    let value = elements[*voice].text.trim();
+                    if !value.is_empty() && !voice_ids.contains(&value) {
+                        voice_ids.push(value);
+                    }
+                } else {
+                    notes_without_voice.push(*note);
+                }
+            }
+        }
+        if voice_ids.len() > 1 {
+            for note in notes_without_voice {
                 errors.push(element_diagnostic(
-                    element,
-                    "unsupported score: multiple voices are not supported".to_owned(),
+                    &elements[note],
+                    "multiple Voices require an explicit <voice> identifier on every note"
+                        .to_owned(),
                 ));
             }
-        } else {
-            voice_id = Some(value);
         }
     }
     errors
@@ -5439,9 +5610,9 @@ fn render_part_svg(
     let mut index = 0;
     let mut active_meter = None;
     let mut meter_index = 0;
-    let mut pending_tie_paths: Vec<(Tone, i32, i32)> = Vec::new();
-    let mut active_beams = [None; 5];
-    let mut pending_beamed_stems: Vec<(String, i32, i32)> = Vec::new();
+    let mut pending_tie_paths: VoiceTiePaths = Vec::new();
+    let mut active_beams: VoiceBeamStates = Vec::new();
+    let mut pending_beamed_stems: VoiceBeamedStems = Vec::new();
     let mut final_barline_x = 0;
     let mut barline_positions = Vec::new();
     let mut chord_symbol_index = 0;
@@ -5513,26 +5684,45 @@ fn render_part_svg(
             }
             active_meter = Some(meter);
         }
+        let event_origin_x = x;
+        let mut measure_end_x = x;
+        let mut previous_event_onset = None;
         for (measure_event_index, event) in measure.events.iter().enumerate() {
             let stems_up = group_stem_directions[measure_index][measure_event_index]
                 .unwrap_or_else(|| stem_direction_is_up(event.tones.iter()));
-            let preferred_x = x;
+            let beam_state_index = voice_state_index(&mut active_beams, &event.voice_id);
+            let tie_state_index = voice_state_index(&mut pending_tie_paths, &event.voice_id);
+            let beamed_stem_index = voice_state_index(&mut pending_beamed_stems, &event.voice_id);
+            let active_beams_for_event = active_beams[beam_state_index].1;
+            let pending_ties_for_event = pending_tie_paths[tie_state_index].1.clone();
+            let preferred_x = event_origin_x + (event.onset_units * 2.5).ceil() as i32;
+            x = preferred_x;
             let preferred_geometry = event_geometry(
                 event,
                 preferred_x,
-                &active_beams,
-                &pending_tie_paths,
+                &active_beams_for_event,
+                &pending_ties_for_event,
                 stems_up,
             );
-            if let Some(previous) = &previous_event_geometry {
-                x = next_event_x(preferred_x, previous, &preferred_geometry);
+            if previous_event_onset.is_some_and(|onset| onset <= event.onset_units) {
+                if let Some(previous) = &previous_event_geometry {
+                    x = next_event_x(preferred_x, previous, &preferred_geometry);
+                }
             }
             event_positions.push(x);
             let geometry = if x == preferred_x {
                 preferred_geometry
             } else {
-                event_geometry(event, x, &active_beams, &pending_tie_paths, stems_up)
+                event_geometry(
+                    event,
+                    x,
+                    &active_beams_for_event,
+                    &pending_ties_for_event,
+                    stems_up,
+                )
             };
+            previous_event_onset = Some(event.onset_units);
+            measure_end_x = measure_end_x.max(x + (event.duration_units * 5).div_ceil(2) as i32);
             notation_bounds.extend(geometry.all().copied());
             while measure
                 .texts
@@ -5581,7 +5771,6 @@ fn render_part_svg(
                 chord_symbol_index += 1;
             }
             if event.is_spacer {
-                x += (event.duration_units * 5).div_ceil(2) as i32;
                 index += 1;
                 continue;
             }
@@ -5602,7 +5791,6 @@ fn render_part_svg(
                 );
                 right = right.max(x + 24);
                 previous_event_geometry = Some(geometry);
-                x += (event.duration_units * 5).div_ceil(2) as i32;
                 index += 1;
                 continue;
             }
@@ -5664,7 +5852,7 @@ fn render_part_svg(
                     );
                 }
             }
-            let primary_beam_slope = active_beams[1]
+            let primary_beam_slope = active_beams[beam_state_index].1[1]
                 .map(|(start_x, start_y)| {
                     f64::from(stem_end - start_y) / f64::from(stem_x - start_x)
                 })
@@ -5675,14 +5863,14 @@ fn render_part_svg(
                 let beam_y = stem_end + offset;
                 match beam.state {
                     BeamState::Begin => {
-                        active_beams[level] = Some((stem_x, stem_end));
+                        active_beams[beam_state_index].1[level] = Some((stem_x, stem_end));
                         if level == 1 {
-                            pending_beamed_stems.clear();
+                            pending_beamed_stems[beamed_stem_index].1.clear();
                         }
                     }
                     BeamState::Continue => {
                         if level == 1 {
-                            pending_beamed_stems.push((
+                            pending_beamed_stems[beamed_stem_index].1.push((
                                 pending_stem_id.clone(),
                                 stem_x,
                                 stem_start,
@@ -5690,8 +5878,8 @@ fn render_part_svg(
                         }
                     }
                     BeamState::End => {
-                        let (start_x, start_y) =
-                            active_beams[level].expect("beam group is validated before rendering");
+                        let (start_x, start_y) = active_beams[beam_state_index].1[level]
+                            .expect("beam group is validated before rendering");
                         scene.add_path(
                             DrawLayer::Beam,
                             format!("beam-{index}-{level}"),
@@ -5711,7 +5899,7 @@ fn render_part_svg(
                         );
                         if level == 1 {
                             for (stem_id, intermediate_x, intermediate_start_y) in
-                                pending_beamed_stems.drain(..)
+                                pending_beamed_stems[beamed_stem_index].1.drain(..)
                             {
                                 let [beam_start, beam_end, ..] = beam_segment_points(
                                     start_x,
@@ -5735,7 +5923,7 @@ fn render_part_svg(
                                 }
                             }
                         }
-                        active_beams[level] = None;
+                        active_beams[beam_state_index].1[level] = None;
                     }
                     BeamState::ForwardHook | BeamState::BackwardHook => {
                         let direction = if beam.state == BeamState::ForwardHook {
@@ -5905,11 +6093,13 @@ fn render_part_svg(
                 );
                 let tie_y = octave_y + 18;
                 if tone_event.tie_stop {
-                    if let Some(position) = pending_tie_paths
+                    if let Some(position) = pending_tie_paths[tie_state_index]
+                        .1
                         .iter()
                         .position(|(pending_tone, _, _)| *pending_tone == tone)
                     {
-                        let (_, start_x, start_y) = pending_tie_paths.remove(position);
+                        let (_, start_x, start_y) =
+                            pending_tie_paths[tie_state_index].1.remove(position);
                         let end_x = tone_x + 5;
                         scene.add_path(
                             DrawLayer::Tie,
@@ -5932,16 +6122,18 @@ fn render_part_svg(
                     }
                 }
                 if tone_event.tie_start {
-                    pending_tie_paths.push((tone, tone_x + 8, tie_y));
+                    pending_tie_paths[tie_state_index]
+                        .1
+                        .push((tone, tone_x + 8, tie_y));
                 }
                 view_top = view_top.min(octave_y - 20);
                 view_bottom = view_bottom.max(octave_y + 37);
             }
             right = right.max(x + 28);
             previous_event_geometry = Some(geometry);
-            x += (event.duration_units * 5).div_ceil(2) as i32;
             index += 1;
         }
+        x = measure_end_x;
         while let Some(text) = measure.texts.get(text_index) {
             pending_texts.push((
                 text,
@@ -6216,7 +6408,7 @@ fn beamed_group_stem_directions(part: &Part) -> Vec<Vec<Option<bool>>> {
         .iter()
         .map(|measure| vec![None; measure.events.len()])
         .collect::<Vec<_>>();
-    let mut group_events = Vec::new();
+    let mut group_events: VoiceBeamEvents = Vec::new();
 
     for (measure_index, measure) in part.measures.iter().enumerate() {
         for (event_index, event) in measure.events.iter().enumerate() {
@@ -6224,27 +6416,29 @@ fn beamed_group_stem_directions(part: &Part) -> Vec<Vec<Option<bool>>> {
                 continue;
             };
             let position = (measure_index, event_index);
+            let group_index = voice_state_index(&mut group_events, &event.voice_id);
             match primary_beam.state {
                 BeamState::Begin => {
-                    group_events.clear();
-                    group_events.push(position);
+                    group_events[group_index].1.clear();
+                    group_events[group_index].1.push(position);
                 }
                 BeamState::Continue => {
-                    if !group_events.is_empty() {
-                        group_events.push(position);
+                    if !group_events[group_index].1.is_empty() {
+                        group_events[group_index].1.push(position);
                     }
                 }
                 BeamState::End => {
-                    if !group_events.is_empty() {
-                        group_events.push(position);
-                        let stems_up = stem_direction_is_up(group_events.iter().flat_map(
-                            |(measure_index, event_index)| {
-                                part.measures[*measure_index].events[*event_index]
-                                    .tones
-                                    .iter()
-                            },
-                        ));
-                        for (measure_index, event_index) in group_events.drain(..) {
+                    if !group_events[group_index].1.is_empty() {
+                        group_events[group_index].1.push(position);
+                        let stems_up =
+                            stem_direction_is_up(group_events[group_index].1.iter().flat_map(
+                                |(measure_index, event_index)| {
+                                    part.measures[*measure_index].events[*event_index]
+                                        .tones
+                                        .iter()
+                                },
+                            ));
+                        for (measure_index, event_index) in group_events[group_index].1.drain(..) {
                             directions[measure_index][event_index] = Some(stems_up);
                         }
                     }
