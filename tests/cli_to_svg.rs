@@ -1764,11 +1764,68 @@ fn preserves_simultaneous_onsets_when_voice_geometry_overlaps() {
             .and_then(|x| x.parse::<f64>().ok())
             .expect("tonehead position")
     };
+    let tonehead_bounds = |tone| {
+        let line = svg
+            .lines()
+            .find(|line| {
+                line.contains("class=\"tonehead\"")
+                    && line.contains(&format!("data-tone=\"{tone}\""))
+            })
+            .expect("tonehead path");
+        let mut coordinates = line
+            .split("transform=\"translate(")
+            .nth(1)
+            .and_then(|transform| transform.split(')').next())
+            .expect("tonehead transform")
+            .split_whitespace()
+            .map(|coordinate| coordinate.parse::<f64>().expect("numeric coordinate"));
+        let (x, y) = (
+            coordinates.next().expect("tonehead x"),
+            coordinates.next().expect("tonehead y"),
+        );
+        (x + 1.0, y + 2.0, x + 11.0, y + 16.0)
+    };
     assert_eq!(
         tonehead_x(0),
         tonehead_x(2),
         "simultaneous onsets must align: {svg}"
     );
+    for (stem_id, other_tone, own_tone, should_stem_up) in
+        [("stem", 2, 0, false), ("stem-1", 0, 2, true)]
+    {
+        let line = svg
+            .lines()
+            .find(|line| line.contains(&format!("id=\"{stem_id}\"")))
+            .expect("stem path");
+        let stem_data = line
+            .split(" d=\"M")
+            .nth(1)
+            .and_then(|path| path.split('"').next())
+            .expect("stem path data");
+        let (stem_x, stem_y) = stem_data.split_once(' ').expect("stem coordinates");
+        let stem_x = stem_x.parse::<f64>().expect("numeric stem x");
+        let (stem_start, stem_end) = stem_y.split_once('V').expect("stem endpoints");
+        let stem_start = stem_start.parse::<f64>().expect("numeric stem start");
+        let stem_end = stem_end.parse::<f64>().expect("numeric stem end");
+        let (left, top, right, bottom) = tonehead_bounds(other_tone);
+        let (_, own_top, _, own_bottom) = tonehead_bounds(own_tone);
+        let stems_on_expected_side = if should_stem_up {
+            stem_end < own_top
+        } else {
+            stem_start > own_bottom
+        };
+        assert!(
+            stems_on_expected_side,
+            "{stem_id} did not flip to the expected vertical side: {line}; {svg}"
+        );
+        assert!(
+            stem_x < left
+                || stem_x > right
+                || stem_start.min(stem_end) > bottom
+                || stem_start.max(stem_end) < top,
+            "{stem_id} overlaps the other Voice's tonehead: {line}; {svg}"
+        );
+    }
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }

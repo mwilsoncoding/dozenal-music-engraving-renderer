@@ -5689,8 +5689,13 @@ fn render_part_svg(
         let mut measure_end_x = x;
         let mut placed_event_geometries: Vec<(f64, EventGeometry)> = Vec::new();
         for (measure_event_index, event) in measure.events.iter().enumerate() {
-            let stems_up = group_stem_directions[measure_index][measure_event_index]
+            let preferred_stems_up = group_stem_directions[measure_index][measure_event_index]
                 .unwrap_or_else(|| stem_direction_is_up(event.tones.iter()));
+            let stems_up = simultaneous_voice_stem_direction(
+                measure_event_index,
+                &measure.events,
+                preferred_stems_up,
+            );
             let beam_state_index = voice_state_index(&mut active_beams, &event.voice_id);
             let tie_state_index = voice_state_index(&mut pending_tie_paths, &event.voice_id);
             let beamed_stem_index = voice_state_index(&mut pending_beamed_stems, &event.voice_id);
@@ -6463,6 +6468,68 @@ fn stem_tone_index(event: &Event, stems_up: bool) -> usize {
             .map(|(tone_index, _)| tone_index)
     }
     .expect("pitched event has a tone")
+}
+
+fn simultaneous_voice_stem_direction(
+    event_index: usize,
+    events: &[Event],
+    preferred_stems_up: bool,
+) -> bool {
+    let event = &events[event_index];
+    if event.tones.is_empty() || event.duration_name == "whole" || !event.beams.is_empty() {
+        return preferred_stems_up;
+    }
+    let preferred_collisions =
+        simultaneous_voice_stem_collisions(event, events, preferred_stems_up);
+    if preferred_collisions == 0 {
+        return preferred_stems_up;
+    }
+    let alternate_collisions =
+        simultaneous_voice_stem_collisions(event, events, !preferred_stems_up);
+    if alternate_collisions < preferred_collisions {
+        !preferred_stems_up
+    } else {
+        preferred_stems_up
+    }
+}
+
+fn simultaneous_voice_stem_collisions(event: &Event, events: &[Event], stems_up: bool) -> usize {
+    let stem_tone_index = stem_tone_index(event, stems_up);
+    let stem_tone = &event.tones[stem_tone_index].tone;
+    let mut event_lane_offsets = [0i32; 10];
+    let mut stem_tone_x = 0;
+    for (tone_index, tone) in event.tones.iter().enumerate() {
+        let octave = usize::from(tone.tone.octave);
+        if tone_index == stem_tone_index {
+            stem_tone_x = event_lane_offsets[octave];
+        }
+        event_lane_offsets[octave] += 12;
+    }
+    let stem_x = stem_tone_x + 6;
+    let (stem_start, stem_end) = stem_endpoints(lane_y(stem_tone.octave), stems_up);
+    let stem_top = stem_start.min(stem_end);
+    let stem_bottom = stem_start.max(stem_end);
+    events
+        .iter()
+        .filter(|peer| {
+            peer.voice_id != event.voice_id
+                && peer.onset_units == event.onset_units
+                && !peer.tones.is_empty()
+        })
+        .flat_map(|peer| {
+            let mut lane_offsets = [0i32; 10];
+            peer.tones.iter().filter_map(move |tone| {
+                let octave = usize::from(tone.tone.octave);
+                let tone_x = lane_offsets[octave];
+                lane_offsets[octave] += 12;
+                let tone_y = lane_y(tone.tone.octave);
+                let head_top = tone_y + 2;
+                let head_bottom = tone_y + 16;
+                let vertical_overlap = stem_top <= head_bottom && head_top <= stem_bottom;
+                (vertical_overlap && (tone_x + 1..=tone_x + 11).contains(&stem_x)).then_some(())
+            })
+        })
+        .count()
 }
 
 fn stem_endpoints(tonehead_y: i32, stems_up: bool) -> (i32, i32) {
