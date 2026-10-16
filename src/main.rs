@@ -5083,9 +5083,8 @@ fn render_part_svg(
                     barline_x,
                     &event_positions,
                 );
-                view_top = view_top.min(-48);
                 active_ending = Some((start_x, label.label.clone()));
-                add_ending_label(&mut scene, &label.label, start_x + 2, -28, measure_index);
+                add_ending_label(&mut scene, &label.label, start_x + 2, 23, measure_index);
             }
             if let Some(ending_end) = &barline.ending_end {
                 let (start_x, _) = active_ending
