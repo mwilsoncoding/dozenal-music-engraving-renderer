@@ -72,6 +72,7 @@ struct MeasureBarline {
 struct EndingMark {
     number: String,
     label: String,
+    discontinue: bool,
 }
 
 struct Part {
@@ -808,9 +809,10 @@ fn parse_repeat_barline(
                         barline.ending_start = Some(EndingMark {
                             number: number.to_owned(),
                             label,
+                            discontinue: false,
                         })
                     }
-                    "stop" | "discontinue" if location != "left" => {
+                    ending_type @ ("stop" | "discontinue") if location != "left" => {
                         if barline.ending_end.is_some() {
                             return Err(element_diagnostic(
                                 child_element,
@@ -820,6 +822,7 @@ fn parse_repeat_barline(
                         barline.ending_end = Some(EndingMark {
                             number: number.to_owned(),
                             label,
+                            discontinue: ending_type == "discontinue",
                         })
                     }
                     "start" => {
@@ -5080,11 +5083,11 @@ fn render_part_svg(
                     barline_x,
                     &event_positions,
                 );
-                view_top = view_top.min(-6);
+                view_top = view_top.min(-48);
                 active_ending = Some((start_x, label.label.clone()));
-                add_ending_label(&mut scene, &label.label, start_x + 2, 14, measure_index);
+                add_ending_label(&mut scene, &label.label, start_x + 2, -28, measure_index);
             }
-            if barline.ending_end.is_some() {
+            if let Some(ending_end) = &barline.ending_end {
                 let (start_x, _) = active_ending
                     .take()
                     .expect("ending spans were validated during parsing");
@@ -5101,7 +5104,11 @@ fn render_part_svg(
                     Vec::new(),
                     PathGeometry::new(
                         Some((start_x, 0)),
-                        format!("M0 27V14H{}V27", end_x - start_x),
+                        if ending_end.discontinue {
+                            format!("M0 27V0H{}", end_x - start_x)
+                        } else {
+                            format!("M0 27V0H{}V27", end_x - start_x)
+                        },
                         PathStyle::MediumOutline,
                     ),
                 );
