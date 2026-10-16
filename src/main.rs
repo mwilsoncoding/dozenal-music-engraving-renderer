@@ -671,6 +671,12 @@ fn parse_repeat_barline(
         let child_element = &elements[*child];
         match child_element.name.as_str() {
             "bar-style" => {
+                if barline.style.is_some() {
+                    return Err(element_diagnostic(
+                        child_element,
+                        "barline contains multiple bar-style elements".to_owned(),
+                    ));
+                }
                 require_no_attributes(child_element)?;
                 let style = leaf_text(child_element)?;
                 if ![
@@ -696,6 +702,12 @@ fn parse_repeat_barline(
                 barline.style = Some(style.to_owned());
             }
             "repeat" => {
+                if barline.repeat_start || barline.repeat_end {
+                    return Err(element_diagnostic(
+                        child_element,
+                        "barline contains multiple repeat elements".to_owned(),
+                    ));
+                }
                 validate_attributes(child_element, &["direction", "times", "winged"])?;
                 require_container_text(child_element)?;
                 if !child_element.children.is_empty() {
@@ -787,12 +799,24 @@ fn parse_repeat_barline(
                     element_diagnostic(child_element, "ending requires a type attribute".to_owned())
                 })? {
                     "start" if location != "right" => {
+                        if barline.ending_start.is_some() {
+                            return Err(element_diagnostic(
+                                child_element,
+                                "barline contains multiple ending starts".to_owned(),
+                            ));
+                        }
                         barline.ending_start = Some(EndingMark {
                             number: number.to_owned(),
                             label,
                         })
                     }
                     "stop" | "discontinue" if location != "left" => {
+                        if barline.ending_end.is_some() {
+                            return Err(element_diagnostic(
+                                child_element,
+                                "barline contains multiple ending endpoints".to_owned(),
+                            ));
+                        }
                         barline.ending_end = Some(EndingMark {
                             number: number.to_owned(),
                             label,
@@ -3311,6 +3335,8 @@ enum PathStyle {
     StaffLine,
     MediumStroke,
     HeavyStroke,
+    DottedStroke,
+    DashedStroke,
     MediumOutline,
     FilledGlyph,
     BravuraGlyph,
@@ -3663,6 +3689,24 @@ struct Scene {
     commands: Vec<DrawCommand>,
 }
 
+fn escape_svg_attribute(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        escaped.push_str(match character {
+            '&' => "&amp;",
+            '<' => "&lt;",
+            '>' => "&gt;",
+            '"' => "&quot;",
+            '\'' => "&apos;",
+            _ => {
+                escaped.push(character);
+                continue;
+            }
+        });
+    }
+    escaped
+}
+
 impl Scene {
     fn new(view_top: i32, view_width: i32, view_height: i32) -> Self {
         Self {
@@ -3759,7 +3803,11 @@ impl Scene {
                 PathMetadata::Duration(value) => write!(svg, " data-duration=\"{value}\""),
                 PathMetadata::ChordRole(value) => write!(svg, " data-chord-role=\"{value}\""),
                 PathMetadata::BeamLevel(value) => write!(svg, " data-level=\"{value}\""),
-                PathMetadata::EndingLabel(value) => write!(svg, " data-ending-label=\"{value}\""),
+                PathMetadata::EndingLabel(value) => write!(
+                    svg,
+                    " data-ending-label=\"{}\"",
+                    escape_svg_attribute(value)
+                ),
             }
             .expect("writing to a String cannot fail");
         }
@@ -3815,6 +3863,12 @@ impl Scene {
             PathStyle::StaffLine => svg.push_str(" stroke=\"#171717\""),
             PathStyle::MediumStroke => svg.push_str(" stroke=\"#171717\" stroke-width=\"1.5\""),
             PathStyle::HeavyStroke => svg.push_str(" stroke=\"#171717\" stroke-width=\"3\""),
+            PathStyle::DottedStroke => {
+                svg.push_str(" stroke=\"#171717\" stroke-width=\"1.5\" stroke-dasharray=\"1 3\"")
+            }
+            PathStyle::DashedStroke => {
+                svg.push_str(" stroke=\"#171717\" stroke-width=\"1.5\" stroke-dasharray=\"5 3\"")
+            }
             PathStyle::MediumOutline => {
                 svg.push_str(" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"")
             }
@@ -4317,13 +4371,50 @@ fn measure_barline_position(
     event_positions: &[i32],
 ) -> i32 {
     match barline.location.as_str() {
-        "left" => event_positions.first().copied().unwrap_or(measure_start_x),
+        "left" => measure_start_x,
         "middle" => event_positions
             .get(barline.event_index)
             .copied()
             .unwrap_or(measure_end_x),
         "right" => measure_end_x,
         _ => unreachable!("barline location is validated during parsing"),
+    }
+}
+
+fn repeat_barline_strokes(
+    style: Option<&str>,
+    repeat_start: bool,
+    x: i32,
+) -> Vec<(i32, PathStyle, &'static str)> {
+    match style.unwrap_or(if repeat_start {
+        "heavy-light"
+    } else {
+        "light-heavy"
+    }) {
+        "regular" => vec![(x, PathStyle::StaffLine, "M0 27.5V108.5")],
+        "dotted" => vec![(x, PathStyle::DottedStroke, "M0 27.5V108.5")],
+        "dashed" => vec![(x, PathStyle::DashedStroke, "M0 27.5V108.5")],
+        "heavy" => vec![(x, PathStyle::HeavyStroke, "M0 27.5V108.5")],
+        "light-light" => vec![
+            (x - 4, PathStyle::MediumStroke, "M0 27.5V108.5"),
+            (x, PathStyle::MediumStroke, "M0 27.5V108.5"),
+        ],
+        "light-heavy" => vec![
+            (x - 4, PathStyle::MediumStroke, "M0 27.5V108.5"),
+            (x, PathStyle::HeavyStroke, "M0 27.5V108.5"),
+        ],
+        "heavy-light" => vec![
+            (x - 4, PathStyle::HeavyStroke, "M0 27.5V108.5"),
+            (x, PathStyle::MediumStroke, "M0 27.5V108.5"),
+        ],
+        "heavy-heavy" => vec![
+            (x - 4, PathStyle::HeavyStroke, "M0 27.5V108.5"),
+            (x, PathStyle::HeavyStroke, "M0 27.5V108.5"),
+        ],
+        "tick" => vec![(x, PathStyle::MediumStroke, "M0 27.5V45.5")],
+        "short" => vec![(x, PathStyle::MediumStroke, "M0 40V96")],
+        "none" => Vec::new(),
+        _ => unreachable!("bar style is validated during parsing"),
     }
 }
 
@@ -4947,31 +5038,19 @@ fn render_part_svg(
                 &event_positions,
             );
             let repeat_start = repeat.repeat_start;
-            let line_x = repeat_x + if repeat_start { 2 } else { -2 };
-            let styled_lines = match (repeat.style.as_deref(), repeat_start) {
-                (Some("heavy-light"), true) => vec![(repeat_x, true), (repeat_x + 4, false)],
-                (Some("light-heavy"), false) => vec![(repeat_x - 4, false), (repeat_x, true)],
-                _ => vec![(line_x, false)],
-            };
-            for (styled_line_x, is_heavy) in styled_lines {
+            for (styled_line_x, style, path) in
+                repeat_barline_strokes(repeat.style.as_deref(), repeat_start, repeat_x)
+            {
                 scene.add_path(
                     DrawLayer::Barline,
                     format!("repeat-barline-{measure_index}-{styled_line_x}"),
                     Some(PathClass::RepeatBarline),
                     Vec::new(),
-                    PathGeometry::new(
-                        Some((styled_line_x, 0)),
-                        "M0 27.5V108.5",
-                        if is_heavy {
-                            PathStyle::HeavyStroke
-                        } else {
-                            PathStyle::MediumStroke
-                        },
-                    ),
+                    PathGeometry::new(Some((styled_line_x, 0)), path, style),
                 );
             }
             for (dot_index, dot_y) in [54, 62].into_iter().enumerate() {
-                let dot_x = line_x + if repeat_start { 5 } else { -8 };
+                let dot_x = repeat_x + if repeat_start { 8 } else { -12 };
                 scene.add_path(
                     DrawLayer::Barline,
                     format!("repeat-dot-{measure_index}-{dot_index}"),

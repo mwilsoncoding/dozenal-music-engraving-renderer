@@ -2580,6 +2580,12 @@ fn renders_repeat_barlines_and_numbered_endings() {
     assert_eq!(svg.matches("class=\"repeat-dot\"").count(), 4, "{svg}");
     assert_eq!(svg.matches("class=\"ending-bracket\"").count(), 2, "{svg}");
     assert_eq!(svg.matches("stroke-width=\"3\"").count(), 2, "{svg}");
+    assert!(
+        svg.find("class=\"repeat-barline\"").unwrap() < svg.find("class=\"ending-label\"").unwrap()
+            && svg.find("class=\"ending-label\"").unwrap()
+                < svg.find("class=\"ending-bracket\"").unwrap(),
+        "repeat and ending marks are out of score order: {svg}"
+    );
     for label in ["1", "2"] {
         assert!(
             svg.contains(&format!("data-ending-label=\"{label}\"")),
@@ -2612,6 +2618,13 @@ fn rejects_malformed_ending_spans_with_score_context() {
         (
             source.replace("<ending number=\"1\" type=\"stop\"/>", ""),
             "ending starts overlap",
+        ),
+        (
+            source.replace(
+                "<ending number=\"1\" type=\"start\"/>",
+                "<ending number=\"1\" type=\"start\"/><ending number=\"3\" type=\"start\"/>",
+            ),
+            "multiple ending starts",
         ),
     ];
 
@@ -2658,7 +2671,7 @@ fn applies_part_edge_repeat_and_dozenal_ending_label_fallbacks() {
         String::from_utf8_lossy(&output.stderr)
     );
     let svg = fs::read_to_string(directory.join("implicit-repeat.svg")).expect("read SVG");
-    assert_eq!(svg.matches("class=\"repeat-barline\"").count(), 3, "{svg}");
+    assert_eq!(svg.matches("class=\"repeat-barline\"").count(), 4, "{svg}");
     assert_eq!(svg.matches("class=\"repeat-dot\"").count(), 4, "{svg}");
     assert!(svg.contains("data-ending-label=\"↊\""), "{svg}");
 
@@ -2669,7 +2682,7 @@ fn applies_part_edge_repeat_and_dozenal_ending_label_fallbacks() {
 fn pairs_custom_ending_text_by_number() {
     let fixture = include_str!("../examples/repeat-endings/repeat-endings.musicxml").replace(
         "<ending number=\"1\" type=\"start\"/>",
-        "<ending number=\"1\" type=\"start\" text=\"First\"/>",
+        "<ending number=\"1\" type=\"start\" text=\"First &amp; Second\"/>",
     );
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
@@ -2686,7 +2699,10 @@ fn pairs_custom_ending_text_by_number() {
         String::from_utf8_lossy(&output.stderr)
     );
     let svg = fs::read_to_string(directory.join("custom-ending-text.svg")).expect("read SVG");
-    assert!(svg.contains("data-ending-label=\"First\""), "{svg}");
+    assert!(
+        svg.contains("data-ending-label=\"First &amp; Second\""),
+        "{svg}"
+    );
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
@@ -2720,6 +2736,52 @@ fn positions_middle_repeat_at_the_following_event_anchor() {
     assert!(svg.contains("id=\"repeat-barline-1-204\""), "{svg}");
 
     fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_every_supported_repeat_bar_style() {
+    let source = include_str!("../examples/repeat-endings/repeat-endings.musicxml");
+    let cases = [
+        ("regular", "class=\"repeat-barline\""),
+        ("dotted", "stroke-dasharray=\"1 3\""),
+        ("dashed", "stroke-dasharray=\"5 3\""),
+        ("heavy", "stroke-width=\"3\""),
+        ("light-light", "class=\"repeat-barline\""),
+        ("light-heavy", "class=\"repeat-barline\""),
+        ("heavy-light", "class=\"repeat-barline\""),
+        ("heavy-heavy", "class=\"repeat-barline\""),
+        ("tick", "M0 27.5V45.5"),
+        ("short", "M0 40V96"),
+        ("none", "class=\"repeat-barline\""),
+    ];
+
+    for (index, (style, expected_svg)) in cases.into_iter().enumerate() {
+        let fixture = source.replace(
+            "<bar-style>heavy-light</bar-style>",
+            &format!("<bar-style>{style}</bar-style>"),
+        );
+        let directory = scratch_dir();
+        fs::create_dir_all(&directory).expect("create test directory");
+        let input = directory.join(format!("repeat-style-{index}.musicxml"));
+        fs::write(&input, fixture).expect("write repeat-style score");
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(
+            output.status.success(),
+            "{style} repeat style failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let svg = fs::read_to_string(directory.join(format!("repeat-style-{index}.svg")))
+            .expect("read SVG");
+        if style == "none" {
+            assert!(!svg.contains("id=\"repeat-barline-0-"), "{svg}");
+        } else {
+            assert!(svg.contains(expected_svg), "{style}: {svg}");
+        }
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
 }
 
 #[test]
