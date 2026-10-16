@@ -610,11 +610,8 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
         }
         require_container_text(&elements[part])?;
         let mut divisions = None;
-        let mut transpositions = vec![0];
         let mut input_staff_count = 1;
-        let mut active_meters = vec![None];
-        let mut active_key_signatures = vec![None];
-        let mut active_clefs = vec![None];
+        let mut active_staff_states = vec![InputStaffState::default()];
         let mut pending_ties = Vec::new();
         let mut active_ending: Option<String> = None;
         let mut active_beams = [false; 5];
@@ -664,10 +661,8 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                         "<staves> must be a positive integer".to_owned(),
                                     )
                                 })?;
-                            transpositions.resize(input_staff_count as usize, 0);
-                            active_meters.resize(input_staff_count as usize, None);
-                            active_key_signatures.resize(input_staff_count as usize, None);
-                            active_clefs.resize(input_staff_count as usize, None);
+                            active_staff_states
+                                .resize(input_staff_count as usize, InputStaffState::default());
                         }
                         let mut saw_divisions = false;
                         let mut saw_staves = false;
@@ -701,9 +696,12 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                             number,
                                             input_staff_count,
                                         )?;
-                                        transpositions[staff_number] = transposition;
+                                        active_staff_states[staff_number].transposition =
+                                            transposition;
                                     } else {
-                                        transpositions.fill(transposition);
+                                        for state in &mut active_staff_states {
+                                            state.transposition = transposition;
+                                        }
                                     }
                                 }
                                 "time" => {
@@ -716,9 +714,11 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                             number,
                                             input_staff_count,
                                         )?;
-                                        active_meters[staff_number] = Some(meter);
+                                        active_staff_states[staff_number].meter = Some(meter);
                                     } else {
-                                        active_meters.fill(Some(meter));
+                                        for state in &mut active_staff_states {
+                                            state.meter = Some(meter);
+                                        }
                                     }
                                 }
                                 "key" => {
@@ -731,9 +731,12 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                             number,
                                             input_staff_count,
                                         )?;
-                                        active_key_signatures[staff_index] = Some(key_signature);
+                                        active_staff_states[staff_index].key_signature =
+                                            Some(key_signature);
                                     } else {
-                                        active_key_signatures.fill(Some(key_signature));
+                                        for state in &mut active_staff_states {
+                                            state.key_signature = Some(key_signature.clone());
+                                        }
                                     }
                                 }
                                 "clef" => {
@@ -746,9 +749,11 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                             number,
                                             input_staff_count,
                                         )?;
-                                        active_clefs[staff_index] = Some(clef);
+                                        active_staff_states[staff_index].clef = Some(clef);
                                     } else {
-                                        active_clefs.fill(Some(clef));
+                                        for state in &mut active_staff_states {
+                                            state.clef = Some(clef.clone());
+                                        }
                                     }
                                 }
                                 _ => {
@@ -778,7 +783,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                             &elements,
                             *child,
                             divisions,
-                            &transpositions,
+                            &active_staff_states,
                             input_staff_count,
                             &mut warnings,
                         )?;
@@ -918,15 +923,8 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                 events,
                 harmonies,
                 texts,
-                meter: active_meters.first().copied().flatten(),
-                input_staff_states: (0..input_staff_count as usize)
-                    .map(|staff_index| InputStaffState {
-                        key_signature: active_key_signatures[staff_index].clone(),
-                        clef: active_clefs[staff_index].clone(),
-                        meter: active_meters[staff_index],
-                        transposition: transpositions[staff_index],
-                    })
-                    .collect(),
+                meter: active_staff_states.first().and_then(|state| state.meter),
+                input_staff_states: active_staff_states.clone(),
                 barlines,
             });
         }
@@ -2901,7 +2899,7 @@ fn parse_note(
     elements: &[Element],
     note: usize,
     divisions: u32,
-    transpositions: &[i32],
+    input_staff_states: &[InputStaffState],
     input_staff_count: u32,
     warnings: &mut Vec<String>,
 ) -> Result<ParsedNote, String> {
@@ -3046,7 +3044,7 @@ fn parse_note(
         0
     };
     let input_staff = input_staff_index as u32 + 1;
-    let transposition = transpositions[input_staff_index];
+    let transposition = input_staff_states[input_staff_index].transposition;
     let mut beams = Vec::new();
     while children
         .get(position)
