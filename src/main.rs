@@ -4022,6 +4022,7 @@ fn render_part_svg(
     let mut meter_index = 0;
     let mut pending_tie_paths: Vec<(Tone, i32, i32)> = Vec::new();
     let mut active_beams = [None; 5];
+    let mut pending_beamed_stems: Vec<(String, i32, i32)> = Vec::new();
     let mut final_barline_x = 0;
     let mut barline_positions = Vec::new();
     let mut chord_symbol_index = 0;
@@ -4201,6 +4202,7 @@ fn render_part_svg(
             } else {
                 format!("stem-{index}")
             };
+            let pending_stem_id = stem_id.clone();
             let stem_x = tone_xs[stem_tone_index] + 6;
             if event.duration_name != "whole" {
                 view_top = view_top.min(stem_start.min(stem_end));
@@ -4245,8 +4247,22 @@ fn render_part_svg(
                 let offset = beam_level_offset(beam.level, primary_beam_slope, beam_direction);
                 let beam_y = stem_end + offset;
                 match beam.state {
-                    BeamState::Begin => active_beams[level] = Some((stem_x, stem_end)),
-                    BeamState::Continue | BeamState::End => {
+                    BeamState::Begin => {
+                        active_beams[level] = Some((stem_x, stem_end));
+                        if level == 1 {
+                            pending_beamed_stems.clear();
+                        }
+                    }
+                    BeamState::Continue => {
+                        if level == 1 {
+                            pending_beamed_stems.push((
+                                pending_stem_id.clone(),
+                                stem_x,
+                                stem_start,
+                            ));
+                        }
+                    }
+                    BeamState::End => {
                         let (start_x, start_y) =
                             active_beams[level].expect("beam group is validated before rendering");
                         scene.add_path(
@@ -4266,11 +4282,33 @@ fn render_part_svg(
                                 PathStyle::Beam,
                             ),
                         );
-                        if beam.state == BeamState::Continue {
-                            active_beams[level] = Some((stem_x, stem_end));
-                        } else {
-                            active_beams[level] = None;
+                        if level == 1 {
+                            for (stem_id, intermediate_x, intermediate_start_y) in
+                                pending_beamed_stems.drain(..)
+                            {
+                                let [beam_start, beam_end, ..] = beam_segment_points(
+                                    start_x,
+                                    f64::from(start_y),
+                                    stem_x,
+                                    f64::from(stem_end),
+                                    beam_direction,
+                                );
+                                let beam_slope =
+                                    (beam_end.1 - beam_start.1) / (beam_end.0 - beam_start.0);
+                                let beam_y = beam_start.1
+                                    + beam_slope * (f64::from(intermediate_x) - beam_start.0);
+                                if let Some(stem) = scene
+                                    .commands
+                                    .iter_mut()
+                                    .find(|command| command.id == stem_id)
+                                {
+                                    stem.geometry.path_data = format!(
+                                        "M{intermediate_x} {intermediate_start_y}V{beam_y:.2}"
+                                    );
+                                }
+                            }
                         }
+                        active_beams[level] = None;
                     }
                     BeamState::ForwardHook | BeamState::BackwardHook => {
                         let direction = if beam.state == BeamState::ForwardHook {

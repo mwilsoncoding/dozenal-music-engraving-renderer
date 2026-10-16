@@ -273,6 +273,94 @@ fn renders_multiple_parts_as_aligned_named_staves() {
         second_part_tone.contains("data-octave=\"3\""),
         "{second_part_tone}"
     );
+    let beams = svg
+        .lines()
+        .filter(|line| line.contains("class=\"beam\""))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        beams.len(),
+        8,
+        "one primary and secondary beam per group: {svg}"
+    );
+    for beam in beams {
+        let coordinates = beam
+            .split(" d=\"M")
+            .nth(1)
+            .and_then(|path| path.split('"').next())
+            .expect("beam path data");
+        let endpoints = coordinates
+            .split(['M', 'L'])
+            .filter(|coordinate| !coordinate.is_empty())
+            .take(2)
+            .map(|coordinate| {
+                coordinate
+                    .split_whitespace()
+                    .next()
+                    .expect("beam x coordinate")
+                    .parse::<f64>()
+                    .expect("numeric beam x coordinate")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(endpoints.len(), 2, "{beam}");
+        assert!(
+            (endpoints[1] - endpoints[0]).abs() > 30.0,
+            "beam should continue across the group to its end declaration: {beam}"
+        );
+    }
+    let beam_path = svg
+        .lines()
+        .find(|line| line.contains("id=\"part-1-beam-9-1\""))
+        .expect("multi-octave primary beam path");
+    let beam_points = beam_path
+        .split(" d=\"M")
+        .nth(1)
+        .and_then(|path| path.split('"').next())
+        .expect("beam path data")
+        .split(['M', 'L'])
+        .filter(|point| !point.is_empty())
+        .take(2)
+        .map(|point| {
+            let mut coordinates = point.split_whitespace();
+            (
+                coordinates
+                    .next()
+                    .expect("beam x coordinate")
+                    .parse::<f64>()
+                    .expect("numeric beam x coordinate"),
+                coordinates
+                    .next()
+                    .expect("beam y coordinate")
+                    .parse::<f64>()
+                    .expect("numeric beam y coordinate"),
+            )
+        })
+        .collect::<Vec<_>>();
+    for stem_id in ["part-1-stem-7", "part-1-stem-8"] {
+        let stem_path = svg
+            .lines()
+            .find(|line| line.contains(&format!("id=\"{stem_id}\"")))
+            .expect("continuing stem path");
+        let stem_data = stem_path
+            .split(" d=\"M")
+            .nth(1)
+            .and_then(|path| path.split('"').next())
+            .expect("stem path data");
+        let (stem_x, stem_y) = stem_data.split_once(' ').expect("stem move coordinates");
+        let stem_x = stem_x.parse::<f64>().expect("numeric stem x coordinate");
+        let stem_end_y = stem_y
+            .split('V')
+            .nth(1)
+            .expect("stem endpoint")
+            .parse::<f64>()
+            .expect("numeric stem endpoint");
+        let beam_y = beam_points[0].1
+            + (beam_points[1].1 - beam_points[0].1) * (stem_x - beam_points[0].0)
+                / (beam_points[1].0 - beam_points[0].0);
+        assert!(
+            (stem_end_y - beam_y).abs() < 0.1,
+            "continuing stem should meet, not cross, the interpolated beam line: {stem_path}; {beam_path}"
+        );
+    }
     let barline_xs = svg
         .lines()
         .filter(|line| line.contains("-barline-"))
