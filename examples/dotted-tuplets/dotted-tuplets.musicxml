@@ -14,22 +14,22 @@
         <duration>84</duration><voice>1</voice><type>quarter</type><dot/><dot/>
       </note>
       <note>
-        <pitch><step>G</step><octave>4</octave></pitch>
-        <duration>12</duration><voice>1</voice><type>16th</type>
-      </note>
-      <note>
         <pitch><step>D</step><octave>4</octave></pitch>
-        <duration>32</duration><voice>1</voice><type>quarter</type>
-        <time-modification><actual-notes>3</actual-notes><normal-notes>2</normal-notes></time-modification>
-        <notations><tuplet type="start" number="1"><tuplet-actual><tuplet-number>3</tuplet-number><tuplet-type>quarter</tuplet-type></tuplet-actual><tuplet-normal><tuplet-number>2</tuplet-number><tuplet-type>quarter</tuplet-type></tuplet-normal></tuplet></notations>
+        <duration>12</duration><voice>1</voice><type>16th</type>
       </note>
       <note>
         <pitch><step>E</step><octave>4</octave></pitch>
         <duration>32</duration><voice>1</voice><type>quarter</type>
         <time-modification><actual-notes>3</actual-notes><normal-notes>2</normal-notes></time-modification>
+        <notations><tuplet type="start" number="1"><tuplet-actual><tuplet-number>3</tuplet-number><tuplet-type>quarter</tuplet-type></tuplet-actual><tuplet-normal><tuplet-number>2</tuplet-number><tuplet-type>quarter</tuplet-type></tuplet-normal></tuplet></notations>
       </note>
       <note>
         <pitch><step>F</step><octave>4</octave></pitch>
+        <duration>32</duration><voice>1</voice><type>quarter</type>
+        <time-modification><actual-notes>3</actual-notes><normal-notes>2</normal-notes></time-modification>
+      </note>
+      <note>
+        <pitch><step>G</step><octave>4</octave></pitch>
         <duration>32</duration><voice>1</voice><type>quarter</type>
         <time-modification><actual-notes>3</actual-notes><normal-notes>2</normal-notes></time-modification>
         <notations><tuplet type="stop" number="1"/></notations>
