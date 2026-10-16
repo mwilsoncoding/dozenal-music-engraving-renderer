@@ -39,7 +39,25 @@ fn renders_each_input_staff_to_its_own_svg() {
             directory.join(format!("input-staff-routing-staff-{staff_number}.svg")),
         )
         .expect("read separate Input Staff SVG");
-        assert_eq!(svg.matches("class=\"tonehead\"").count(), 1, "{svg}");
+        assert_eq!(svg.matches("class=\"tonehead\"").count(), 4, "{svg}");
+        if staff_number == 1 {
+            let tonehead_xs = svg
+                .lines()
+                .filter(|line| line.contains("class=\"tonehead\""))
+                .map(|line| {
+                    line.split("transform=\"translate(")
+                        .nth(1)
+                        .and_then(|transform| transform.split_whitespace().next())
+                        .and_then(|x| x.parse::<f64>().ok())
+                        .expect("numeric tonehead position")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                tonehead_xs[1] - tonehead_xs[0],
+                80.0,
+                "filtered events must preserve source timing: {tonehead_xs:?}"
+            );
+        }
         let expected_text_glyphs = if staff_number == 1 { 6 } else { 11 };
         assert_eq!(
             svg.matches("class=\"text-glyph\"").count(),
@@ -77,7 +95,23 @@ fn renders_each_input_staff_to_its_own_svg() {
     );
     let combined_svg =
         fs::read_to_string(directory.join("input-staff-routing.svg")).expect("read combined SVG");
-    assert_eq!(combined_svg.matches("class=\"tonehead\"").count(), 2);
+    assert_eq!(combined_svg.matches("class=\"tonehead\"").count(), 8);
+
+    let explicit_combined_output = directory.join("explicit-combined.svg");
+    let explicit_combined = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--input-staff-mode")
+        .arg("combine")
+        .arg("--output")
+        .arg(&explicit_combined_output)
+        .output()
+        .expect("run explicit combined CLI");
+    assert!(
+        explicit_combined.status.success(),
+        "explicit combined render failed: {}",
+        String::from_utf8_lossy(&explicit_combined.stderr)
+    );
+    assert!(explicit_combined_output.exists());
 
     let explicit_output = directory.join("named-score.svg");
     let explicit = Command::new(env!("CARGO_BIN_EXE_domunor"))
@@ -176,7 +210,7 @@ fn splits_cross_input_staff_chords_only_in_separate_mode() {
             directory.join(format!("cross-staff-chord-staff-{staff_number}.svg")),
         )
         .expect("read split chord SVG");
-        assert_eq!(svg.matches("class=\"tonehead\"").count(), 1, "{svg}");
+        assert_eq!(svg.matches("class=\"tonehead\"").count(), 4, "{svg}");
     }
 
     fs::remove_dir_all(directory).expect("remove test directory");
@@ -200,9 +234,47 @@ fn rejects_notes_on_undeclared_input_staves_with_context() {
         .expect("run CLI");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
-    assert!(stderr.contains("Input Staff 3 is not declared"), "{stderr}");
+    assert!(
+        stderr.contains("Input Staff number must be between 1 and 2, not \"3\""),
+        "{stderr}"
+    );
     assert!(stderr.contains("line"), "{stderr}");
     assert!(!directory.join("undeclared-input-staff.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_key_and_clef_state_for_undeclared_input_staves() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let source = include_str!("../examples/input-staff-routing/input-staff-routing.musicxml");
+
+    for (label, marker, replacement) in [
+        ("key", "<key number=\"2\">", "<key number=\"3\">"),
+        ("clef", "<clef number=\"2\">", "<clef number=\"3\">"),
+    ] {
+        let input = directory.join(format!("undeclared-{label}-staff.musicxml"));
+        let fixture = source.replace(marker, replacement);
+        fs::write(&input, fixture).expect("write undeclared state score");
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{label} staff was accepted");
+        assert!(
+            stderr.contains("Input Staff number must be between 1 and 2"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("/{label}[@number='3']")),
+            "{stderr}"
+        );
+        assert!(!directory
+            .join(format!("undeclared-{label}-staff.svg"))
+            .exists());
+    }
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }

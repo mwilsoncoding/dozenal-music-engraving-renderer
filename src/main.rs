@@ -24,6 +24,7 @@ struct Event {
     dots: u8,
     beams: Vec<BeamMark>,
     input_staff: u32,
+    is_spacer: bool,
 }
 
 #[derive(Clone)]
@@ -60,7 +61,7 @@ struct Measure {
     harmonies: Vec<PositionedHarmony>,
     texts: Vec<PositionedText>,
     meter: Option<Meter>,
-    staff_meters: Vec<Option<Meter>>,
+    input_staff_states: Vec<InputStaffState>,
     barlines: Vec<MeasureBarline>,
 }
 
@@ -189,6 +190,28 @@ struct Meter {
     beat_type: u8,
 }
 
+#[derive(Clone, Default)]
+struct InputStaffState {
+    key_signature: Option<KeySignature>,
+    clef: Option<InputClef>,
+    meter: Option<Meter>,
+    transposition: i32,
+}
+
+#[derive(Clone)]
+struct KeySignature {
+    fifths: i8,
+    cancel: Option<u8>,
+    mode: Option<String>,
+}
+
+#[derive(Clone)]
+struct InputClef {
+    sign: String,
+    line: Option<u8>,
+    octave_change: i8,
+}
+
 struct Score {
     parts: Vec<Part>,
     warnings: Vec<String>,
@@ -220,12 +243,6 @@ fn run() -> Result<(), String> {
     let score = parse_score_with_mode(&source, options.input_staff_mode)
         .map_err(|error| format!("{}: {error}", options.input_path.display()))?;
     let mut warnings = score.warnings.clone();
-    for warning in &warnings {
-        eprintln!(
-            "domunor: warning: {}: {warning}",
-            options.input_path.display()
-        );
-    }
     let output_path = options.output_path.unwrap_or_else(|| {
         let mut path = options.input_path.clone();
         path.set_extension("svg");
@@ -238,11 +255,10 @@ fn run() -> Result<(), String> {
         return Err("output path must have the .svg extension".to_owned());
     }
 
-    match options.input_staff_mode {
+    let rendered_outputs = match options.input_staff_mode {
         InputStaffMode::Combine => {
             let svg = render_svg(&score, &mut warnings);
-            fs::write(&output_path, svg)
-                .map_err(|error| format!("cannot write {}: {error}", output_path.display()))
+            vec![(output_path, svg)]
         }
         InputStaffMode::Separate => {
             let staff_count = score
@@ -251,16 +267,28 @@ fn run() -> Result<(), String> {
                 .map(|part| part.input_staff_count)
                 .max()
                 .unwrap_or(1);
+            let mut outputs = Vec::new();
             for staff_number in 1..=staff_count {
                 let path = separate_staff_output_path(&output_path, staff_number);
                 let staff_score = score_for_input_staff(&score, staff_number);
                 let svg = render_svg(&staff_score, &mut warnings);
-                fs::write(&path, svg)
-                    .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+                outputs.push((path, svg));
             }
-            Ok(())
+            outputs
         }
+    };
+
+    for warning in &warnings {
+        eprintln!(
+            "domunor: warning: {}: {warning}",
+            options.input_path.display()
+        );
     }
+    for (path, svg) in rendered_outputs {
+        fs::write(&path, svg)
+            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn parse_args() -> Result<CliOptions, String> {
@@ -334,6 +362,24 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
                 .measures
                 .iter()
                 .map(|measure| {
+                    let staff_state = measure
+                        .input_staff_states
+                        .get(staff_number as usize - 1)
+                        .map(|state| InputStaffState {
+                            key_signature: state.key_signature.as_ref().map(|key| KeySignature {
+                                fifths: key.fifths,
+                                cancel: key.cancel,
+                                mode: key.mode.clone(),
+                            }),
+                            clef: state.clef.as_ref().map(|clef| InputClef {
+                                sign: clef.sign.clone(),
+                                line: clef.line,
+                                octave_change: clef.octave_change,
+                            }),
+                            meter: state.meter,
+                            transposition: state.transposition,
+                        })
+                        .unwrap_or_default();
                     let mut events = Vec::new();
                     let mut event_index_map = Vec::with_capacity(measure.events.len() + 1);
                     for event in &measure.events {
@@ -342,12 +388,20 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
                         if selected.tones.is_empty() {
                             if selected.input_staff == staff_number {
                                 events.push(selected);
+                            } else {
+                                selected.is_spacer = true;
+                                selected.beams.clear();
+                                events.push(selected);
                             }
                         } else {
                             selected
                                 .tones
                                 .retain(|tone| tone.input_staff == staff_number);
                             if !selected.tones.is_empty() {
+                                events.push(selected);
+                            } else {
+                                selected.is_spacer = true;
+                                selected.beams.clear();
                                 events.push(selected);
                             }
                         }
@@ -396,12 +450,13 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
                         events,
                         harmonies,
                         texts,
-                        meter: measure
-                            .staff_meters
-                            .get(staff_number as usize - 1)
-                            .copied()
-                            .flatten(),
-                        staff_meters: measure.staff_meters.clone(),
+                        meter: staff_state.meter,
+                        input_staff_states: vec![InputStaffState {
+                            key_signature: staff_state.key_signature,
+                            clef: staff_state.clef,
+                            meter: staff_state.meter,
+                            transposition: staff_state.transposition,
+                        }],
                         barlines,
                     }
                 })
@@ -558,6 +613,8 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
         let mut transpositions = vec![0];
         let mut input_staff_count = 1;
         let mut active_meters = vec![None];
+        let mut active_key_signatures = vec![None];
+        let mut active_clefs = vec![None];
         let mut pending_ties = Vec::new();
         let mut active_ending: Option<String> = None;
         let mut active_beams = [false; 5];
@@ -616,6 +673,8 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                         })?;
                                     transpositions.resize(input_staff_count as usize, 0);
                                     active_meters.resize(input_staff_count as usize, None);
+                                    active_key_signatures.resize(input_staff_count as usize, None);
+                                    active_clefs.resize(input_staff_count as usize, None);
                                     saw_staves = true;
                                 }
                                 "transpose" => {
@@ -623,7 +682,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                     if let Some(number) =
                                         optional_attribute(attribute_element, "number")
                                     {
-                                        let staff_number = parse_input_staff_number(
+                                        let staff_number = parse_input_staff_index(
                                             attribute_element,
                                             number,
                                             input_staff_count,
@@ -638,7 +697,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                     if let Some(number) =
                                         optional_attribute(attribute_element, "number")
                                     {
-                                        let staff_number = parse_input_staff_number(
+                                        let staff_number = parse_input_staff_index(
                                             attribute_element,
                                             number,
                                             input_staff_count,
@@ -649,10 +708,34 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                     }
                                 }
                                 "key" => {
-                                    validate_key_staff(&elements, *attribute, input_staff_count)?
+                                    let key_signature = parse_key_signature(&elements, *attribute)?;
+                                    if let Some(number) =
+                                        optional_attribute(attribute_element, "number")
+                                    {
+                                        let staff_index = parse_input_staff_index(
+                                            attribute_element,
+                                            number,
+                                            input_staff_count,
+                                        )?;
+                                        active_key_signatures[staff_index] = Some(key_signature);
+                                    } else {
+                                        active_key_signatures.fill(Some(key_signature));
+                                    }
                                 }
                                 "clef" => {
-                                    validate_clef_staff(&elements, *attribute, input_staff_count)?
+                                    let clef = parse_input_clef(&elements, *attribute)?;
+                                    if let Some(number) =
+                                        optional_attribute(attribute_element, "number")
+                                    {
+                                        let staff_index = parse_input_staff_index(
+                                            attribute_element,
+                                            number,
+                                            input_staff_count,
+                                        )?;
+                                        active_clefs[staff_index] = Some(clef);
+                                    } else {
+                                        active_clefs.fill(Some(clef));
+                                    }
                                 }
                                 _ => {
                                     return Err(element_diagnostic(
@@ -822,7 +905,14 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                 harmonies,
                 texts,
                 meter: active_meters.first().copied().flatten(),
-                staff_meters: active_meters.clone(),
+                input_staff_states: (0..input_staff_count as usize)
+                    .map(|staff_index| InputStaffState {
+                        key_signature: active_key_signatures[staff_index].clone(),
+                        clef: active_clefs[staff_index].clone(),
+                        meter: active_meters[staff_index],
+                        transposition: transpositions[staff_index],
+                    })
+                    .collect(),
                 barlines,
             });
         }
@@ -1264,19 +1354,9 @@ fn parse_direction(
                 after_direction_types = true;
                 let value = leaf_text(child_element)?;
                 if child_element.name == "staff" {
-                    let staff = value
-                        .parse::<u32>()
-                        .ok()
-                        .filter(|staff| *staff > 0 && *staff <= input_staff_count)
-                        .ok_or_else(|| {
-                            element_diagnostic(
-                                child_element,
-                                format!(
-                                    "direction staff must be between 1 and {input_staff_count}"
-                                ),
-                            )
-                        })?;
-                    input_staff = Some(staff);
+                    let staff_index =
+                        parse_input_staff_index(child_element, value, input_staff_count)?;
+                    input_staff = Some(staff_index as u32 + 1);
                 }
             }
             "sound" if saw_direction_type => {
@@ -2406,17 +2486,9 @@ fn parse_chord_symbol(
         .is_some_and(|child| elements[*child].name == "staff")
     {
         let staff = children[next_child];
-        let value = leaf_text(&elements[staff])?
-            .parse::<u32>()
-            .ok()
-            .filter(|value| *value > 0 && *value <= input_staff_count)
-            .ok_or_else(|| {
-                element_diagnostic(
-                    &elements[staff],
-                    format!("harmony staff must be between 1 and {input_staff_count}"),
-                )
-            })?;
-        input_staff = Some(value);
+        let value = leaf_text(&elements[staff])?;
+        let staff_index = parse_input_staff_index(&elements[staff], value, input_staff_count)?;
+        input_staff = Some(staff_index as u32 + 1);
         next_child += 1;
     }
     if next_child != children.len() {
@@ -2591,7 +2663,7 @@ fn parse_time(elements: &[Element], time: usize) -> Result<Meter, String> {
     })
 }
 
-fn parse_input_staff_number(
+fn parse_input_staff_index(
     element: &Element,
     number: &str,
     input_staff_count: u32,
@@ -2611,16 +2683,9 @@ fn parse_input_staff_number(
     Ok(staff_number as usize - 1)
 }
 
-fn validate_key_staff(
-    elements: &[Element],
-    key: usize,
-    input_staff_count: u32,
-) -> Result<(), String> {
+fn parse_key_signature(elements: &[Element], key: usize) -> Result<KeySignature, String> {
     let element = &elements[key];
     validate_attributes(element, &["number"])?;
-    if let Some(number) = optional_attribute(element, "number") {
-        parse_input_staff_number(element, number, input_staff_count)?;
-    }
     require_container_text(element)?;
     if element.children.is_empty() {
         return Err(element_diagnostic(
@@ -2629,6 +2694,9 @@ fn validate_key_staff(
         ));
     }
     let mut previous_order = 0;
+    let mut cancel = None;
+    let mut fifths = None;
+    let mut mode = None;
     for child in &element.children {
         let child = &elements[*child];
         let order = match child.name.as_str() {
@@ -2651,12 +2719,17 @@ fn validate_key_staff(
         previous_order = order;
         let value = leaf_text(child)?;
         match child.name.as_str() {
-            "cancel" if value.parse::<u8>().ok().is_some_and(|value| value <= 7) => {}
+            "cancel" if value.parse::<u8>().ok().is_some_and(|value| value <= 7) => {
+                cancel = value.parse::<u8>().ok();
+            }
             "fifths"
                 if value
                     .parse::<i8>()
                     .ok()
-                    .is_some_and(|value| (-7..=7).contains(&value)) => {}
+                    .is_some_and(|value| (-7..=7).contains(&value)) =>
+            {
+                fifths = value.parse::<i8>().ok();
+            }
             "mode"
                 if matches!(
                     value,
@@ -2670,7 +2743,10 @@ fn validate_key_staff(
                         | "ionian"
                         | "locrian"
                         | "none"
-                ) => {}
+                ) =>
+            {
+                mode = Some(value.to_owned())
+            }
             "cancel" | "fifths" | "mode" => {
                 return Err(element_diagnostic(
                     child,
@@ -2680,44 +2756,59 @@ fn validate_key_staff(
             _ => unreachable!(),
         }
     }
-    if !element
-        .children
-        .iter()
-        .any(|child| elements[*child].name == "fifths")
-    {
-        return Err(element_diagnostic(
-            element,
-            "key requires <fifths>".to_owned(),
-        ));
-    }
-    Ok(())
+    let fifths =
+        fifths.ok_or_else(|| element_diagnostic(element, "key requires <fifths>".to_owned()))?;
+    Ok(KeySignature {
+        fifths,
+        cancel,
+        mode,
+    })
 }
 
-fn validate_clef_staff(
-    elements: &[Element],
-    clef: usize,
-    input_staff_count: u32,
-) -> Result<(), String> {
+fn parse_input_clef(elements: &[Element], clef: usize) -> Result<InputClef, String> {
     let element = &elements[clef];
     validate_attributes(element, &["number"])?;
-    if let Some(number) = optional_attribute(element, "number") {
-        parse_input_staff_number(element, number, input_staff_count)?;
-    }
     require_container_text(element)?;
-    let mut sign = false;
+    let mut sign = None;
+    let mut line = None;
+    let mut octave_change = 0;
+    let mut previous_order = 0;
     for child in &element.children {
         let child = &elements[*child];
         let value = leaf_text(child)?;
+        let order = match child.name.as_str() {
+            "sign" => 1,
+            "line" => 2,
+            "clef-octave-change" => 3,
+            _ => {
+                return Err(element_diagnostic(
+                    child,
+                    format!("unsupported clef element <{}>", child.name),
+                ));
+            }
+        };
+        if order <= previous_order {
+            return Err(element_diagnostic(
+                child,
+                "clef elements are duplicated or out of order".to_owned(),
+            ));
+        }
+        previous_order = order;
         match child.name.as_str() {
-            "sign" if !sign && matches!(value, "G" | "F" | "C" | "percussion" | "tab" | "none") => {
-                sign = true;
+            "sign" if matches!(value, "G" | "F" | "C" | "percussion" | "tab" | "none") => {
+                sign = Some(value.to_owned());
             }
             "line"
                 if value
                     .parse::<u8>()
                     .ok()
-                    .is_some_and(|line| (1..=5).contains(&line)) => {}
-            "clef-octave-change" if value.parse::<i8>().is_ok() => {}
+                    .is_some_and(|line| (1..=5).contains(&line)) =>
+            {
+                line = value.parse::<u8>().ok();
+            }
+            "clef-octave-change" if value.parse::<i8>().is_ok() => {
+                octave_change = value.parse::<i8>().unwrap();
+            }
             "sign" | "line" | "clef-octave-change" => {
                 return Err(element_diagnostic(
                     child,
@@ -2732,13 +2823,11 @@ fn validate_clef_staff(
             }
         }
     }
-    if !sign {
-        return Err(element_diagnostic(
-            element,
-            "clef requires <sign>".to_owned(),
-        ));
-    }
-    Ok(())
+    Ok(InputClef {
+        sign: sign.ok_or_else(|| element_diagnostic(element, "clef requires <sign>".to_owned()))?,
+        line,
+        octave_change,
+    })
 }
 
 fn validate_beam_group(
@@ -2934,32 +3023,16 @@ fn parse_note(
         .get(position)
         .filter(|child| elements[**child].name == "staff")
         .copied();
-    let input_staff = if let Some(staff) = input_staff_element {
+    let input_staff_index = if let Some(staff) = input_staff_element {
         position += 1;
         require_no_attributes(&elements[staff])?;
-        leaf_text(&elements[staff])?
-            .parse::<u32>()
-            .ok()
-            .filter(|staff| *staff > 0)
-            .ok_or_else(|| {
-                element_diagnostic(
-                    &elements[staff],
-                    "note staff must be a positive integer".to_owned(),
-                )
-            })?
+        let value = leaf_text(&elements[staff])?;
+        parse_input_staff_index(&elements[staff], value, input_staff_count)?
     } else {
-        1
+        0
     };
-    if input_staff > input_staff_count {
-        let staff_element = input_staff_element.unwrap_or(note);
-        return Err(element_diagnostic(
-            &elements[staff_element],
-            format!(
-                "Input Staff {input_staff} is not declared; Part declares {input_staff_count} Input Staff(s)"
-            ),
-        ));
-    }
-    let transposition = transpositions[input_staff as usize - 1];
+    let input_staff = input_staff_index as u32 + 1;
+    let transposition = transpositions[input_staff_index];
     let mut beams = Vec::new();
     while children
         .get(position)
@@ -3164,6 +3237,7 @@ fn parse_note(
             dots: duration_marks,
             beams,
             input_staff,
+            is_spacer: false,
         },
         chord_marker,
     })
@@ -4239,6 +4313,9 @@ fn event_geometry(
 ) -> EventGeometry {
     let mut primary = Vec::new();
     let mut incoming = Vec::new();
+    if event.is_spacer {
+        return EventGeometry { primary, incoming };
+    }
     if event.tones.is_empty() {
         let glyph = bravura_glyphs::rest(event.duration_name);
         let rest_y = rest_origin_y(event.duration_name, glyph.bounds);
@@ -5490,6 +5567,11 @@ fn render_part_svg(
                 );
                 harmony_index += 1;
                 chord_symbol_index += 1;
+            }
+            if event.is_spacer {
+                x += (event.duration_units * 5).div_ceil(2) as i32;
+                index += 1;
+                continue;
             }
             for component in geometry.all() {
                 right = right.max(component.right.ceil() as i32);
