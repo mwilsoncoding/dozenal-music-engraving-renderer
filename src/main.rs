@@ -37,6 +37,7 @@ struct Event {
     duration_name: &'static str,
     dots: u8,
     is_grace: bool,
+    measure_rest: bool,
     grace_slash: bool,
     glyph_scale: f64,
     beams: Vec<BeamMark>,
@@ -158,8 +159,15 @@ struct Measure {
     harmonies: Vec<PositionedHarmony>,
     texts: Vec<PositionedText>,
     meter: Option<Meter>,
+    multiple_rest: Option<MultipleRest>,
     input_staff_states: Vec<InputStaffState>,
     barlines: Vec<MeasureBarline>,
+}
+
+#[derive(Clone)]
+struct MultipleRest {
+    count: u32,
+    use_symbols: bool,
 }
 
 #[derive(Clone, Default)]
@@ -549,6 +557,7 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
                         harmonies,
                         texts,
                         meter: staff_state.meter,
+                        multiple_rest: measure.multiple_rest.clone(),
                         input_staff_states: vec![InputStaffState {
                             key_signature: staff_state.key_signature,
                             clef: staff_state.clef,
@@ -800,7 +809,11 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
         let mut active_ending: Option<String> = None;
         let mut active_beams: VoiceState<[bool; 5]> = Vec::new();
         let mut measures = Vec::new();
-        for measure_id in &elements[part].children {
+        let mut multiple_rest_remaining: u32 = 0;
+        let part_measure_count = elements[part].children.len();
+        for (measure_index, measure_id) in elements[part].children.iter().enumerate() {
+            let inside_multiple_rest = multiple_rest_remaining > 0;
+            multiple_rest_remaining = multiple_rest_remaining.saturating_sub(1);
             let measure_element = &elements[*measure_id];
             if measure_element.name != "measure" {
                 return Err(element_diagnostic(
@@ -808,15 +821,36 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                     "unsupported shape: <part> may contain only <measure> elements".to_owned(),
                 ));
             }
-            required_attribute(measure_element, "number")?;
+            validate_attributes(
+                measure_element,
+                &["number", "implicit", "non-controlling", "width"],
+            )?;
+            if optional_attribute(measure_element, "number").is_none() {
+                return Err(element_diagnostic(
+                    measure_element,
+                    "unsupported shape: <measure> requires a number attribute".to_owned(),
+                ));
+            }
             require_container_text(measure_element)?;
+            let implicit = match optional_attribute(measure_element, "implicit").unwrap_or("no") {
+                "yes" => true,
+                "no" => false,
+                value => {
+                    return Err(element_diagnostic(
+                        measure_element,
+                        format!("measure implicit must be 'yes' or 'no', not {value:?}"),
+                    ));
+                }
+            };
             let mut events: Vec<Event> = Vec::new();
             let mut tuplets = Vec::new();
             let mut harmonies = Vec::new();
             let mut texts = Vec::new();
             let mut barlines = Vec::new();
+            let mut multiple_rest = None;
             let mut event_sources = Vec::new();
             let mut cursor_units = 0.0;
+            let mut maximum_cursor_units: f64 = 0.0;
             let mut chord_targets: VoiceState<usize> = Vec::new();
             let mut active_tuplets: VoiceState<Option<ActiveTuplet>> = Vec::new();
             for child in &measure_element.children {
@@ -872,6 +906,17 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                 }
                                 "staves" if !saw_staves => {
                                     saw_staves = true;
+                                }
+                                "measure-style" => {
+                                    if multiple_rest.is_some() {
+                                        return Err(element_diagnostic(
+                                            attribute_element,
+                                            "multiple <measure-style> declarations are unsupported"
+                                                .to_owned(),
+                                        ));
+                                    }
+                                    multiple_rest =
+                                        Some(parse_multiple_rest(&elements, *attribute)?);
                                 }
                                 "transpose" => {
                                     let transposition = transpose_semitones(&elements, *attribute)?;
@@ -959,6 +1004,12 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                         }
                     }
                     "note" => {
+                        if inside_multiple_rest {
+                            return Err(element_diagnostic(
+                                element,
+                                "music is not allowed inside a multiple-rest span".to_owned(),
+                            ));
+                        }
                         let divisions = divisions.ok_or_else(|| {
                             element_diagnostic(
                                 element,
@@ -978,6 +1029,49 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                             },
                             &mut warnings,
                         )?;
+                        if parsed.event.measure_rest {
+                            if cursor_units > f64::EPSILON
+                                || maximum_cursor_units > f64::EPSILON
+                                || events.iter().any(|event| event.duration_units > 0.0)
+                            {
+                                return Err(element_diagnostic(
+                                    element,
+                                    "single-measure Rest must be the only advancing event in its measure"
+                                        .to_owned(),
+                                ));
+                            }
+                            if let Some(meter) =
+                                active_staff_states.first().and_then(|state| state.meter)
+                            {
+                                let expected_units =
+                                    f64::from(meter.beats) * 64.0 / f64::from(meter.beat_type);
+                                let encoded_duration = element
+                                    .children
+                                    .iter()
+                                    .find(|child| elements[**child].name == "duration")
+                                    .and_then(|duration| {
+                                        elements[*duration].text.trim().parse::<u32>().ok()
+                                    });
+                                let expected_ticks = expected_units * f64::from(divisions) / 16.0;
+                                if encoded_duration.is_none_or(|ticks| {
+                                    (f64::from(ticks) - expected_ticks).abs() > f64::EPSILON
+                                }) {
+                                    warnings.push(element_diagnostic(
+                                        element,
+                                        format!(
+                                            "single-measure Rest encoded duration does not match meter span {expected_units}"
+                                        ),
+                                    ));
+                                }
+                                parsed.event.duration_units = expected_units;
+                            }
+                        } else if events.iter().any(|event| event.measure_rest) {
+                            return Err(element_diagnostic(
+                                element,
+                                "single-measure Rest must be the only advancing event in its measure"
+                                    .to_owned(),
+                            ));
+                        }
                         let tuplet_event_index = parsed
                             .chord_marker
                             .and_then(|_| {
@@ -1113,9 +1207,24 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                 chord_targets.retain(|(voice, _)| voice != &voice_id);
                             }
                             cursor_units += duration_units;
+                            maximum_cursor_units = maximum_cursor_units.max(cursor_units);
                         }
                     }
                     "backup" | "forward" => {
+                        if inside_multiple_rest {
+                            return Err(element_diagnostic(
+                                element,
+                                "cursor movement is not allowed inside a multiple-rest span"
+                                    .to_owned(),
+                            ));
+                        }
+                        if events.iter().any(|event| event.measure_rest) {
+                            return Err(element_diagnostic(
+                                element,
+                                "single-measure Rest must be the only advancing event in its measure"
+                                    .to_owned(),
+                            ));
+                        }
                         let movement_units =
                             parse_cursor_movement(&elements, *child, divisions, input_staff_count)?;
                         if element.name == "backup" {
@@ -1129,6 +1238,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                             cursor_units -= movement_units;
                         } else {
                             cursor_units += movement_units;
+                            maximum_cursor_units = maximum_cursor_units.max(cursor_units);
                         }
                     }
                     "harmony" => {
@@ -1200,11 +1310,54 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                     "tuplet group does not end before the measure boundary".to_owned(),
                 ));
             }
-            if events.is_empty() {
+            if inside_multiple_rest && multiple_rest.is_some() {
+                return Err(element_diagnostic(
+                    measure_element,
+                    "multiple-rest spans may not overlap".to_owned(),
+                ));
+            }
+            if let Some(multiple_rest) = &multiple_rest {
+                if multiple_rest.count as usize > part_measure_count - measure_index {
+                    return Err(element_diagnostic(
+                        measure_element,
+                        "multiple-rest count extends past the Part's final measure".to_owned(),
+                    ));
+                }
+                multiple_rest_remaining = multiple_rest.count - 1;
+            }
+            if events.is_empty() && multiple_rest.is_none() && !inside_multiple_rest {
                 return Err(element_diagnostic(
                     measure_element,
                     "unsupported score: a measure must contain at least one event".to_owned(),
                 ));
+            }
+            if let Some(meter) = active_staff_states
+                .first()
+                .and_then(|state| state.meter)
+                .filter(|meter| {
+                    matches!(meter.beats, 2..=4) && matches!(meter.beat_type, 2 | 4 | 8)
+                })
+            {
+                let expected_units = f64::from(meter.beats) * 64.0 / f64::from(meter.beat_type);
+                if maximum_cursor_units + f64::EPSILON < expected_units
+                    && !(measures.is_empty() && implicit)
+                    && !inside_multiple_rest
+                    && multiple_rest.is_none()
+                {
+                    warnings.push(element_diagnostic(
+                        measure_element,
+                        format!(
+                            "measure duration is underfull ({maximum_cursor_units} units; expected {expected_units})"
+                        ),
+                    ));
+                } else if maximum_cursor_units > expected_units + f64::EPSILON {
+                    warnings.push(element_diagnostic(
+                        measure_element,
+                        format!(
+                            "measure duration is overfull ({maximum_cursor_units} units; expected {expected_units})"
+                        ),
+                    ));
+                }
             }
             for (event, source) in events.iter().zip(event_sources) {
                 let voice_index = voice_state_index(&mut active_beams, &event.voice_id);
@@ -1217,6 +1370,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                 harmonies,
                 texts,
                 meter: active_staff_states.first().and_then(|state| state.meter),
+                multiple_rest,
                 input_staff_states: active_staff_states.clone(),
                 barlines,
             });
@@ -2947,6 +3101,44 @@ fn parse_harmony_pitch(
     Ok((i64::from(natural) + i64::from(alteration)).rem_euclid(12) as u8)
 }
 
+fn parse_multiple_rest(elements: &[Element], measure_style: usize) -> Result<MultipleRest, String> {
+    let style = &elements[measure_style];
+    validate_attributes(style, &[])?;
+    require_container_text(style)?;
+    let [multiple_rest] = exact_children(elements, measure_style, &["multiple-rest"])?;
+    let rest = &elements[multiple_rest];
+    validate_attributes(rest, &["use-symbols"])?;
+    if !rest.children.is_empty() {
+        return Err(element_diagnostic(
+            rest,
+            "unsupported shape: <multiple-rest> must be text only".to_owned(),
+        ));
+    }
+    let count = rest
+        .text
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|count| *count > 0)
+        .ok_or_else(|| {
+            element_diagnostic(
+                rest,
+                "<multiple-rest> must be a positive integer".to_owned(),
+            )
+        })?;
+    let use_symbols = match optional_attribute(rest, "use-symbols").unwrap_or("no") {
+        "yes" => true,
+        "no" => false,
+        value => {
+            return Err(element_diagnostic(
+                rest,
+                format!("multiple-rest use-symbols must be 'yes' or 'no', not {value:?}"),
+            ));
+        }
+    };
+    Ok(MultipleRest { count, use_symbols })
+}
+
 fn parse_time(elements: &[Element], time: usize) -> Result<Meter, String> {
     let element = &elements[time];
     validate_attributes(element, &["number"])?;
@@ -3682,6 +3874,27 @@ fn parse_note(
     })?;
     position += 1;
     let is_rest = elements[event_element].name == "rest";
+    let measure_rest = if is_rest {
+        let rest = &elements[event_element];
+        if rest.attributes.iter().any(|(name, _)| name != "measure") {
+            return Err(element_diagnostic(
+                rest,
+                "<rest> supports only the optional measure attribute".to_owned(),
+            ));
+        }
+        match optional_attribute(rest, "measure") {
+            None | Some("no") => false,
+            Some("yes") => true,
+            Some(value) => {
+                return Err(element_diagnostic(
+                    rest,
+                    format!("unsupported rest measure value {value:?}"),
+                ));
+            }
+        }
+    } else {
+        false
+    };
     let is_unpitched = elements[event_element].name == "unpitched";
     if elements[event_element].name != "pitch" && !is_rest && !is_unpitched {
         return Err(element_diagnostic(
@@ -3929,7 +4142,6 @@ fn parse_note(
         ));
     }
     if is_rest {
-        require_no_attributes(&elements[event_element])?;
         require_container_text(&elements[event_element])?;
         if !elements[event_element].children.is_empty() {
             return Err(element_diagnostic(
@@ -3940,6 +4152,9 @@ fn parse_note(
     }
     let note_type_element = note_type.map(|note_type| &elements[note_type]);
     let (duration_name, base_units, mark_count) = match note_type_name {
+        "maxima" => ("maxima", 512, 0),
+        "long" => ("long", 256, 0),
+        "breve" => ("breve", 128, 0),
         "whole" => ("whole", 64, 0),
         "half" => ("half", 32, 2),
         "quarter" => ("quarter", 16, 0),
@@ -3954,6 +4169,12 @@ fn parse_note(
             ));
         }
     };
+    if measure_rest && (duration_name != "whole" || dot_count != 0) {
+        return Err(element_diagnostic(
+            note_type_element.unwrap_or(note_element),
+            "single-measure Rest requires an undotted whole <type>".to_owned(),
+        ));
+    }
     if let Some(accidental) = accidental {
         if is_rest {
             return Err(element_diagnostic(
@@ -4042,6 +4263,7 @@ fn parse_note(
             || matches!(tuplet_boundary, Some(TupletBoundary::Start(_))));
     if !is_grace
         && !is_cue
+        && !measure_rest
         && !display_only_tuplet
         && !duration_matches_type(
             duration_ticks,
@@ -4121,6 +4343,7 @@ fn parse_note(
             duration_name,
             dots: duration_marks,
             is_grace,
+            measure_rest,
             grace_slash,
             glyph_scale,
             beams,
@@ -4905,6 +5128,12 @@ fn collect_duration_errors(elements: &[Element]) -> Vec<String> {
         {
             continue;
         }
+        if element.children.iter().any(|child| {
+            elements[*child].name == "rest"
+                && optional_attribute(&elements[*child], "measure") == Some("yes")
+        }) {
+            continue;
+        }
         let Some(divisions) = active_divisions else {
             continue;
         };
@@ -5147,6 +5376,7 @@ enum PathClass {
     RepeatDot,
     EndingBracket,
     EndingLabel,
+    MultipleRest,
 }
 
 #[derive(Clone)]
@@ -5162,6 +5392,8 @@ enum PathMetadata {
     TupletCenterX(f64),
     TupletCenterY(f64),
     EndingLabel(String),
+    MultipleRestCount(u32),
+    MultipleRestSymbols(bool),
 }
 
 #[derive(Clone, Copy)]
@@ -5192,7 +5424,8 @@ struct PathGeometry {
     transform: Option<(i32, i32)>,
     x_offset: f64,
     y_offset: f64,
-    scale: f64,
+    scale_x: f64,
+    scale_y: f64,
     rotation: Option<(i32, i32, i32)>,
     path_data: String,
     style: PathStyle,
@@ -5205,7 +5438,8 @@ impl PathGeometry {
             transform,
             x_offset: 0.0,
             y_offset: 0.0,
-            scale: 1.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
             rotation: None,
             path_data: path_data.into(),
             style,
@@ -5214,7 +5448,14 @@ impl PathGeometry {
     }
 
     fn scaled(mut self, scale: f64) -> Self {
-        self.scale = scale;
+        self.scale_x = scale;
+        self.scale_y = scale;
+        self
+    }
+
+    fn scaled_nonuniform(mut self, scale_x: f64, scale_y: f64) -> Self {
+        self.scale_x = scale_x;
+        self.scale_y = scale_y;
         self
     }
 
@@ -5665,6 +5906,7 @@ impl Scene {
                 PathClass::RepeatDot => "repeat-dot",
                 PathClass::EndingBracket => "ending-bracket",
                 PathClass::EndingLabel => "ending-label",
+                PathClass::MultipleRest => "multiple-rest",
             };
             write!(svg, " class=\"{class}\"").expect("writing to a String cannot fail");
         }
@@ -5691,6 +5933,12 @@ impl Scene {
                     " data-ending-label=\"{}\"",
                     escape_svg_attribute(value)
                 ),
+                PathMetadata::MultipleRestCount(value) => {
+                    write!(svg, " data-count=\"{value}\"")
+                }
+                PathMetadata::MultipleRestSymbols(value) => {
+                    write!(svg, " data-use-symbols=\"{value}\"")
+                }
             }
             .expect("writing to a String cannot fail");
         }
@@ -5720,12 +5968,21 @@ impl Scene {
             }
             .expect("writing to a String cannot fail");
         }
-        if command.geometry.scale != 1.0 {
+        if command.geometry.scale_x != 1.0 || command.geometry.scale_y != 1.0 {
             if !transforms.is_empty() {
                 transforms.push(' ');
             }
-            write!(transforms, "scale({})", command.geometry.scale)
+            if command.geometry.scale_x == command.geometry.scale_y {
+                write!(transforms, "scale({})", command.geometry.scale_x)
+                    .expect("writing to a String cannot fail");
+            } else {
+                write!(
+                    transforms,
+                    "scale({} {})",
+                    command.geometry.scale_x, command.geometry.scale_y
+                )
                 .expect("writing to a String cannot fail");
+            }
         }
         if let Some((degrees, x, y)) = command.geometry.rotation {
             if !transforms.is_empty() {
@@ -5787,7 +6044,9 @@ fn rest_origin_y(duration_name: &str, bounds: (f64, f64, f64, f64)) -> f64 {
     match duration_name {
         "whole" => center_line_y - top,
         "half" => center_line_y - bottom,
-        "quarter" | "eighth" | "16th" | "32nd" | "64th" => center_line_y - (top + bottom) / 2.0,
+        "quarter" | "eighth" | "16th" | "32nd" | "64th" | "breve" | "long" | "maxima" => {
+            center_line_y - (top + bottom) / 2.0
+        }
         _ => unreachable!("rest duration is validated before rendering"),
     }
 }
@@ -6600,6 +6859,7 @@ fn render_part_svg(
     let mut pending_beamed_stems: VoiceBeamedStems = Vec::new();
     let mut final_barline_x = 0;
     let mut barline_positions = Vec::new();
+    let mut measure_origins = Vec::new();
     let mut chord_symbol_index = 0;
     let mut text_item_index = 0;
     let mut occupied_text = Vec::new();
@@ -6670,6 +6930,7 @@ fn render_part_svg(
             active_meter = Some(meter);
         }
         let event_origin_x = x;
+        measure_origins.push(event_origin_x);
         let mut measure_end_x = x;
         let mut placed_event_geometries: Vec<(f64, bool, EventGeometry)> = Vec::new();
         let mut event_stem_positions = vec![None; measure.events.len()];
@@ -6777,15 +7038,17 @@ fn render_part_svg(
                 let scale = event.glyph_scale;
                 let glyph_center_x = (glyph.bounds.0 + glyph.bounds.2) / 2.0;
                 let glyph_center_y = (glyph.bounds.1 + glyph.bounds.3) / 2.0;
+                let width_scale = if event.measure_rest { 2.0 } else { 1.0 };
+                let path_scale = bravura_glyphs::rest_path_scale(event.duration_name) * scale;
                 scene.add_path(
                     DrawLayer::Event,
                     format!("rest-{index}"),
                     Some(PathClass::Rest),
                     vec![PathMetadata::Duration(event.duration_name)],
                     PathGeometry::new(Some((x, rest_y_base)), glyph.path, PathStyle::BravuraGlyph)
-                        .offset_x(glyph_center_x * (1.0 - scale))
+                        .offset_x(glyph_center_x * (1.0 - scale * width_scale))
                         .offset_y(rest_y - f64::from(rest_y_base) + glyph_center_y * (1.0 - scale))
-                        .scaled(scale),
+                        .scaled_nonuniform(path_scale * width_scale, path_scale),
                 );
                 for mark in 0..event.dots {
                     let (mark_x, mark_y) = rest_duration_mark_position(mark, x, rest_y_base);
@@ -7193,6 +7456,17 @@ fn render_part_svg(
             previous_event_geometry = Some(geometry);
             index += 1;
         }
+        let in_multiple_rest_span = part.measures.iter().enumerate().any(|(start, candidate)| {
+            candidate
+                .multiple_rest
+                .as_ref()
+                .is_some_and(|multiple_rest| {
+                    measure_index >= start && measure_index < start + multiple_rest.count as usize
+                })
+        });
+        if in_multiple_rest_span {
+            measure_end_x = measure_end_x.max(event_origin_x + 80);
+        }
         add_tuplet_notations(
             &mut scene,
             measure,
@@ -7266,17 +7540,29 @@ fn render_part_svg(
             108.5,
             1.0,
         ));
-        scene.add_path(
-            DrawLayer::Barline,
-            format!("barline-{}", measure_index + 1),
-            None,
-            Vec::new(),
-            PathGeometry::new(
+        let inside_multiple_rest_span =
+            part.measures.iter().enumerate().any(|(start, candidate)| {
+                candidate
+                    .multiple_rest
+                    .as_ref()
+                    .is_some_and(|multiple_rest| {
+                        measure_index >= start
+                            && measure_index + 1 < start + multiple_rest.count as usize
+                    })
+            });
+        if !inside_multiple_rest_span {
+            scene.add_path(
+                DrawLayer::Barline,
+                format!("barline-{}", measure_index + 1),
                 None,
-                format!("M{barline_x} 27.5V108.5"),
-                PathStyle::StaffLine,
-            ),
-        );
+                Vec::new(),
+                PathGeometry::new(
+                    None,
+                    format!("M{barline_x} 27.5V108.5"),
+                    PathStyle::StaffLine,
+                ),
+            );
+        }
         for repeat in measure
             .barlines
             .iter()
@@ -7366,6 +7652,101 @@ fn render_part_svg(
         barline_positions.push(barline_x);
         right = right.max(barline_x + 12);
         x = barline_x + 4;
+    }
+    for (measure_index, measure) in part.measures.iter().enumerate() {
+        let Some(multiple_rest) = &measure.multiple_rest else {
+            continue;
+        };
+        let span_end = barline_positions[measure_index + multiple_rest.count as usize - 1];
+        let nominal_duration = part.measures
+            [measure_index..measure_index + multiple_rest.count as usize]
+            .iter()
+            .try_fold(0.0, |total, measure| {
+                measure
+                    .meter
+                    .map(|meter| total + f64::from(meter.beats) * 64.0 / f64::from(meter.beat_type))
+            });
+        let symbol_duration = if multiple_rest.use_symbols {
+            match nominal_duration {
+                Some(64.0) => Some("whole"),
+                Some(128.0) => Some("breve"),
+                Some(256.0) => Some("long"),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let left = measure_origins[measure_index] + 10;
+        let width = span_end - left - 10;
+        if let Some(duration) = symbol_duration {
+            let glyph = bravura_glyphs::rest(duration);
+            let scale = bravura_glyphs::rest_path_scale(duration);
+            let glyph_center_x = (glyph.bounds.0 + glyph.bounds.2) / 2.0;
+            let glyph_center_y = (glyph.bounds.1 + glyph.bounds.3) / 2.0;
+            let rest_y = rest_origin_y(duration, glyph.bounds);
+            let rest_y_base = rest_y.floor() as i32;
+            let center_x = f64::from(left) + f64::from(width) / 2.0;
+            scene.add_path(
+                DrawLayer::Event,
+                format!("multiple-rest-{measure_index}"),
+                Some(PathClass::MultipleRest),
+                vec![
+                    PathMetadata::MultipleRestCount(multiple_rest.count),
+                    PathMetadata::MultipleRestSymbols(true),
+                    PathMetadata::Duration(duration),
+                ],
+                PathGeometry::new(
+                    Some((center_x.floor() as i32, rest_y_base)),
+                    glyph.path,
+                    PathStyle::BravuraGlyph,
+                )
+                .offset_x(center_x - f64::from(center_x.floor() as i32) - glyph_center_x * scale)
+                .offset_y(rest_y - f64::from(rest_y_base) + glyph_center_y * (1.0 - scale))
+                .scaled_nonuniform(scale, scale),
+            );
+            right = right.max(span_end);
+            continue;
+        }
+        let bar_path = format!(
+            "M0 0H{width}V1H0ZM0 0V8H1V0ZM{right_edge} 0V8H{width}V0Z",
+            right_edge = width - 1
+        );
+        scene.add_path(
+            DrawLayer::Event,
+            format!("multiple-rest-{measure_index}"),
+            Some(PathClass::MultipleRest),
+            vec![
+                PathMetadata::MultipleRestCount(multiple_rest.count),
+                PathMetadata::MultipleRestSymbols(multiple_rest.use_symbols),
+            ],
+            PathGeometry::new(Some((left, 68)), bar_path, PathStyle::Solid),
+        );
+        let count = dozenal_ending_label(&multiple_rest.count.to_string())
+            .expect("positive count has a dozenal representation");
+        let scale = 0.016;
+        let text_width = count
+            .chars()
+            .filter_map(noto_sans_glyphs::glyph)
+            .map(|glyph| glyph.advance * scale)
+            .sum::<f64>();
+        let mut text_x = f64::from(left) + (f64::from(width) - text_width) / 2.0;
+        for (glyph_index, character) in count.chars().enumerate() {
+            let glyph = noto_sans_glyphs::glyph(character).expect("dozenal count glyph is bundled");
+            scene.add_path(
+                DrawLayer::Event,
+                format!("multiple-rest-count-{measure_index}-{glyph_index}"),
+                Some(PathClass::TextGlyph),
+                Vec::new(),
+                PathGeometry::new(
+                    Some((text_x.floor() as i32, 58)),
+                    glyph.path,
+                    PathStyle::TextGlyph,
+                )
+                .scaled(scale),
+            );
+            text_x += glyph.advance * scale;
+        }
+        right = right.max(span_end);
     }
     for staff_y in [28.0, 68.0, 108.0] {
         notation_bounds.push(ComponentBounds::stroked(

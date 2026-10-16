@@ -4531,6 +4531,190 @@ fn separates_same_octave_chord_tones_and_clears_the_preceding_event() {
 }
 
 #[test]
+fn substitutes_matching_meter_symbol_for_multiple_rest() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("multiple-rest-symbol.musicxml");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace(original_note, "")
+        .replace(
+            "<attributes><divisions>1</divisions></attributes>",
+            "<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time><measure-style><multiple-rest use-symbols=\"yes\">1</multiple-rest></measure-style></attributes>",
+        );
+    fs::write(&input, fixture).expect("write symbol multiple-rest score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "matching multiple-rest symbol should render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let svg = fs::read_to_string(directory.join("multiple-rest-symbol.svg")).expect("read SVG");
+    assert!(svg.contains("class=\"multiple-rest\""), "{svg}");
+    assert!(svg.contains("data-duration=\"whole\""), "{svg}");
+    assert!(
+        !svg.contains("multiple-rest-count-"),
+        "symbol form has no count label: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_multiple_rest_as_one_two_measure_span() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("multiple-rest-span.musicxml");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace(original_note, "")
+        .replace(
+            "<attributes><divisions>1</divisions></attributes>",
+            "<attributes><divisions>1</divisions><measure-style><multiple-rest>2</multiple-rest></measure-style></attributes>",
+        )
+        .replace(
+            "  </part>",
+            "    <measure number=\"2\"></measure>\n  </part>",
+        );
+    fs::write(&input, fixture).expect("write two-measure multiple-rest score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "multiple-rest span should render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("multiple-rest-span.svg")).expect("read SVG");
+    assert!(
+        svg.contains("class=\"multiple-rest\" data-count=\"2\""),
+        "{svg}"
+    );
+    assert!(
+        !svg.contains("id=\"barline-1\""),
+        "internal barline must be suppressed: {svg}"
+    );
+    assert!(
+        svg.contains("id=\"barline-2\""),
+        "span-end barline must remain: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_counted_multiple_rest() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("multiple-rest.musicxml");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace(original_note, "")
+        .replace(
+            "<attributes><divisions>1</divisions></attributes>",
+            "<attributes><divisions>1</divisions><measure-style><multiple-rest>1</multiple-rest></measure-style></attributes>",
+        );
+    fs::write(&input, fixture).expect("write multiple-rest score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "multiple Rest should render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("multiple-rest.svg")).expect("read SVG");
+    assert!(svg.contains("class=\"multiple-rest\""), "{svg}");
+    assert!(svg.contains("data-count=\"1\""), "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_single_measure_rest_centered_at_double_width() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("single-measure-rest.musicxml");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let measure_rest = "<note><rest measure=\"yes\"/><duration>2</duration><voice>1</voice><type>whole</type></note>";
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace(original_note, measure_rest)
+        .replace(
+            "<attributes><divisions>1</divisions></attributes>",
+            "<attributes><divisions>1</divisions><time><beats>6</beats><beat-type>8</beat-type></time></attributes>",
+        );
+    fs::write(&input, fixture).expect("write single-measure Rest score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "single-measure Rest should render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("single-measure Rest encoded duration"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("measure duration is underfull"),
+        "{stderr}"
+    );
+    let svg = fs::read_to_string(directory.join("single-measure-rest.svg")).expect("read SVG");
+    let rest = svg
+        .lines()
+        .find(|line| line.contains("class=\"rest\""))
+        .expect("single-measure Rest glyph");
+    assert!(
+        rest.contains("scale(2 1)"),
+        "Rest should be twice as wide: {rest}"
+    );
+    assert!(
+        svg.contains("id=\"barline-1\""),
+        "explicit barline must remain: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_breve_long_and_maxima_rests() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("extended-rests.musicxml");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let rests = "<note><rest/><duration>8</duration><voice>1</voice><type>breve</type></note>\n      <note><rest/><duration>16</duration><voice>1</voice><type>long</type></note>\n      <note><rest/><duration>32</duration><voice>1</voice><type>maxima</type></note>";
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(original_note, rests);
+    fs::write(&input, fixture).expect("write extended-rest score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "extended Rests should render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("extended-rests.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"rest\"").count(), 3, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn positions_rests_relative_to_the_center_staff_line() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
@@ -4647,6 +4831,98 @@ fn renders_simple_numeric_meter_and_rests() {
         "time-signature denominator should fill the octave 3/4 lanes: {svg}"
     );
     assert!(!svg.contains("<text"), "SVG glyphs must not rely on fonts");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn warns_for_underfull_simple_meter_and_still_writes_svg() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("underfull-simple-meter.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<attributes><divisions>1</divisions></attributes>",
+        "<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>",
+    );
+    fs::write(&input, &fixture).expect("write underfull score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "underfull score should render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("underfull"), "missing diagnostic: {stderr}");
+    assert!(
+        directory.join("underfull-simple-meter.svg").exists(),
+        "meter warning must not prevent SVG output"
+    );
+
+    let overfull_input = directory.join("overfull-simple-meter.musicxml");
+    let overfull_fixture = fixture.replace(
+        "</measure>",
+        "<note><pitch><step>D</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><type>whole</type></note></measure>",
+    );
+    fs::write(&overfull_input, overfull_fixture).expect("write overfull score");
+    let overfull_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&overfull_input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        overfull_output.status.success(),
+        "overfull score should render: {}",
+        String::from_utf8_lossy(&overfull_output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&overfull_output.stderr).contains("overfull"),
+        "missing overfull diagnostic: {}",
+        String::from_utf8_lossy(&overfull_output.stderr)
+    );
+
+    let pickup_input = directory.join("implicit-pickup.musicxml");
+    let pickup_fixture = fixture.replace(
+        "<measure number=\"1\">",
+        "<measure number=\"0\" implicit=\"yes\">",
+    );
+    fs::write(&pickup_input, pickup_fixture).expect("write implicit pickup score");
+    let pickup_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&pickup_input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        pickup_output.status.success(),
+        "implicit pickup should render: {}",
+        String::from_utf8_lossy(&pickup_output.stderr)
+    );
+    let pickup_stderr = String::from_utf8_lossy(&pickup_output.stderr);
+    assert!(
+        !pickup_stderr.contains("underfull") && !pickup_stderr.contains("overfull"),
+        "implicit first-measure pickup should not warn: {pickup_stderr}"
+    );
+
+    let voices_input = directory.join("multi-voice-measure-duration.musicxml");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let voice_events = "<note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><type>whole</type></note><backup><duration>4</duration></backup><note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>2</voice><type>quarter</type></note>";
+    let voices_fixture = fixture.replace(original_note, voice_events);
+    fs::write(&voices_input, voices_fixture).expect("write multiple-Voice score");
+    let voices_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&voices_input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        voices_output.status.success(),
+        "multiple-Voice score should render: {}",
+        String::from_utf8_lossy(&voices_output.stderr)
+    );
+    let voices_stderr = String::from_utf8_lossy(&voices_output.stderr);
+    assert!(
+        !voices_stderr.contains("underfull") && !voices_stderr.contains("overfull"),
+        "meter duration should use the furthest Voice cursor: {voices_stderr}"
+    );
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
