@@ -5057,8 +5057,8 @@ fn render_part_svg(
                     PathGeometry::new(Some((styled_line_x, 0)), path, style),
                 );
             }
-            for (dot_index, dot_y) in [54, 62].into_iter().enumerate() {
-                let dot_x = repeat_x + if repeat_start { 8 } else { -12 };
+            for (dot_index, dot_y) in [62, 74].into_iter().enumerate() {
+                let dot_x = repeat_x + if repeat_start { 4 } else { -12 };
                 scene.add_path(
                     DrawLayer::Barline,
                     format!("repeat-dot-{measure_index}-{dot_index}"),
