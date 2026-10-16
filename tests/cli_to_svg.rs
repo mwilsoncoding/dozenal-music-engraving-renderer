@@ -1774,6 +1774,50 @@ fn preserves_simultaneous_onsets_when_voice_geometry_overlaps() {
 }
 
 #[test]
+fn later_events_clear_all_prior_simultaneous_voice_geometry() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("voice-onset-group-spacing.musicxml");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let notes = "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>16th</type></note>\n      <backup><duration>1</duration></backup>\n      <note><pitch><step>G</step><octave>8</octave></pitch><duration>1</duration><voice>2</voice><type>16th</type></note>\n      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>2</voice><type>16th</type></note>";
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<divisions>1</divisions>", "<divisions>4</divisions>")
+        .replace(original_note, notes);
+    fs::write(&input, fixture).expect("write onset-group spacing score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "onset-group spacing failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg =
+        fs::read_to_string(directory.join("voice-onset-group-spacing.svg")).expect("read SVG");
+    let tonehead_x = |tone| {
+        svg.lines()
+            .find(|line| {
+                line.contains("class=\"tonehead\"")
+                    && line.contains(&format!("data-tone=\"{tone}\""))
+            })
+            .and_then(|line| line.split("transform=\"translate(").nth(1))
+            .and_then(|transform| transform.split_whitespace().next())
+            .and_then(|x| x.parse::<f64>().ok())
+            .expect("tonehead position")
+    };
+    let first_onset_x = tonehead_x(0);
+    assert_eq!(tonehead_x(7), first_onset_x, "{svg}");
+    assert!(
+        tonehead_x(4) > first_onset_x + 10.0,
+        "later event overlaps the first onset group: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn renders_parallel_voices_using_backup_cursor_movement() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");

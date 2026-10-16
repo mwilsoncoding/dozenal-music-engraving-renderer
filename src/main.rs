@@ -4476,6 +4476,7 @@ impl ComponentBounds {
     }
 }
 
+#[derive(Clone)]
 struct EventGeometry {
     primary: Vec<ComponentBounds>,
     incoming: Vec<ComponentBounds>,
@@ -5686,7 +5687,7 @@ fn render_part_svg(
         }
         let event_origin_x = x;
         let mut measure_end_x = x;
-        let mut previous_event_onset = None;
+        let mut placed_event_geometries: Vec<(f64, EventGeometry)> = Vec::new();
         for (measure_event_index, event) in measure.events.iter().enumerate() {
             let stems_up = group_stem_directions[measure_index][measure_event_index]
                 .unwrap_or_else(|| stem_direction_is_up(event.tones.iter()));
@@ -5697,31 +5698,30 @@ fn render_part_svg(
             let pending_ties_for_event = pending_tie_paths[tie_state_index].1.clone();
             let preferred_x = event_origin_x + (event.onset_units * 2.5).ceil() as i32;
             x = preferred_x;
-            let preferred_geometry = event_geometry(
+            let mut geometry = event_geometry(
                 event,
-                preferred_x,
+                x,
                 &active_beams_for_event,
                 &pending_ties_for_event,
                 stems_up,
             );
-            if previous_event_onset.is_some_and(|onset| onset < event.onset_units) {
-                if let Some(previous) = &previous_event_geometry {
-                    x = next_event_x(preferred_x, previous, &preferred_geometry);
+            for (previous_onset, previous_geometry) in &placed_event_geometries {
+                if *previous_onset < event.onset_units {
+                    let adjusted_x = next_event_x(x, previous_geometry, &geometry);
+                    if adjusted_x != x {
+                        x = adjusted_x;
+                        geometry = event_geometry(
+                            event,
+                            x,
+                            &active_beams_for_event,
+                            &pending_ties_for_event,
+                            stems_up,
+                        );
+                    }
                 }
             }
             event_positions.push(x);
-            let geometry = if x == preferred_x {
-                preferred_geometry
-            } else {
-                event_geometry(
-                    event,
-                    x,
-                    &active_beams_for_event,
-                    &pending_ties_for_event,
-                    stems_up,
-                )
-            };
-            previous_event_onset = Some(event.onset_units);
+            placed_event_geometries.push((event.onset_units, geometry.clone()));
             measure_end_x = measure_end_x.max(x + (event.duration_units * 5).div_ceil(2) as i32);
             notation_bounds.extend(geometry.all().copied());
             while measure
