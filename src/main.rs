@@ -5083,8 +5083,9 @@ fn render_part_svg(
                     barline_x,
                     &event_positions,
                 );
+                view_top = view_top.min(-6);
                 active_ending = Some((start_x, label.label.clone()));
-                add_ending_label(&mut scene, &label.label, start_x + 2, 23, measure_index);
+                add_ending_label(&mut scene, &label.label, start_x + 2, 19, measure_index);
             }
             if let Some(ending_end) = &barline.ending_end {
                 let (start_x, _) = active_ending
@@ -5102,7 +5103,7 @@ fn render_part_svg(
                     Some(PathClass::EndingBracket),
                     Vec::new(),
                     PathGeometry::new(
-                        Some((start_x, 0)),
+                        Some((start_x, -4)),
                         if ending_end.discontinue {
                             format!("M0 27V0H{}", end_x - start_x)
                         } else {

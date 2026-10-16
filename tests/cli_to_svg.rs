@@ -2587,8 +2587,10 @@ fn renders_repeat_barlines_and_numbered_endings() {
     }
     assert!(svg.contains("d=\"M0 27V0H84V27\""), "{svg}");
     assert!(svg.contains("d=\"M0 27V0H84\""), "{svg}");
-    assert!(svg.contains("translate(210 23)"), "{svg}");
-    assert!(svg.contains("translate(298 23)"), "{svg}");
+    assert!(svg.contains("transform=\"translate(208 -4)\""), "{svg}");
+    assert!(svg.contains("transform=\"translate(296 -4)\""), "{svg}");
+    assert!(svg.contains("translate(210 19)"), "{svg}");
+    assert!(svg.contains("translate(298 19)"), "{svg}");
     assert_eq!(svg.matches("stroke-width=\"3\"").count(), 2, "{svg}");
     assert!(svg.contains("id=\"repeat-barline-0-104\""), "{svg}");
     assert!(svg.contains("transform=\"translate(108 62)\""), "{svg}");
