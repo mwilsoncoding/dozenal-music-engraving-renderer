@@ -34,6 +34,16 @@ resources and does not validate against a DTD or XSD; scores that require
 externally declared entities are rejected. This is an application-specific
 MusicXML profile, not a claim of general MusicXML support or validation.
 
+## Render all examples
+
+```bash
+find examples/ \
+-mindepth 1 \
+-type f \
+-name '*.musicxml' \
+-exec cargo run -- {} \;
+```
+
 ## Technical Inspirations
 
 - [lilypond](https://github.com/lilypond/lilypond)
