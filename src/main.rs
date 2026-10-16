@@ -5031,12 +5031,20 @@ fn render_part_svg(
             .iter()
             .filter(|barline| barline.repeat_start || barline.repeat_end)
         {
-            let repeat_x = measure_barline_position(
-                repeat,
-                measure_start_x as i32,
-                barline_x,
-                &event_positions,
-            );
+            let repeat_x = if repeat.repeat_start && repeat.location == "left" {
+                event_positions
+                    .first()
+                    .copied()
+                    .unwrap_or(measure_start_x as i32)
+                    - 16
+            } else {
+                measure_barline_position(
+                    repeat,
+                    measure_start_x as i32,
+                    barline_x,
+                    &event_positions,
+                )
+            };
             let repeat_start = repeat.repeat_start;
             for (styled_line_x, style, path) in
                 repeat_barline_strokes(repeat.style.as_deref(), repeat_start, repeat_x)

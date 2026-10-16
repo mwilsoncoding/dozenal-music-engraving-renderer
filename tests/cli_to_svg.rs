@@ -2580,6 +2580,10 @@ fn renders_repeat_barlines_and_numbered_endings() {
     assert_eq!(svg.matches("class=\"repeat-dot\"").count(), 4, "{svg}");
     assert_eq!(svg.matches("class=\"ending-bracket\"").count(), 2, "{svg}");
     assert_eq!(svg.matches("stroke-width=\"3\"").count(), 2, "{svg}");
+    assert!(svg.contains("id=\"repeat-barline-0-104\""), "{svg}");
+    assert!(svg.contains("transform=\"translate(112 54)\""), "{svg}");
+    assert!(svg.contains("id=\"repeat-barline-1-200\""), "{svg}");
+    assert!(svg.contains("transform=\"translate(192 54)\""), "{svg}");
     assert!(
         svg.find("class=\"repeat-barline\"").unwrap() < svg.find("class=\"ending-label\"").unwrap()
             && svg.find("class=\"ending-label\"").unwrap()
