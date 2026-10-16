@@ -2576,9 +2576,10 @@ fn renders_repeat_barlines_and_numbered_endings() {
         String::from_utf8_lossy(&output.stderr)
     );
     let svg = fs::read_to_string(directory.join("repeat-endings.svg")).expect("read SVG");
-    assert_eq!(svg.matches("class=\"repeat-barline\"").count(), 2, "{svg}");
+    assert_eq!(svg.matches("class=\"repeat-barline\"").count(), 4, "{svg}");
     assert_eq!(svg.matches("class=\"repeat-dot\"").count(), 4, "{svg}");
     assert_eq!(svg.matches("class=\"ending-bracket\"").count(), 2, "{svg}");
+    assert_eq!(svg.matches("stroke-width=\"3\"").count(), 2, "{svg}");
     for label in ["1", "2"] {
         assert!(
             svg.contains(&format!("data-ending-label=\"{label}\"")),
@@ -2657,9 +2658,66 @@ fn applies_part_edge_repeat_and_dozenal_ending_label_fallbacks() {
         String::from_utf8_lossy(&output.stderr)
     );
     let svg = fs::read_to_string(directory.join("implicit-repeat.svg")).expect("read SVG");
-    assert_eq!(svg.matches("class=\"repeat-barline\"").count(), 2, "{svg}");
+    assert_eq!(svg.matches("class=\"repeat-barline\"").count(), 3, "{svg}");
     assert_eq!(svg.matches("class=\"repeat-dot\"").count(), 4, "{svg}");
     assert!(svg.contains("data-ending-label=\"↊\""), "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn pairs_custom_ending_text_by_number() {
+    let fixture = include_str!("../examples/repeat-endings/repeat-endings.musicxml").replace(
+        "<ending number=\"1\" type=\"start\"/>",
+        "<ending number=\"1\" type=\"start\" text=\"First\"/>",
+    );
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("custom-ending-text.musicxml");
+    fs::write(&input, fixture).expect("write custom-label score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "custom-label score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("custom-ending-text.svg")).expect("read SVG");
+    assert!(svg.contains("data-ending-label=\"First\""), "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn positions_middle_repeat_at_the_following_event_anchor() {
+    let fixture = include_str!("../examples/repeat-endings/repeat-endings.musicxml")
+        .replace(
+            "<barline location=\"right\"><bar-style>light-heavy</bar-style><repeat direction=\"backward\"/></barline>",
+            "<barline location=\"middle\"><bar-style>light-heavy</bar-style><repeat direction=\"backward\"/></barline>",
+        )
+        .replace(
+            "</measure>\n    <measure number=\"3\">",
+            "<note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>\n    </measure>\n    <measure number=\"3\">",
+        );
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("middle-repeat.musicxml");
+    fs::write(&input, fixture).expect("write middle-repeat score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "middle-repeat score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("middle-repeat.svg")).expect("read SVG");
+    assert!(svg.contains("id=\"repeat-barline-1-204\""), "{svg}");
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
