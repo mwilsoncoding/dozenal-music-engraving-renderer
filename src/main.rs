@@ -55,6 +55,15 @@ struct Measure {
     harmonies: Vec<PositionedHarmony>,
     texts: Vec<PositionedText>,
     meter: Option<Meter>,
+    barlines: Vec<MeasureBarline>,
+}
+
+#[derive(Default)]
+struct MeasureBarline {
+    repeat_start: bool,
+    repeat_end: bool,
+    ending_start: Option<String>,
+    ending_end: Option<String>,
 }
 
 struct Part {
@@ -350,6 +359,7 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
         let mut transposition = 0;
         let mut active_meter = None;
         let mut pending_ties = Vec::new();
+        let mut active_ending: Option<String> = None;
         let mut active_beams = [false; 5];
         let mut measures = Vec::new();
         for measure_id in &elements[part].children {
@@ -365,6 +375,7 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
             let mut events: Vec<Event> = Vec::new();
             let mut harmonies = Vec::new();
             let mut texts = Vec::new();
+            let mut barlines = Vec::new();
             let mut event_sources = Vec::new();
             let mut chord_target = None;
             for child in &measure_element.children {
@@ -495,6 +506,37 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
                         divisions,
                         &mut warnings,
                     )?),
+                    "barline" => {
+                        let parsed = parse_repeat_barline(&elements, *child)?;
+                        if let Some(label) = &parsed.ending_start {
+                            if active_ending.is_some() {
+                                return Err(element_diagnostic(
+                                    element,
+                                    "ending starts overlap before the preceding ending ends"
+                                        .to_owned(),
+                                ));
+                            }
+                            active_ending = Some(label.clone());
+                        }
+                        if let Some(label) = &parsed.ending_end {
+                            match active_ending.take() {
+                                Some(active_label) if active_label == *label => {}
+                                Some(active_label) => {
+                                    return Err(element_diagnostic(
+                                        element,
+                                        format!("ending endpoint {label:?} does not match active ending {active_label:?}"),
+                                    ));
+                                }
+                                None => {
+                                    return Err(element_diagnostic(
+                                        element,
+                                        "ending stop/discontinue has no matching start".to_owned(),
+                                    ));
+                                }
+                            }
+                        }
+                        barlines.push(parsed);
+                    }
                     _ => {
                         return Err(element_diagnostic(
                             element,
@@ -518,6 +560,7 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
                 harmonies,
                 texts,
                 meter: active_meter,
+                barlines,
             });
         }
         if measures.is_empty() {
@@ -538,6 +581,39 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
                 "beam group is missing an end marker".to_owned(),
             ));
         }
+        if let Some(label) = active_ending {
+            return Err(element_diagnostic(
+                &elements[part],
+                format!("ending {label:?} start has no matching stop or discontinue"),
+            ));
+        }
+        let has_repeat_start = measures
+            .iter()
+            .flat_map(|measure| &measure.barlines)
+            .any(|barline| barline.repeat_start);
+        let has_repeat_end = measures
+            .iter()
+            .flat_map(|measure| &measure.barlines)
+            .any(|barline| barline.repeat_end);
+        if has_repeat_end && !has_repeat_start {
+            measures
+                .first_mut()
+                .expect("nonempty Part has at least one measure")
+                .barlines
+                .push(MeasureBarline {
+                    repeat_start: true,
+                    ..MeasureBarline::default()
+                });
+        } else if has_repeat_start && !has_repeat_end {
+            measures
+                .last_mut()
+                .expect("nonempty Part has at least one measure")
+                .barlines
+                .push(MeasureBarline {
+                    repeat_end: true,
+                    ..MeasureBarline::default()
+                });
+        }
 
         if let Some(expected) = expected_measure_count {
             if measures.len() != expected {
@@ -556,6 +632,194 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
     }
 
     Ok(Score { parts, warnings })
+}
+
+fn parse_repeat_barline(elements: &[Element], barline: usize) -> Result<MeasureBarline, String> {
+    let element = &elements[barline];
+    validate_attributes(element, &["location"])?;
+    require_container_text(element)?;
+    let location = optional_attribute(element, "location").unwrap_or("right");
+    if !["left", "middle", "right"].contains(&location) {
+        return Err(element_diagnostic(
+            element,
+            format!("invalid barline location {location:?}"),
+        ));
+    }
+
+    let mut barline = MeasureBarline::default();
+    for child in &element.children {
+        let child_element = &elements[*child];
+        match child_element.name.as_str() {
+            "bar-style" => {
+                require_no_attributes(child_element)?;
+                let style = leaf_text(child_element)?;
+                if ![
+                    "regular",
+                    "dotted",
+                    "dashed",
+                    "heavy",
+                    "light-light",
+                    "light-heavy",
+                    "heavy-light",
+                    "heavy-heavy",
+                    "tick",
+                    "short",
+                    "none",
+                ]
+                .contains(&style)
+                {
+                    return Err(element_diagnostic(
+                        child_element,
+                        format!("invalid bar-style {style:?}"),
+                    ));
+                }
+            }
+            "repeat" => {
+                validate_attributes(child_element, &["direction", "times", "winged"])?;
+                require_container_text(child_element)?;
+                if !child_element.children.is_empty() {
+                    return Err(element_diagnostic(
+                        child_element,
+                        "repeat may not contain child elements".to_owned(),
+                    ));
+                }
+                match required_attribute(child_element, "direction")? {
+                    "forward" if location == "left" => barline.repeat_start = true,
+                    "backward" if location != "left" => barline.repeat_end = true,
+                    "forward" => {
+                        return Err(element_diagnostic(
+                            child_element,
+                            "forward repeat must be on a left barline".to_owned(),
+                        ));
+                    }
+                    "backward" => {
+                        return Err(element_diagnostic(
+                            child_element,
+                            "backward repeat must be on a middle or right barline".to_owned(),
+                        ));
+                    }
+                    direction => {
+                        return Err(element_diagnostic(
+                            child_element,
+                            format!("invalid repeat direction {direction:?}"),
+                        ));
+                    }
+                }
+                if let Some(times) = optional_attribute(child_element, "times") {
+                    if times
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|times| *times > 0)
+                        .is_none()
+                    {
+                        return Err(element_diagnostic(
+                            child_element,
+                            format!("repeat times must be a positive integer, not {times:?}"),
+                        ));
+                    }
+                }
+                if let Some(winged) = optional_attribute(child_element, "winged") {
+                    if !["none", "straight", "curved", "double"].contains(&winged) {
+                        return Err(element_diagnostic(
+                            child_element,
+                            format!("invalid repeat winged style {winged:?}"),
+                        ));
+                    }
+                }
+            }
+            "ending" => {
+                validate_attributes(child_element, &["number", "type", "text"])?;
+                require_container_text(child_element)?;
+                if !child_element.children.is_empty() {
+                    return Err(element_diagnostic(
+                        child_element,
+                        "ending may not contain child elements".to_owned(),
+                    ));
+                }
+                let number = optional_attribute(child_element, "number").ok_or_else(|| {
+                    element_diagnostic(
+                        child_element,
+                        "ending requires a number attribute".to_owned(),
+                    )
+                })?;
+                let label = optional_attribute(child_element, "text")
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_owned)
+                    .or_else(|| dozenal_ending_label(number))
+                    .ok_or_else(|| {
+                        element_diagnostic(
+                            child_element,
+                            format!("invalid ending number list {number:?}"),
+                        )
+                    })?;
+                if let Some(character) = label
+                    .chars()
+                    .find(|character| !noto_sans_glyphs::supports(*character))
+                {
+                    return Err(element_diagnostic(
+                        child_element,
+                        format!("ending label contains unsupported character {character:?}"),
+                    ));
+                }
+                match optional_attribute(child_element, "type").ok_or_else(|| {
+                    element_diagnostic(child_element, "ending requires a type attribute".to_owned())
+                })? {
+                    "start" if location != "right" => barline.ending_start = Some(label),
+                    "stop" | "discontinue" if location != "left" => {
+                        barline.ending_end = Some(label)
+                    }
+                    "start" => {
+                        return Err(element_diagnostic(
+                            child_element,
+                            "ending start must be on a left or middle barline".to_owned(),
+                        ));
+                    }
+                    ending_type => {
+                        return Err(element_diagnostic(
+                            child_element,
+                            format!("invalid ending type/location {ending_type:?}/{location:?}"),
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Err(element_diagnostic(
+                    child_element,
+                    format!("unsupported barline child <{}>", child_element.name),
+                ));
+            }
+        }
+    }
+    Ok(barline)
+}
+
+fn dozenal_ending_label(number: &str) -> Option<String> {
+    let mut labels = Vec::new();
+    for item in number.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            return None;
+        }
+        let value = item.parse::<u32>().ok()?;
+        let label = if value == 0 {
+            "0".to_owned()
+        } else {
+            let mut digits = Vec::new();
+            let mut remaining = value;
+            while remaining > 0 {
+                digits.push(match remaining % 12 {
+                    10 => '↊',
+                    11 => '↋',
+                    digit => char::from_digit(digit, 10)?,
+                });
+                remaining /= 12;
+            }
+            digits.iter().rev().collect()
+        };
+        labels.push(label);
+    }
+    Some(labels.join(", "))
 }
 
 fn parse_direction(
@@ -2995,9 +3259,13 @@ enum PathClass {
     TextGlyph,
     TextEnclosure,
     Tie,
+    RepeatBarline,
+    RepeatDot,
+    EndingBracket,
+    EndingLabel,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum PathMetadata {
     Event(usize),
     ToneIndex(usize),
@@ -3006,6 +3274,7 @@ enum PathMetadata {
     Duration(&'static str),
     ChordRole(&'static str),
     BeamLevel(u8),
+    EndingLabel(String),
 }
 
 #[derive(Clone, Copy)]
@@ -3444,6 +3713,10 @@ impl Scene {
                 PathClass::TextGlyph => "text-glyph",
                 PathClass::TextEnclosure => "text-enclosure",
                 PathClass::Tie => "tie",
+                PathClass::RepeatBarline => "repeat-barline",
+                PathClass::RepeatDot => "repeat-dot",
+                PathClass::EndingBracket => "ending-bracket",
+                PathClass::EndingLabel => "ending-label",
             };
             write!(svg, " class=\"{class}\"").expect("writing to a String cannot fail");
         }
@@ -3456,6 +3729,7 @@ impl Scene {
                 PathMetadata::Duration(value) => write!(svg, " data-duration=\"{value}\""),
                 PathMetadata::ChordRole(value) => write!(svg, " data-chord-role=\"{value}\""),
                 PathMetadata::BeamLevel(value) => write!(svg, " data-level=\"{value}\""),
+                PathMetadata::EndingLabel(value) => write!(svg, " data-ending-label=\"{value}\""),
             }
             .expect("writing to a String cannot fail");
         }
@@ -4005,6 +4279,30 @@ fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
     svg
 }
 
+fn add_ending_label(scene: &mut Scene, label: &str, x: i32, y: i32, measure_index: usize) {
+    let scale = 0.025;
+    let mut glyph_x = x as f64;
+    for (glyph_index, character) in label.chars().enumerate() {
+        if let Some(glyph) = noto_sans_glyphs::glyph(character) {
+            if !glyph.path.is_empty() {
+                scene.add_path(
+                    DrawLayer::Barline,
+                    format!("ending-label-{measure_index}-{glyph_index}"),
+                    Some(PathClass::EndingLabel),
+                    vec![PathMetadata::EndingLabel(label.to_owned())],
+                    PathGeometry::new(
+                        Some((glyph_x.round() as i32, y)),
+                        glyph.path,
+                        PathStyle::FilledGlyph,
+                    )
+                    .scaled(scale),
+                );
+            }
+            glyph_x += glyph.advance * scale;
+        }
+    }
+}
+
 fn render_part_svg(
     part: &Part,
     warnings: &mut Vec<String>,
@@ -4030,6 +4328,7 @@ fn render_part_svg(
     let mut occupied_text = Vec::new();
     let mut pending_texts = Vec::new();
     let mut notation_bounds = Vec::new();
+    let mut active_ending: Option<(i32, String)> = None;
     for (measure_index, measure) in part.measures.iter().enumerate() {
         let measure_start_x = f64::from(x);
         let mut previous_event_geometry = None;
@@ -4586,6 +4885,66 @@ fn render_part_svg(
                 PathStyle::StaffLine,
             ),
         );
+        for (is_repeat, repeat_x) in [
+            (
+                measure.barlines.iter().any(|barline| barline.repeat_start),
+                measure_start_x as i32,
+            ),
+            (
+                measure.barlines.iter().any(|barline| barline.repeat_end),
+                barline_x,
+            ),
+        ] {
+            if is_repeat {
+                let repeat_start = repeat_x == measure_start_x as i32;
+                let line_x = repeat_x + if repeat_start { 2 } else { -2 };
+                scene.add_path(
+                    DrawLayer::Barline,
+                    format!("repeat-barline-{measure_index}-{line_x}"),
+                    Some(PathClass::RepeatBarline),
+                    Vec::new(),
+                    PathGeometry::new(Some((line_x, 0)), "M0 27.5V108.5", PathStyle::MediumStroke),
+                );
+                for (dot_index, dot_y) in [54, 62].into_iter().enumerate() {
+                    let dot_x = line_x + if repeat_start { 5 } else { -8 };
+                    scene.add_path(
+                        DrawLayer::Barline,
+                        format!("repeat-dot-{measure_index}-{dot_index}"),
+                        Some(PathClass::RepeatDot),
+                        Vec::new(),
+                        PathGeometry::new(
+                            Some((dot_x, dot_y)),
+                            "M0 0C0 -2 4 -2 4 0S0 2 0 0Z",
+                            PathStyle::Solid,
+                        ),
+                    );
+                }
+            }
+        }
+        for barline in &measure.barlines {
+            if let Some(label) = &barline.ending_start {
+                let start_x = measure_start_x as i32;
+                view_top = view_top.min(-6);
+                active_ending = Some((start_x, label.clone()));
+                add_ending_label(&mut scene, label, start_x + 2, 14, measure_index);
+            }
+            if barline.ending_end.is_some() {
+                let (start_x, _) = active_ending
+                    .take()
+                    .expect("ending spans were validated during parsing");
+                scene.add_path(
+                    DrawLayer::Barline,
+                    format!("ending-bracket-{measure_index}"),
+                    Some(PathClass::EndingBracket),
+                    Vec::new(),
+                    PathGeometry::new(
+                        Some((start_x, 0)),
+                        format!("M0 27V14H{}V27", barline_x - start_x),
+                        PathStyle::MediumStroke,
+                    ),
+                );
+            }
+        }
         final_barline_x = barline_x;
         barline_positions.push(barline_x);
         right = right.max(barline_x + 12);

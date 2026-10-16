@@ -2556,6 +2556,115 @@ fn rejects_malformed_chord_structures_and_mismatched_event_semantics() {
 }
 
 #[test]
+fn renders_repeat_barlines_and_numbered_endings() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("repeat-endings.musicxml");
+    fs::write(
+        &input,
+        include_str!("../examples/repeat-endings/repeat-endings.musicxml"),
+    )
+    .expect("write repeat-endings example");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "repeat-endings score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("repeat-endings.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"repeat-barline\"").count(), 2, "{svg}");
+    assert_eq!(svg.matches("class=\"repeat-dot\"").count(), 4, "{svg}");
+    assert_eq!(svg.matches("class=\"ending-bracket\"").count(), 2, "{svg}");
+    for label in ["1", "2"] {
+        assert!(
+            svg.contains(&format!("data-ending-label=\"{label}\"")),
+            "missing ending label {label}: {svg}"
+        );
+    }
+    assert!(
+        !svg.contains("<text"),
+        "ending labels must be glyph paths: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_malformed_ending_spans_with_score_context() {
+    let source = include_str!("../examples/repeat-endings/repeat-endings.musicxml");
+    let cases = [
+        (
+            source.replace(
+                "<ending number=\"2\" type=\"discontinue\"/>",
+                "<ending number=\"3\" type=\"discontinue\"/>",
+            ),
+            "does not match active ending",
+        ),
+        (
+            source.replace("<ending number=\"2\" type=\"start\"/>", ""),
+            "has no matching start",
+        ),
+        (
+            source.replace("<ending number=\"1\" type=\"stop\"/>", ""),
+            "ending starts overlap",
+        ),
+    ];
+
+    for (index, (fixture, expected_diagnostic)) in cases.into_iter().enumerate() {
+        let directory = scratch_dir();
+        fs::create_dir_all(&directory).expect("create test directory");
+        let input = directory.join(format!("malformed-ending-{index}.musicxml"));
+        fs::write(&input, fixture).expect("write malformed ending score");
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(!output.status.success(), "malformed ending was accepted");
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(diagnostic.contains(expected_diagnostic), "{diagnostic}");
+        assert!(diagnostic.contains("XML path"), "{diagnostic}");
+        assert!(
+            !directory
+                .join(format!("malformed-ending-{index}.svg"))
+                .exists(),
+            "malformed ending emitted partial SVG"
+        );
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+}
+
+#[test]
+fn applies_part_edge_repeat_and_dozenal_ending_label_fallbacks() {
+    let fixture = include_str!("../examples/repeat-endings/repeat-endings.musicxml")
+        .replace("<repeat direction=\"forward\"/>", "")
+        .replace("ending number=\"1\"", "ending number=\"10\"");
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("implicit-repeat.musicxml");
+    fs::write(&input, fixture).expect("write implicit-repeat score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "implicit-repeat score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("implicit-repeat.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"repeat-barline\"").count(), 2, "{svg}");
+    assert_eq!(svg.matches("class=\"repeat-dot\"").count(), 4, "{svg}");
+    assert!(svg.contains("data-ending-label=\"↊\""), "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn separates_same_octave_chord_tones_and_clears_the_preceding_event() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
