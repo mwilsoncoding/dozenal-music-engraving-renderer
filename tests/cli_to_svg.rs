@@ -2994,25 +2994,27 @@ fn pads_events_from_both_sides_of_measure_barlines() {
 }
 
 #[test]
-fn engraves_supported_note_durations_and_only_the_two_dotted_forms() {
+fn engraves_supported_note_durations_and_one_or_two_dots() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
     let input = directory.join("duration-forms.musicxml");
     let forms = [
-        ("whole", 64, false),
-        ("half", 32, false),
-        ("quarter", 16, false),
-        ("eighth", 8, false),
-        ("16th", 4, false),
-        ("32nd", 2, false),
-        ("64th", 1, false),
-        ("quarter", 24, true),
-        ("half", 48, true),
+        ("whole", 64, 0),
+        ("half", 32, 0),
+        ("quarter", 16, 0),
+        ("eighth", 8, 0),
+        ("16th", 4, 0),
+        ("32nd", 2, 0),
+        ("64th", 1, 0),
+        ("quarter", 24, 1),
+        ("half", 48, 1),
+        ("quarter", 28, 2),
+        ("half", 56, 2),
     ];
     let events = forms
         .iter()
-        .map(|(note_type, ticks, dotted)| {
-            let dot = if *dotted { "<dot/>" } else { "" };
+        .map(|(note_type, ticks, dots)| {
+            let dot = "<dot/>".repeat(*dots);
             format!(
                 "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>{ticks}</duration><voice>1</voice><type>{note_type}</type>{dot}</note>\n"
             )
@@ -3040,9 +3042,9 @@ fn engraves_supported_note_durations_and_only_the_two_dotted_forms() {
         forms.len(),
         "{svg}"
     );
-    assert_eq!(svg.matches("class=\"stem\"").count(), 8, "{svg}");
+    assert_eq!(svg.matches("class=\"stem\"").count(), 10, "{svg}");
     assert_eq!(svg.matches("class=\"flag\"").count(), 4, "{svg}");
-    assert_eq!(svg.matches("class=\"duration-mark\"").count(), 6, "{svg}");
+    assert_eq!(svg.matches("class=\"duration-mark\"").count(), 12, "{svg}");
     let dotted_half_marks = (0..3)
         .map(|mark| {
             let id = format!("id=\"duration-mark-8-{mark}\"");
@@ -3090,8 +3092,302 @@ fn engraves_supported_note_durations_and_only_the_two_dotted_forms() {
         dotted_quarter_y, dotted_half_marks[1].1,
         "dotted-quarter dot must align with the lower colon dot"
     );
+    let double_dotted_quarter = ["duration-mark-9-0", "duration-mark-9-1"].map(|id| {
+        svg.lines()
+            .find(|line| line.contains(&format!("id=\"{id}\"")))
+            .and_then(|line| line.split(" d=\"M").nth(1))
+            .and_then(|path| path.split('a').next())
+            .and_then(|point| point.split_once(' '))
+            .map(|(x, y)| {
+                (
+                    x.parse::<i32>().expect("dot x"),
+                    y.parse::<i32>().expect("dot y"),
+                )
+            })
+            .expect("double-dotted quarter mark")
+    });
+    assert_eq!(double_dotted_quarter[0].1, double_dotted_quarter[1].1);
+    assert_eq!(double_dotted_quarter[1].0 - double_dotted_quarter[0].0, 7);
+    assert!(
+        svg.contains("id=\"duration-mark-10-3\""),
+        "double-dotted half marks missing: {svg}"
+    );
 
     fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn applies_multiple_dots_before_time_modification_for_event_spacing() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("dotted-tuplet-duration.musicxml");
+    let notes = "      <note><pitch><step>C</step><octave>0</octave></pitch><duration>42</duration><voice>1</voice><type>quarter</type><dot/><dot/></note>\n      <note><pitch><step>D</step><octave>5</octave></pitch><duration>24</duration><voice>1</voice><type>quarter</type><dot/><time-modification><actual-notes>3</actual-notes><normal-notes>2</normal-notes></time-modification></note>\n      <note><pitch><step>E</step><octave>9</octave></pitch><duration>24</duration><voice>1</voice><type>quarter</type></note>\n      <note><rest/><duration>36</duration><voice>1</voice><type>quarter</type><dot/></note>\n      <note><rest/><duration>84</duration><voice>1</voice><type>half</type><dot/><dot/></note>";
+    let source = include_str!("fixtures/minimal.musicxml");
+    let note_start = source.find("      <note>").expect("canonical note start");
+    let note_end = source.find("      </note>").expect("canonical note end") + 13;
+    let fixture = format!("{}{}{}", &source[..note_start], notes, &source[note_end..])
+        .replace("<divisions>1</divisions>", "<divisions>24</divisions>");
+    fs::write(&input, fixture).expect("write dotted tuplet score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "dotted tuplet score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("dotted-tuplet-duration.svg"))
+        .expect("read dotted tuplet SVG");
+    let tonehead_x = |octave| {
+        svg.lines()
+            .find(|line| {
+                line.contains("class=\"tonehead\"")
+                    && line.contains(&format!("data-octave=\"{octave}\""))
+            })
+            .and_then(|line| line.split("transform=\"translate(").nth(1))
+            .and_then(|transform| transform.split_whitespace().next())
+            .and_then(|x| x.parse::<f64>().ok())
+            .expect("tonehead x position")
+    };
+    let first_x = tonehead_x(0);
+    let second_x = tonehead_x(5);
+    let third_x = tonehead_x(9);
+    assert_eq!(
+        second_x - first_x,
+        70.0,
+        "double-dotted quarter onset: {svg}"
+    );
+    assert_eq!(
+        third_x - second_x,
+        40.0,
+        "dotted triplet quarter onset: {svg}"
+    );
+    assert_eq!(svg.matches("class=\"duration-mark\"").count(), 6, "{svg}");
+    let duration_mark_position = |id| {
+        let line = svg
+            .lines()
+            .find(|line| line.contains(&format!("id=\"{id}\"")))
+            .expect("duration mark path");
+        let coordinates = line
+            .split(" d=\"M")
+            .nth(1)
+            .and_then(|path| path.split('a').next())
+            .expect("duration mark coordinates");
+        let (x, y) = coordinates.split_once(' ').expect("duration mark x/y");
+        (
+            x.parse::<i32>().expect("numeric x"),
+            y.parse::<i32>().expect("numeric y"),
+        )
+    };
+    assert_ne!(
+        duration_mark_position("duration-mark-0-0"),
+        duration_mark_position("duration-mark-0-1"),
+        "double dots must have distinct positions: {svg}"
+    );
+    assert!(
+        svg.contains("id=\"duration-mark-3-0\""),
+        "dotted-quarter Rest mark missing: {svg}"
+    );
+    assert!(
+        svg.contains("id=\"duration-mark-4-1\""),
+        "double-dotted-half Rest marks missing: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn display_only_tuplet_group_uses_encoded_durations() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("display-only-tuplet.musicxml");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let notes = "      <note><pitch><step>C</step><octave>0</octave></pitch><duration>12</duration><voice>1</voice><type>quarter</type><notations><tuplet type=\"start\"/></notations></note>\n      <note><pitch><step>D</step><octave>5</octave></pitch><duration>12</duration><voice>1</voice><type>quarter</type><notations><tuplet type=\"stop\"/></notations></note>\n      <note><pitch><step>E</step><octave>9</octave></pitch><duration>16</duration><voice>1</voice><type>quarter</type></note>";
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace(original_note, notes)
+        .replace("<divisions>1</divisions>", "<divisions>16</divisions>");
+    fs::write(&input, fixture).expect("write display-only tuplet score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "display-only tuplet score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("display-only-tuplet.svg"))
+        .expect("read display-only tuplet SVG");
+    let tonehead_x = |octave| {
+        svg.lines()
+            .find(|line| {
+                line.contains("class=\"tonehead\"")
+                    && line.contains(&format!("data-octave=\"{octave}\""))
+            })
+            .and_then(|line| line.split("transform=\"translate(").nth(1))
+            .and_then(|transform| transform.split_whitespace().next())
+            .and_then(|x| x.parse::<f64>().ok())
+            .expect("tonehead x position")
+    };
+    let first_x = tonehead_x(0);
+    let second_x = tonehead_x(5);
+    let third_x = tonehead_x(9);
+    assert_eq!(second_x - first_x, 30.0, "encoded tuplet duration: {svg}");
+    assert_eq!(third_x - second_x, 30.0, "encoded tuplet duration: {svg}");
+    assert!(
+        !svg.contains("class=\"tuplet\""),
+        "tuplet graphics are out of scope: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_dotted_tuplets_example() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("dotted-tuplets.musicxml");
+    fs::write(
+        &input,
+        include_str!("../examples/dotted-tuplets/dotted-tuplets.musicxml"),
+    )
+    .expect("write dotted-tuplets example");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "dotted-tuplets example failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg =
+        fs::read_to_string(directory.join("dotted-tuplets.svg")).expect("read dotted-tuplets SVG");
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 5, "{svg}");
+    assert_eq!(svg.matches("class=\"duration-mark\"").count(), 2, "{svg}");
+    assert!(
+        !svg.contains("class=\"tuplet\""),
+        "tuplet graphics are out of scope: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_malformed_tuplet_ratios_and_spans_contextually() {
+    let make_note = |duration: u32, suffix: &str| {
+        format!(
+            "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>{duration}</duration><voice>1</voice><type>quarter</type>{suffix}</note>\n"
+        )
+    };
+    let note_start = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let nested_notes = format!(
+        "{}{}",
+        make_note(24, "<notations><tuplet type=\"start\"/></notations>"),
+        make_note(24, "<notations><tuplet type=\"start\"/></notations>")
+    );
+    let number_mismatch_notes = format!(
+        "{}{}",
+        make_note(
+            24,
+            "<notations><tuplet type=\"start\" number=\"1\"/></notations>"
+        ),
+        make_note(
+            24,
+            "<notations><tuplet type=\"stop\" number=\"2\"/></notations>"
+        )
+    );
+    let cases = [
+        (
+            "zero-actual",
+            make_note(
+                24,
+                "<time-modification><actual-notes>0</actual-notes><normal-notes>2</normal-notes></time-modification>",
+            ),
+            "<actual-notes> must be a positive integer",
+        ),
+        (
+            "zero-normal",
+            make_note(
+                24,
+                "<time-modification><actual-notes>3</actual-notes><normal-notes>0</normal-notes></time-modification>",
+            ),
+            "<normal-notes> must be a positive integer",
+        ),
+        (
+            "missing-normal",
+            make_note(
+                24,
+                "<time-modification><actual-notes>3</actual-notes></time-modification>",
+            ),
+            "requires <actual-notes> followed by <normal-notes>",
+        ),
+        (
+            "ratio-duration-mismatch",
+            make_note(
+                24,
+                "<time-modification><actual-notes>3</actual-notes><normal-notes>2</normal-notes></time-modification>",
+            ),
+            "duration 24 does not match <type>",
+        ),
+        (
+            "dotted-duration-mismatch",
+            make_note(24, "<dot/><dot/>"),
+            "duration 24 does not match <type>",
+        ),
+        (
+            "too-many-dots",
+            make_note(24, "<dot/><dot/><dot/>"),
+            "at most two augmentation dots are supported",
+        ),
+        (
+            "unmatched-stop",
+            make_note(24, "<notations><tuplet type=\"stop\"/></notations>"),
+            "tuplet stop has no matching start",
+        ),
+        (
+            "unclosed-group",
+            make_note(24, "<notations><tuplet type=\"start\"/></notations>"),
+            "tuplet group does not end before the measure boundary",
+        ),
+        (
+            "nested-group",
+            nested_notes,
+            "nested tuplet groups are unsupported",
+        ),
+        (
+            "number-mismatch",
+            number_mismatch_notes,
+            "does not match active tuplet",
+        ),
+    ];
+    for (name, notes, expected_error) in cases {
+        let directory = scratch_dir();
+        fs::create_dir_all(&directory).expect("create test directory");
+        let input = directory.join(format!("{name}.musicxml"));
+        let fixture = include_str!("fixtures/minimal.musicxml")
+            .replace(note_start, &notes)
+            .replace("<divisions>1</divisions>", "<divisions>24</divisions>");
+        fs::write(&input, fixture).expect("write invalid tuplet score");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "{name} was accepted: {diagnostic}"
+        );
+        assert!(diagnostic.contains(expected_error), "{name}: {diagnostic}");
+        assert!(!directory.join(format!("{name}.svg")).exists());
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
 }
 
 #[test]

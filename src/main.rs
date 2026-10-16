@@ -32,7 +32,7 @@ type VoiceBeamEvents = VoiceState<Vec<BeamEventPosition>>;
 #[derive(Clone)]
 struct Event {
     tones: Vec<ToneEvent>,
-    duration_units: u32,
+    duration_units: f64,
     onset_units: f64,
     duration_name: &'static str,
     dots: u8,
@@ -53,6 +53,17 @@ struct ToneEvent {
 struct ParsedNote {
     event: Event,
     chord_marker: Option<usize>,
+    tuplet_boundary: Option<TupletBoundary>,
+}
+
+enum TupletBoundary {
+    Start(String),
+    Stop(String),
+}
+
+struct TupletRatio {
+    actual: u32,
+    normal: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -648,6 +659,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
             let mut event_sources = Vec::new();
             let mut cursor_units = 0.0;
             let mut chord_targets: VoiceState<usize> = Vec::new();
+            let mut active_tuplets: VoiceState<Option<String>> = Vec::new();
             for child in &measure_element.children {
                 let element = &elements[*child];
                 match element.name.as_str() {
@@ -801,8 +813,40 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                             divisions,
                             &active_staff_states,
                             input_staff_count,
+                            &active_tuplets,
                             &mut warnings,
                         )?;
+                        let tuplet_index =
+                            voice_state_index(&mut active_tuplets, &parsed.event.voice_id);
+                        match parsed.tuplet_boundary.take() {
+                            Some(TupletBoundary::Start(number)) => {
+                                if active_tuplets[tuplet_index].1.is_some() {
+                                    return Err(element_diagnostic(
+                                        element,
+                                        "nested tuplet groups are unsupported".to_owned(),
+                                    ));
+                                }
+                                active_tuplets[tuplet_index].1 = Some(number);
+                            }
+                            Some(TupletBoundary::Stop(number)) => {
+                                match active_tuplets[tuplet_index].1.take() {
+                                    Some(active_number) if active_number == number => {}
+                                    Some(active_number) => {
+                                        return Err(element_diagnostic(
+                                            element,
+                                            format!("tuplet stop number {number:?} does not match active tuplet {active_number:?}"),
+                                        ));
+                                    }
+                                    None => {
+                                        return Err(element_diagnostic(
+                                            element,
+                                            "tuplet stop has no matching start".to_owned(),
+                                        ));
+                                    }
+                                }
+                            }
+                            None => {}
+                        }
                         parsed.event.onset_units = cursor_units;
                         if let Some(chord_marker) = parsed.chord_marker {
                             let Some(target) = chord_targets
@@ -883,7 +927,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                             } else {
                                 chord_targets.retain(|(voice, _)| voice != &voice_id);
                             }
-                            cursor_units += f64::from(duration_units);
+                            cursor_units += duration_units;
                         }
                     }
                     "backup" | "forward" => {
@@ -964,6 +1008,12 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                         ));
                     }
                 }
+            }
+            if active_tuplets.iter().any(|(_, active)| active.is_some()) {
+                return Err(element_diagnostic(
+                    measure_element,
+                    "tuplet group does not end before the measure boundary".to_owned(),
+                ));
             }
             if events.is_empty() {
                 return Err(element_diagnostic(
@@ -3033,12 +3083,228 @@ fn parse_cursor_movement(
     Ok(f64::from(ticks) * 16.0 / f64::from(divisions))
 }
 
+fn duration_dot_factor(dot_count: usize) -> (u32, u32) {
+    match dot_count {
+        0 => (1, 1),
+        1 => (3, 2),
+        2 => (7, 4),
+        _ => unreachable!("dot count is validated before duration conversion"),
+    }
+}
+
+fn duration_matches_type(
+    duration_ticks: u32,
+    divisions: u32,
+    base_units: u32,
+    dot_count: usize,
+    ratio: Option<&TupletRatio>,
+) -> bool {
+    let (dot_numerator, dot_denominator) = duration_dot_factor(dot_count);
+    let actual = ratio.map_or(1, |ratio| ratio.actual);
+    let normal = ratio.map_or(1, |ratio| ratio.normal);
+    u128::from(duration_ticks) * 16 * u128::from(actual) * u128::from(dot_denominator)
+        == u128::from(divisions)
+            * u128::from(base_units)
+            * u128::from(dot_numerator)
+            * u128::from(normal)
+}
+
+fn parse_time_modification(
+    elements: &[Element],
+    time_modification: usize,
+) -> Result<TupletRatio, String> {
+    let element = &elements[time_modification];
+    require_no_attributes(element)?;
+    require_container_text(element)?;
+    if element.children.len() < 2
+        || elements[element.children[0]].name != "actual-notes"
+        || elements[element.children[1]].name != "normal-notes"
+    {
+        return Err(element_diagnostic(
+            element,
+            "<time-modification> requires <actual-notes> followed by <normal-notes>".to_owned(),
+        ));
+    }
+    let parse_count = |index: usize, name: &str| -> Result<u32, String> {
+        let child = &elements[element.children[index]];
+        require_no_attributes(child)?;
+        leaf_text(child)?
+            .parse::<u32>()
+            .ok()
+            .filter(|count| *count > 0)
+            .ok_or_else(|| {
+                element_diagnostic(child, format!("<{name}> must be a positive integer"))
+            })
+    };
+    let actual = parse_count(0, "actual-notes")?;
+    let normal = parse_count(1, "normal-notes")?;
+    let mut saw_normal_type = false;
+    for child in element.children.iter().skip(2) {
+        let child_element = &elements[*child];
+        match child_element.name.as_str() {
+            "normal-type" if !saw_normal_type => {
+                require_no_attributes(child_element)?;
+                let value = leaf_text(child_element)?;
+                if !matches!(
+                    value,
+                    "whole" | "half" | "quarter" | "eighth" | "16th" | "32nd" | "64th"
+                ) {
+                    return Err(element_diagnostic(
+                        child_element,
+                        format!("unsupported tuplet normal type {value:?}"),
+                    ));
+                }
+                saw_normal_type = true;
+            }
+            "normal-dot" => {
+                require_no_attributes(child_element)?;
+                require_container_text(child_element)?;
+                if !child_element.children.is_empty() {
+                    return Err(element_diagnostic(
+                        child_element,
+                        "<normal-dot> must be empty".to_owned(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(element_diagnostic(
+                    child_element,
+                    "unsupported <time-modification> content".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(TupletRatio { actual, normal })
+}
+
+fn parse_tuplet_notations(
+    elements: &[Element],
+    notations: usize,
+) -> Result<Option<TupletBoundary>, String> {
+    let element = &elements[notations];
+    require_no_attributes(element)?;
+    require_container_text(element)?;
+    if element.children.is_empty() {
+        return Err(element_diagnostic(
+            element,
+            "<notations> must contain a supported <tuplet> boundary".to_owned(),
+        ));
+    }
+    if element.children.len() != 1 || elements[element.children[0]].name != "tuplet" {
+        return Err(element_diagnostic(
+            element,
+            "only one <tuplet> boundary per note is supported".to_owned(),
+        ));
+    }
+    let tuplet = element.children[0];
+    let tuplet_element = &elements[tuplet];
+    validate_attributes(
+        tuplet_element,
+        &[
+            "type",
+            "number",
+            "bracket",
+            "show-number",
+            "show-type",
+            "line-shape",
+            "placement",
+        ],
+    )?;
+    require_container_text(tuplet_element)?;
+    let number = optional_attribute(tuplet_element, "number").unwrap_or("1");
+    if number
+        .parse::<u32>()
+        .ok()
+        .filter(|number| *number > 0)
+        .is_none()
+    {
+        return Err(element_diagnostic(
+            tuplet_element,
+            "tuplet number must be a positive integer".to_owned(),
+        ));
+    }
+    let mut saw_actual = false;
+    let mut saw_normal = false;
+    for display_group in &tuplet_element.children {
+        let group = &elements[*display_group];
+        match group.name.as_str() {
+            "tuplet-actual" if !saw_actual => saw_actual = true,
+            "tuplet-normal" if !saw_normal => saw_normal = true,
+            _ => {
+                return Err(element_diagnostic(
+                    group,
+                    "unsupported or duplicate tuplet display group".to_owned(),
+                ));
+            }
+        }
+        require_no_attributes(group)?;
+        require_container_text(group)?;
+        let mut saw_number = false;
+        let mut saw_type = false;
+        for display_value in &group.children {
+            let value = &elements[*display_value];
+            match value.name.as_str() {
+                "tuplet-number" if !saw_number && !saw_type => {
+                    require_no_attributes(value)?;
+                    leaf_text(value)?;
+                    saw_number = true;
+                }
+                "tuplet-type" if !saw_type => {
+                    require_no_attributes(value)?;
+                    let note_type = leaf_text(value)?;
+                    if !matches!(
+                        note_type,
+                        "whole" | "half" | "quarter" | "eighth" | "16th" | "32nd" | "64th"
+                    ) {
+                        return Err(element_diagnostic(
+                            value,
+                            format!("unsupported tuplet display type {note_type:?}"),
+                        ));
+                    }
+                    saw_type = true;
+                }
+                "tuplet-dot" if saw_type => {
+                    require_no_attributes(value)?;
+                    require_container_text(value)?;
+                    if !value.children.is_empty() {
+                        return Err(element_diagnostic(
+                            value,
+                            "<tuplet-dot> must be empty".to_owned(),
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(element_diagnostic(
+                        value,
+                        "unsupported tuplet display value".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+    let tuplet_type = optional_attribute(tuplet_element, "type").ok_or_else(|| {
+        element_diagnostic(
+            tuplet_element,
+            "<tuplet> requires a type attribute".to_owned(),
+        )
+    })?;
+    match tuplet_type {
+        "start" => Ok(Some(TupletBoundary::Start(number.to_owned()))),
+        "stop" => Ok(Some(TupletBoundary::Stop(number.to_owned()))),
+        value => Err(element_diagnostic(
+            tuplet_element,
+            format!("tuplet type must be 'start' or 'stop', not {value:?}"),
+        )),
+    }
+}
+
 fn parse_note(
     elements: &[Element],
     note: usize,
     divisions: u32,
     input_staff_states: &[InputStaffState],
     input_staff_count: u32,
+    active_tuplets: &VoiceState<Option<String>>,
     warnings: &mut Vec<String>,
 ) -> Result<ParsedNote, String> {
     let note_element = &elements[note];
@@ -3138,7 +3404,8 @@ fn parse_note(
         .get(position)
         .ok_or_else(|| element_diagnostic(note_element, "note event requires <type>".to_owned()))?;
     position += 1;
-    let dot = if children
+    let mut dot_count = 0;
+    while children
         .get(position)
         .is_some_and(|child| elements[*child].name == "dot")
     {
@@ -3150,10 +3417,8 @@ fn parse_note(
             ));
         }
         position += 1;
-        Some(dot)
-    } else {
-        None
-    };
+        dot_count += 1;
+    }
     let accidental = children
         .get(position)
         .filter(|child| elements[**child].name == "accidental")
@@ -3161,6 +3426,15 @@ fn parse_note(
     if accidental.is_some() {
         position += 1;
     }
+    let time_modification = children
+        .get(position)
+        .filter(|child| elements[**child].name == "time-modification")
+        .copied()
+        .map(|time_modification| {
+            position += 1;
+            parse_time_modification(elements, time_modification)
+        })
+        .transpose()?;
     let stem = children
         .get(position)
         .filter(|child| elements[**child].name == "stem")
@@ -3245,6 +3519,16 @@ fn parse_note(
         beams.push(BeamMark { level, state });
         position += 1;
     }
+    let tuplet_boundary = children
+        .get(position)
+        .filter(|child| elements[**child].name == "notations")
+        .copied()
+        .map(|notations| {
+            position += 1;
+            parse_tuplet_notations(elements, notations)
+        })
+        .transpose()?
+        .flatten();
     if position != children.len() {
         return Err(element_diagnostic(
             note_element,
@@ -3303,17 +3587,16 @@ fn parse_note(
         }
         validate_pitched_notehead(elements, notehead, duration_name, warnings)?;
     }
-    let dots = usize::from(dot.is_some());
-    if dots > 0 && !matches!(duration_name, "quarter" | "half") {
+    if dot_count > 2 {
         return Err(element_diagnostic(
-            &elements[note_type],
-            "only dotted quarter and dotted half notes are supported".to_owned(),
+            note_element,
+            "at most two augmentation dots are supported".to_owned(),
         ));
     }
-    if is_rest && dots != 0 {
+    if dot_count > 0 && !matches!(duration_name, "quarter" | "half") {
         return Err(element_diagnostic(
-            &elements[dot.expect("dot exists")],
-            "dotted rests are not supported".to_owned(),
+            &elements[note_type],
+            "dots are supported only on quarter and half notes and Rests".to_owned(),
         ));
     }
     if is_rest && !beams.is_empty() {
@@ -3344,20 +3627,6 @@ fn parse_note(
             ),
         ));
     }
-    let duration_units = if dots == 0 {
-        base_units
-    } else {
-        base_units + base_units / 2
-    };
-    let duration_marks = if dots == 1 {
-        if duration_name == "quarter" {
-            1
-        } else {
-            3
-        }
-    } else {
-        mark_count
-    };
     let duration_ticks = leaf_text(&elements[duration])?
         .parse::<u32>()
         .ok()
@@ -3368,12 +3637,43 @@ fn parse_note(
                 "<duration> must be a positive integer".to_owned(),
             )
         })?;
-    if u64::from(duration_ticks) * 16 != u64::from(divisions) * u64::from(duration_units) {
+    let display_only_tuplet = time_modification.is_none()
+        && (active_tuplets
+            .iter()
+            .any(|(active_voice, number)| active_voice == &voice_id && number.is_some())
+            || matches!(tuplet_boundary, Some(TupletBoundary::Start(_))));
+    if !display_only_tuplet
+        && !duration_matches_type(
+            duration_ticks,
+            divisions,
+            base_units,
+            dot_count,
+            time_modification.as_ref(),
+        )
+    {
         return Err(element_diagnostic(
             &elements[duration],
             format!("duration {duration_ticks} does not match <type> at divisions {divisions}"),
         ));
     }
+    let (dot_numerator, dot_denominator) = duration_dot_factor(dot_count);
+    let duration_units = if display_only_tuplet {
+        f64::from(duration_ticks) * 16.0 / f64::from(divisions)
+    } else {
+        f64::from(base_units) * f64::from(dot_numerator) / f64::from(dot_denominator)
+            * time_modification.as_ref().map_or(1.0, |ratio| {
+                f64::from(ratio.normal) / f64::from(ratio.actual)
+            })
+    };
+    let duration_marks = if is_rest {
+        dot_count as u8
+    } else {
+        match duration_name {
+            "quarter" => dot_count as u8,
+            "half" => mark_count + dot_count as u8,
+            _ => mark_count,
+        }
+    };
     let tones = if is_rest {
         Vec::new()
     } else {
@@ -3397,6 +3697,7 @@ fn parse_note(
             is_spacer: false,
         },
         chord_marker,
+        tuplet_boundary,
     })
 }
 
@@ -4098,7 +4399,7 @@ fn collect_value_errors(elements: &[Element]) -> Vec<String> {
 fn collect_duration_errors(elements: &[Element]) -> Vec<String> {
     let mut errors = Vec::new();
     let mut active_divisions = None;
-    for (index, element) in elements.iter().enumerate() {
+    for element in elements {
         if element.name == "divisions" && element.children.is_empty() {
             active_divisions = element
                 .text
@@ -4141,7 +4442,13 @@ fn collect_duration_errors(elements: &[Element]) -> Vec<String> {
             .iter()
             .filter(|child| elements[**child].name == "dot")
             .count();
-        if dots > 1 || (dots == 1 && !matches!(elements[note_type].text.trim(), "quarter" | "half"))
+        if dots > 0
+            || element.children.iter().any(|child| {
+                matches!(
+                    elements[*child].name.as_str(),
+                    "time-modification" | "notations"
+                )
+            })
         {
             continue;
         }
@@ -4149,18 +4456,12 @@ fn collect_duration_errors(elements: &[Element]) -> Vec<String> {
         let Some(duration_ticks) = duration_ticks.filter(|value| *value > 0) else {
             continue;
         };
-        let duration_units = if dots == 1 {
-            base_units + base_units / 2
-        } else {
-            base_units
-        };
-        if u64::from(duration_ticks) * 16 != u64::from(divisions) * duration_units {
+        if u64::from(duration_ticks) * 16 != u64::from(divisions) * base_units {
             errors.push(element_diagnostic(
                 &elements[duration],
                 format!("duration {duration_ticks} does not match <type> at divisions {divisions}"),
             ));
         }
-        let _ = index;
     }
     errors
 }
@@ -4488,6 +4789,26 @@ impl EventGeometry {
     }
 }
 
+fn duration_mark_position(
+    duration_name: &str,
+    mark_count: u8,
+    mark_index: u8,
+    x: i32,
+    lane_y: i32,
+) -> (i32, i32) {
+    match duration_name {
+        "quarter" => (x + 14 + i32::from(mark_index) * 7, lane_y + 12),
+        "half" if mark_index < 2 => (x + 14, lane_y + 5 + i32::from(mark_index) * 7),
+        "half" => (x + 21 + i32::from(mark_index - 2) * 7, lane_y + 12),
+        _ if mark_count > 0 => (x + 14, lane_y + 9),
+        _ => unreachable!("event has no duration marks"),
+    }
+}
+
+fn rest_duration_mark_position(mark_index: u8, x: i32, rest_y: i32) -> (i32, i32) {
+    (x + 14 + i32::from(mark_index) * 7, rest_y + 9)
+}
+
 fn event_geometry(
     event: &Event,
     x: i32,
@@ -4509,6 +4830,15 @@ fn event_geometry(
             f64::from(x) + glyph.bounds.2,
             rest_y + glyph.bounds.3,
         ));
+        for mark in 0..event.dots {
+            let (mark_x, mark_y) = rest_duration_mark_position(mark, x, rest_y.floor() as i32);
+            primary.push(ComponentBounds::filled(
+                f64::from(mark_x),
+                f64::from(mark_y) - 1.2,
+                f64::from(mark_x) + 2.4,
+                f64::from(mark_y) + 1.2,
+            ));
+        }
         return EventGeometry { primary, incoming };
     }
 
@@ -4616,13 +4946,13 @@ fn event_geometry(
 
     let first_tone = &event.tones[0].tone;
     for mark in 0..event.dots {
-        let (mark_x, mark_y) = match (event.duration_name, event.dots, mark) {
-            ("quarter", 1, _) => (x + 14, lane_y(first_tone.octave) + 12),
-            ("half", 2, _) => (x + 14, lane_y(first_tone.octave) + 5 + i32::from(mark) * 7),
-            ("half", 3, 0..=1) => (x + 14, lane_y(first_tone.octave) + 5 + i32::from(mark) * 7),
-            ("half", 3, _) => (x + 21, lane_y(first_tone.octave) + 12),
-            _ => (x + 14, lane_y(first_tone.octave) + 9),
-        };
+        let (mark_x, mark_y) = duration_mark_position(
+            event.duration_name,
+            event.dots,
+            mark,
+            x,
+            lane_y(first_tone.octave),
+        );
         primary.push(ComponentBounds::filled(
             f64::from(mark_x),
             f64::from(mark_y) - 1.2,
@@ -5727,7 +6057,7 @@ fn render_part_svg(
             }
             event_positions.push(x);
             placed_event_geometries.push((event.onset_units, geometry.clone()));
-            measure_end_x = measure_end_x.max(x + (event.duration_units * 5).div_ceil(2) as i32);
+            measure_end_x = measure_end_x.max(x + (event.duration_units * 2.5).ceil() as i32);
             notation_bounds.extend(geometry.all().copied());
             while measure
                 .texts
@@ -5794,6 +6124,20 @@ fn render_part_svg(
                     PathGeometry::new(Some((x, rest_y_base)), glyph.path, PathStyle::BravuraGlyph)
                         .offset_y(rest_y - f64::from(rest_y_base)),
                 );
+                for mark in 0..event.dots {
+                    let (mark_x, mark_y) = rest_duration_mark_position(mark, x, rest_y_base);
+                    scene.add_path(
+                        DrawLayer::Event,
+                        format!("duration-mark-{index}-{mark}"),
+                        Some(PathClass::DurationMark),
+                        Vec::new(),
+                        PathGeometry::new(
+                            None,
+                            format!("M{mark_x} {mark_y}a1.2 1.2 0 1 0 2.4 0a1.2 1.2 0 1 0 -2.4 0"),
+                            PathStyle::Solid,
+                        ),
+                    );
+                }
                 right = right.max(x + 24);
                 previous_event_geometry = Some(geometry);
                 index += 1;
@@ -5967,15 +6311,13 @@ fn render_part_svg(
                 }
             }
             for mark in 0..event.dots {
-                let (mark_x, mark_y) = match (event.duration_name, event.dots, mark) {
-                    ("quarter", 1, _) => (x + 14, lane_y(first_tone.octave) + 12),
-                    ("half", 2, _) => (x + 14, lane_y(first_tone.octave) + 5 + i32::from(mark) * 7),
-                    ("half", 3, 0..=1) => {
-                        (x + 14, lane_y(first_tone.octave) + 5 + i32::from(mark) * 7)
-                    }
-                    ("half", 3, _) => (x + 21, lane_y(first_tone.octave) + 12),
-                    _ => (x + 14, lane_y(first_tone.octave) + 9),
-                };
+                let (mark_x, mark_y) = duration_mark_position(
+                    event.duration_name,
+                    event.dots,
+                    mark,
+                    x,
+                    lane_y(first_tone.octave),
+                );
                 scene.add_path(
                     DrawLayer::Event,
                     format!("duration-mark-{index}-{mark}"),
@@ -6747,8 +7089,13 @@ mod tests {
                     .events
                     .iter()
                     .map(|event| event.duration_units)
-                    .sum::<u32>();
-                assert_eq!(duration_units, 64, "{name} measure {} duration", index + 1);
+                    .sum::<f64>();
+                assert_eq!(
+                    duration_units,
+                    64.0,
+                    "{name} measure {} duration",
+                    index + 1
+                );
             }
         }
     }
