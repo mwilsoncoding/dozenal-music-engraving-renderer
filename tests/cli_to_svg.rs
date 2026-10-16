@@ -3269,10 +3269,99 @@ fn renders_dotted_tuplets_example() {
         fs::read_to_string(directory.join("dotted-tuplets.svg")).expect("read dotted-tuplets SVG");
     assert_eq!(svg.matches("class=\"tonehead\"").count(), 5, "{svg}");
     assert_eq!(svg.matches("class=\"duration-mark\"").count(), 2, "{svg}");
+    let number = svg
+        .lines()
+        .find(|line| line.contains("class=\"tuplet-number\""))
+        .expect("triplet number path");
+    assert!(number.contains("data-number=\"3\""), "{number}");
     assert!(
-        !svg.contains("class=\"tuplet\""),
-        "tuplet graphics are out of scope: {svg}"
+        number.contains("scale(0.015)"),
+        "tuplet number should be small: {number}"
     );
+    let number_x = number
+        .split("data-center-x=\"")
+        .nth(1)
+        .and_then(|center| center.split('"').next())
+        .and_then(|x| x.parse::<f64>().ok())
+        .expect("tuplet number x position");
+    let stem_x = |id: &str| {
+        svg.lines()
+            .find(|line| line.contains(&format!("id=\"{id}\"")))
+            .and_then(|line| line.split(" d=\"M").nth(1))
+            .and_then(|path| path.split_whitespace().next())
+            .and_then(|x| x.parse::<f64>().ok())
+            .expect("tuplet stem x position")
+    };
+    assert_eq!(number_x, (stem_x("stem-2") + stem_x("stem-4")) / 2.0);
+    let bracket = svg
+        .lines()
+        .find(|line| line.contains("class=\"tuplet-bracket\""))
+        .expect("tuplet bracket path");
+    assert!(bracket.contains("fill=\"none\""), "{bracket}");
+    let bracket_path = bracket
+        .split(" d=\"")
+        .nth(1)
+        .and_then(|path| path.split('"').next())
+        .expect("tuplet bracket geometry");
+    let bracket_y = bracket_path
+        .split_once('V')
+        .and_then(|(_, remainder)| remainder.split_once('H'))
+        .and_then(|(y, _)| y.parse::<f64>().ok())
+        .expect("tuplet bracket horizontal position");
+    let number_y = number
+        .split("data-center-y=\"")
+        .nth(1)
+        .and_then(|center| center.split('"').next())
+        .and_then(|y| y.parse::<f64>().ok())
+        .expect("tuplet number vertical center");
+    assert_eq!(number_y, bracket_y);
+    let stem_tip_y = |id: &str| {
+        svg.lines()
+            .find(|line| line.contains(&format!("id=\"{id}\"")))
+            .and_then(|line| line.split(" d=\"").nth(1))
+            .and_then(|path| path.split('V').next_back())
+            .and_then(|y| y.split('"').next())
+            .and_then(|y| y.parse::<f64>().ok())
+            .expect("tuplet stem tip y position")
+    };
+    let bracket_corner_y = |start: bool| {
+        let coordinate = if start {
+            bracket_path.split_once('V').map(|(start, _)| start)
+        } else {
+            bracket_path.rsplit_once('V').map(|(_, end)| end)
+        }
+        .expect("tuplet bracket corner");
+        coordinate
+            .split_whitespace()
+            .last()
+            .and_then(|y| y.parse::<f64>().ok())
+            .expect("tuplet bracket corner y position")
+    };
+    assert!((bracket_corner_y(true) - stem_tip_y("stem-2")).abs() >= 2.0);
+    assert!((bracket_corner_y(false) - stem_tip_y("stem-4")).abs() >= 2.0);
+    assert_eq!((bracket_y - bracket_corner_y(true)).abs(), 7.5);
+    assert_eq!((bracket_y - bracket_corner_y(false)).abs(), 7.5);
+
+    let no_bracket_input = directory.join("dotted-tuplets-no-bracket.musicxml");
+    let no_bracket_source = include_str!("../examples/dotted-tuplets/dotted-tuplets.musicxml")
+        .replace(
+            "<tuplet type=\"start\" number=\"1\">",
+            "<tuplet type=\"start\" number=\"1\" bracket=\"no\">",
+        );
+    fs::write(&no_bracket_input, no_bracket_source).expect("write unbracketed tuplet score");
+    let no_bracket_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&no_bracket_input)
+        .output()
+        .expect("run CLI without tuplet bracket");
+    assert!(
+        no_bracket_output.status.success(),
+        "unbracketed tuplet score failed: {}",
+        String::from_utf8_lossy(&no_bracket_output.stderr)
+    );
+    let no_bracket_svg = fs::read_to_string(directory.join("dotted-tuplets-no-bracket.svg"))
+        .expect("read unbracketed tuplet SVG");
+    assert_eq!(no_bracket_svg.matches("class=\"tuplet-number\"").count(), 1);
+    assert!(!no_bracket_svg.contains("class=\"tuplet-bracket\""));
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }

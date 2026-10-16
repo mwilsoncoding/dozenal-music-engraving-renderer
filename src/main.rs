@@ -56,8 +56,31 @@ struct ParsedNote {
     tuplet_boundary: Option<TupletBoundary>,
 }
 
+#[derive(Clone)]
+struct TupletSpan {
+    start_event_index: usize,
+    end_event_index: usize,
+    voice_id: VoiceId,
+    display_number: Option<String>,
+    bracket: bool,
+}
+
+struct ActiveTuplet {
+    number: String,
+    start_event_index: usize,
+    voice_id: VoiceId,
+    display_number: Option<String>,
+    bracket: bool,
+}
+
+struct TupletStart {
+    number: String,
+    display_number: Option<String>,
+    bracket: bool,
+}
+
 enum TupletBoundary {
-    Start(String),
+    Start(TupletStart),
     Stop(String),
 }
 
@@ -84,6 +107,7 @@ enum BeamState {
 #[derive(Clone)]
 struct Measure {
     events: Vec<Event>,
+    tuplets: Vec<TupletSpan>,
     harmonies: Vec<PositionedHarmony>,
     texts: Vec<PositionedText>,
     meter: Option<Meter>,
@@ -474,6 +498,7 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
                         .collect();
                     Measure {
                         events,
+                        tuplets: measure.tuplets.clone(),
                         harmonies,
                         texts,
                         meter: staff_state.meter,
@@ -653,13 +678,14 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
             required_attribute(measure_element, "number")?;
             require_container_text(measure_element)?;
             let mut events: Vec<Event> = Vec::new();
+            let mut tuplets = Vec::new();
             let mut harmonies = Vec::new();
             let mut texts = Vec::new();
             let mut barlines = Vec::new();
             let mut event_sources = Vec::new();
             let mut cursor_units = 0.0;
             let mut chord_targets: VoiceState<usize> = Vec::new();
-            let mut active_tuplets: VoiceState<Option<String>> = Vec::new();
+            let mut active_tuplets: VoiceState<Option<ActiveTuplet>> = Vec::new();
             for child in &measure_element.children {
                 let element = &elements[*child];
                 match element.name.as_str() {
@@ -816,25 +842,48 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                             &active_tuplets,
                             &mut warnings,
                         )?;
+                        let tuplet_event_index = parsed
+                            .chord_marker
+                            .and_then(|_| {
+                                chord_targets
+                                    .iter()
+                                    .find(|(voice, _)| voice == &parsed.event.voice_id)
+                                    .map(|(_, target)| *target)
+                            })
+                            .unwrap_or(events.len());
                         let tuplet_index =
                             voice_state_index(&mut active_tuplets, &parsed.event.voice_id);
                         match parsed.tuplet_boundary.take() {
-                            Some(TupletBoundary::Start(number)) => {
+                            Some(TupletBoundary::Start(start)) => {
                                 if active_tuplets[tuplet_index].1.is_some() {
                                     return Err(element_diagnostic(
                                         element,
                                         "nested tuplet groups are unsupported".to_owned(),
                                     ));
                                 }
-                                active_tuplets[tuplet_index].1 = Some(number);
+                                active_tuplets[tuplet_index].1 = Some(ActiveTuplet {
+                                    number: start.number,
+                                    start_event_index: tuplet_event_index,
+                                    voice_id: parsed.event.voice_id.clone(),
+                                    display_number: start.display_number,
+                                    bracket: start.bracket,
+                                });
                             }
                             Some(TupletBoundary::Stop(number)) => {
                                 match active_tuplets[tuplet_index].1.take() {
-                                    Some(active_number) if active_number == number => {}
-                                    Some(active_number) => {
+                                    Some(active_tuplet) if active_tuplet.number == number => {
+                                        tuplets.push(TupletSpan {
+                                            start_event_index: active_tuplet.start_event_index,
+                                            end_event_index: tuplet_event_index,
+                                            voice_id: active_tuplet.voice_id,
+                                            display_number: active_tuplet.display_number,
+                                            bracket: active_tuplet.bracket,
+                                        });
+                                    }
+                                    Some(active_tuplet) => {
                                         return Err(element_diagnostic(
                                             element,
-                                            format!("tuplet stop number {number:?} does not match active tuplet {active_number:?}"),
+                                            format!("tuplet stop number {number:?} does not match active tuplet {:?}", active_tuplet.number),
                                         ));
                                     }
                                     None => {
@@ -1028,6 +1077,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
             }
             measures.push(Measure {
                 events,
+                tuplets,
                 harmonies,
                 texts,
                 meter: active_staff_states.first().and_then(|state| state.meter),
@@ -3180,6 +3230,7 @@ fn parse_time_modification(
 fn parse_tuplet_notations(
     elements: &[Element],
     notations: usize,
+    ratio: Option<&TupletRatio>,
 ) -> Result<Option<TupletBoundary>, String> {
     let element = &elements[notations];
     require_no_attributes(element)?;
@@ -3225,6 +3276,8 @@ fn parse_tuplet_notations(
     }
     let mut saw_actual = false;
     let mut saw_normal = false;
+    let mut actual_number = None;
+    let mut normal_number = None;
     for display_group in &tuplet_element.children {
         let group = &elements[*display_group];
         match group.name.as_str() {
@@ -3246,7 +3299,23 @@ fn parse_tuplet_notations(
             match value.name.as_str() {
                 "tuplet-number" if !saw_number && !saw_type => {
                     require_no_attributes(value)?;
-                    leaf_text(value)?;
+                    let number_text = leaf_text(value)?;
+                    if number_text
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|number| *number > 0)
+                        .is_none()
+                    {
+                        return Err(element_diagnostic(
+                            value,
+                            "tuplet display number must be a positive integer".to_owned(),
+                        ));
+                    }
+                    if group.name == "tuplet-actual" {
+                        actual_number = Some(number_text.to_owned());
+                    } else {
+                        normal_number = Some(number_text.to_owned());
+                    }
                     saw_number = true;
                 }
                 "tuplet-type" if !saw_type => {
@@ -3288,8 +3357,39 @@ fn parse_tuplet_notations(
             "<tuplet> requires a type attribute".to_owned(),
         )
     })?;
+    let bracket = match optional_attribute(tuplet_element, "bracket") {
+        Some("yes") | None => true,
+        Some("no") => false,
+        Some(value) => {
+            return Err(element_diagnostic(
+                tuplet_element,
+                format!("tuplet bracket must be 'yes' or 'no', not {value:?}"),
+            ));
+        }
+    };
+    let actual_number = actual_number.or_else(|| ratio.map(|ratio| ratio.actual.to_string()));
+    let normal_number = normal_number.or_else(|| ratio.map(|ratio| ratio.normal.to_string()));
+    let display_number = match optional_attribute(tuplet_element, "show-number").unwrap_or("actual")
+    {
+        "actual" => actual_number,
+        "both" => match (actual_number, normal_number) {
+            (Some(actual), Some(normal)) => Some(format!("{actual}:{normal}")),
+            (actual, _) => actual,
+        },
+        "none" => None,
+        value => {
+            return Err(element_diagnostic(
+                tuplet_element,
+                format!("tuplet show-number must be 'actual', 'both', or 'none', not {value:?}"),
+            ));
+        }
+    };
     match tuplet_type {
-        "start" => Ok(Some(TupletBoundary::Start(number.to_owned()))),
+        "start" => Ok(Some(TupletBoundary::Start(TupletStart {
+            number: number.to_owned(),
+            display_number,
+            bracket,
+        }))),
         "stop" => Ok(Some(TupletBoundary::Stop(number.to_owned()))),
         value => Err(element_diagnostic(
             tuplet_element,
@@ -3304,7 +3404,7 @@ fn parse_note(
     divisions: u32,
     input_staff_states: &[InputStaffState],
     input_staff_count: u32,
-    active_tuplets: &VoiceState<Option<String>>,
+    active_tuplets: &VoiceState<Option<ActiveTuplet>>,
     warnings: &mut Vec<String>,
 ) -> Result<ParsedNote, String> {
     let note_element = &elements[note];
@@ -3525,7 +3625,7 @@ fn parse_note(
         .copied()
         .map(|notations| {
             position += 1;
-            parse_tuplet_notations(elements, notations)
+            parse_tuplet_notations(elements, notations, time_modification.as_ref())
         })
         .transpose()?
         .flatten();
@@ -4639,6 +4739,8 @@ enum PathClass {
     ChordSymbolRoot,
     ChordSymbolBass,
     ChordSymbolTone,
+    TupletNumber,
+    TupletBracket,
     TextGlyph,
     DirectionSymbol,
     SegnoMark,
@@ -4660,6 +4762,9 @@ enum PathMetadata {
     Duration(&'static str),
     ChordRole(&'static str),
     BeamLevel(u8),
+    TupletNumber(String),
+    TupletCenterX(f64),
+    TupletCenterY(f64),
     EndingLabel(String),
 }
 
@@ -5150,6 +5255,8 @@ impl Scene {
                 PathClass::ChordSymbolRoot => "chord-symbol-root",
                 PathClass::ChordSymbolBass => "chord-symbol-bass",
                 PathClass::ChordSymbolTone => "chord-symbol-tone",
+                PathClass::TupletNumber => "tuplet-number",
+                PathClass::TupletBracket => "tuplet-bracket",
                 PathClass::TextGlyph => "text-glyph",
                 PathClass::DirectionSymbol => "direction-symbol",
                 PathClass::SegnoMark => "segno-mark",
@@ -5172,6 +5279,15 @@ impl Scene {
                 PathMetadata::Duration(value) => write!(svg, " data-duration=\"{value}\""),
                 PathMetadata::ChordRole(value) => write!(svg, " data-chord-role=\"{value}\""),
                 PathMetadata::BeamLevel(value) => write!(svg, " data-level=\"{value}\""),
+                PathMetadata::TupletNumber(value) => {
+                    write!(svg, " data-number=\"{}\"", escape_svg_attribute(value))
+                }
+                PathMetadata::TupletCenterX(value) => {
+                    write!(svg, " data-center-x=\"{value:.2}\"")
+                }
+                PathMetadata::TupletCenterY(value) => {
+                    write!(svg, " data-center-y=\"{value:.2}\"")
+                }
                 PathMetadata::EndingLabel(value) => write!(
                     svg,
                     " data-ending-label=\"{}\"",
@@ -5926,6 +6042,146 @@ fn add_ending_label(scene: &mut Scene, label: &str, x: i32, y: i32, measure_inde
     }
 }
 
+struct TupletLayoutBounds<'a> {
+    view_top: &'a mut i32,
+    view_bottom: &'a mut i32,
+    right: &'a mut i32,
+    notation_bounds: &'a mut Vec<ComponentBounds>,
+}
+
+fn add_tuplet_notations(
+    scene: &mut Scene,
+    measure: &Measure,
+    stem_positions: &[Option<(i32, i32, bool)>],
+    measure_index: usize,
+    bounds: &mut TupletLayoutBounds<'_>,
+) {
+    let scale = 0.015;
+    for (tuplet_index, tuplet) in measure.tuplets.iter().enumerate() {
+        let Some(number) = tuplet.display_number.as_deref() else {
+            continue;
+        };
+        let stems = (tuplet.start_event_index..=tuplet.end_event_index)
+            .filter(|event_index| measure.events[*event_index].voice_id == tuplet.voice_id)
+            .filter_map(|event_index| stem_positions[event_index])
+            .collect::<Vec<_>>();
+        let Some((first_x, _, stems_up)) = stems.first().copied() else {
+            continue;
+        };
+        let (last_x, _, _) = stems.last().copied().expect("tuplet has a first stem");
+        let center_x = (f64::from(first_x) + f64::from(last_x)) / 2.0;
+        let outer_stem_y = if stems_up {
+            stems.iter().map(|(_, y, _)| *y).min().unwrap()
+        } else {
+            stems.iter().map(|(_, y, _)| *y).max().unwrap()
+        };
+        let glyphs = number
+            .chars()
+            .map(|character| {
+                noto_sans_glyphs::glyph(character)
+                    .expect("validated tuplet display number has bundled glyphs")
+            })
+            .collect::<Vec<_>>();
+        let number_width = glyphs
+            .iter()
+            .map(|glyph| glyph.advance * scale)
+            .sum::<f64>();
+        let mut pen_x = 0.0;
+        let mut ink_left = f64::INFINITY;
+        let mut ink_right = f64::NEG_INFINITY;
+        let mut ink_top = f64::INFINITY;
+        let mut ink_bottom = f64::NEG_INFINITY;
+        for glyph in &glyphs {
+            ink_left = ink_left.min(pen_x + glyph.bounds[0] * scale);
+            ink_right = ink_right.max(pen_x + glyph.bounds[2] * scale);
+            ink_top = ink_top.min(glyph.bounds[1] * scale);
+            ink_bottom = ink_bottom.max(glyph.bounds[3] * scale);
+            pen_x += glyph.advance * scale;
+        }
+        let half_number_height = (ink_bottom - ink_top) / 2.0;
+        let staff_edge_y = if stems_up { 28.0 } else { 108.0 };
+        let staff_clearance = 1.0;
+        let bracket_y = if stems_up {
+            (outer_stem_y - 9)
+                .min((staff_edge_y - half_number_height - staff_clearance).floor() as i32)
+        } else {
+            (outer_stem_y + 9)
+                .max((staff_edge_y + half_number_height + staff_clearance).ceil() as i32)
+        };
+        let number_baseline = f64::from(bracket_y) - (ink_top + ink_bottom) / 2.0;
+        let glyph_origin_x = center_x - (ink_left + ink_right) / 2.0;
+        let number_left = glyph_origin_x + ink_left;
+        let number_right = glyph_origin_x + ink_right;
+        if tuplet.bracket {
+            let gap = number_width / 2.0 + 3.0;
+            let left_gap = center_x - gap;
+            let right_gap = center_x + gap;
+            let stem_clearance = if stems_up { -3 } else { 3 };
+            let first_stem_corner_y = stems[0].1 + stem_clearance;
+            let last_stem_corner_y = stems[stems.len() - 1].1 + stem_clearance;
+            let first_corner_y = (f64::from(bracket_y) + f64::from(first_stem_corner_y)) / 2.0;
+            let last_corner_y = (f64::from(bracket_y) + f64::from(last_stem_corner_y)) / 2.0;
+            scene.add_path(
+                DrawLayer::Text,
+                format!("tuplet-bracket-{measure_index}-{tuplet_index}"),
+                Some(PathClass::TupletBracket),
+                Vec::new(),
+                PathGeometry::new(
+                    None,
+                    format!(
+                        "M{first_x} {first_corner_y:.2}V{bracket_y}H{left_gap:.2}M{right_gap:.2} {bracket_y}H{last_x}V{last_corner_y:.2}"
+                    ),
+                    PathStyle::MediumOutline,
+                ),
+            );
+            bounds.notation_bounds.push(ComponentBounds::stroked(
+                f64::from(first_x),
+                f64::from(outer_stem_y.min(bracket_y)),
+                f64::from(last_x),
+                f64::from(outer_stem_y.max(bracket_y)),
+                1.5,
+            ));
+        }
+        let mut glyph_x = glyph_origin_x;
+        let mut glyph_top = f64::INFINITY;
+        let mut glyph_bottom = f64::NEG_INFINITY;
+        for (glyph_index, glyph) in glyphs.into_iter().enumerate() {
+            if !glyph.path.is_empty() {
+                scene.add_path(
+                    DrawLayer::Text,
+                    format!("tuplet-number-{measure_index}-{tuplet_index}-{glyph_index}"),
+                    Some(PathClass::TupletNumber),
+                    vec![
+                        PathMetadata::TupletNumber(number.to_owned()),
+                        PathMetadata::TupletCenterX(center_x),
+                        PathMetadata::TupletCenterY(f64::from(bracket_y)),
+                    ],
+                    PathGeometry::new(
+                        Some((glyph_x.floor() as i32, number_baseline.floor() as i32)),
+                        glyph.path,
+                        PathStyle::FilledGlyph,
+                    )
+                    .offset_x(glyph_x - glyph_x.floor())
+                    .offset_y(number_baseline - number_baseline.floor())
+                    .scaled(scale),
+                );
+            }
+            glyph_top = glyph_top.min(number_baseline + glyph.bounds[1] * scale);
+            glyph_bottom = glyph_bottom.max(number_baseline + glyph.bounds[3] * scale);
+            glyph_x += glyph.advance * scale;
+        }
+        *bounds.view_top = (*bounds.view_top).min(glyph_top.floor() as i32);
+        *bounds.view_bottom = (*bounds.view_bottom).max(glyph_bottom.ceil() as i32);
+        *bounds.right = (*bounds.right).max(number_right.ceil() as i32);
+        bounds.notation_bounds.push(ComponentBounds::filled(
+            number_left,
+            glyph_top,
+            number_right,
+            glyph_bottom,
+        ));
+    }
+}
+
 fn render_part_svg(
     part: &Part,
     warnings: &mut Vec<String>,
@@ -6018,6 +6274,7 @@ fn render_part_svg(
         let event_origin_x = x;
         let mut measure_end_x = x;
         let mut placed_event_geometries: Vec<(f64, EventGeometry)> = Vec::new();
+        let mut event_stem_positions = vec![None; measure.events.len()];
         for (measure_event_index, event) in measure.events.iter().enumerate() {
             let preferred_stems_up = group_stem_directions[measure_index][measure_event_index]
                 .unwrap_or_else(|| stem_direction_is_up(event.tones.iter()));
@@ -6169,6 +6426,7 @@ fn render_part_svg(
             let pending_stem_id = stem_id.clone();
             let stem_x = tone_xs[stem_tone_index] + 6;
             if event.duration_name != "whole" {
+                event_stem_positions[measure_event_index] = Some((stem_x, stem_end, stems_up));
                 view_top = view_top.min(stem_start.min(stem_end));
                 view_bottom = view_bottom.max(stem_start.max(stem_end));
                 scene.add_path(
@@ -6480,6 +6738,18 @@ fn render_part_svg(
             previous_event_geometry = Some(geometry);
             index += 1;
         }
+        add_tuplet_notations(
+            &mut scene,
+            measure,
+            &event_stem_positions,
+            measure_index,
+            &mut TupletLayoutBounds {
+                view_top: &mut view_top,
+                view_bottom: &mut view_bottom,
+                right: &mut right,
+                notation_bounds: &mut notation_bounds,
+            },
+        );
         x = measure_end_x;
         while let Some(text) = measure.texts.get(text_index) {
             pending_texts.push((
