@@ -10,6 +10,203 @@ fn scratch_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("domunor-cli-{}-{nonce}", std::process::id()))
 }
 
+#[test]
+fn renders_each_input_staff_to_its_own_svg() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("input-staff-routing.musicxml");
+    fs::write(
+        &input,
+        include_str!("../examples/input-staff-routing/input-staff-routing.musicxml"),
+    )
+    .expect("write two-staff score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--input-staff-mode")
+        .arg("separate")
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "separate Input Staff renders failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut meter_paths = Vec::new();
+    for staff_number in 1..=2 {
+        let svg = fs::read_to_string(
+            directory.join(format!("input-staff-routing-staff-{staff_number}.svg")),
+        )
+        .expect("read separate Input Staff SVG");
+        assert_eq!(svg.matches("class=\"tonehead\"").count(), 1, "{svg}");
+        let expected_text_glyphs = if staff_number == 1 { 6 } else { 11 };
+        assert_eq!(
+            svg.matches("class=\"text-glyph\"").count(),
+            expected_text_glyphs,
+            "shared and staff-targeted directions must route correctly: {svg}"
+        );
+        assert_eq!(
+            svg.contains("id=\"chord-symbol-0-root\""),
+            staff_number == 2,
+            "staff-targeted Chord Symbol must route correctly: {svg}"
+        );
+        let meter_path = svg
+            .lines()
+            .find(|line| line.contains("id=\"meter-numerator\""))
+            .expect("Input Staff meter path");
+        meter_paths.push(meter_path.to_owned());
+    }
+    assert_ne!(
+        meter_paths[0], meter_paths[1],
+        "numbered meters must be scoped"
+    );
+    assert!(
+        !directory.join("input-staff-routing.svg").exists(),
+        "separate mode must not write the combined output"
+    );
+
+    let combined = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run combined CLI");
+    assert!(
+        combined.status.success(),
+        "combined render failed: {}",
+        String::from_utf8_lossy(&combined.stderr)
+    );
+    let combined_svg =
+        fs::read_to_string(directory.join("input-staff-routing.svg")).expect("read combined SVG");
+    assert_eq!(combined_svg.matches("class=\"tonehead\"").count(), 2);
+
+    let explicit_output = directory.join("named-score.svg");
+    let explicit = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--output")
+        .arg(&explicit_output)
+        .arg("--input-staff-mode")
+        .arg("separate")
+        .output()
+        .expect("run explicit-output CLI");
+    assert!(
+        explicit.status.success(),
+        "explicit separate output failed: {}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+    for staff_number in 1..=2 {
+        assert!(directory
+            .join(format!("named-score-staff-{staff_number}.svg"))
+            .exists());
+    }
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn scopes_numbered_transposition_to_its_input_staff() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("scoped-transposition.musicxml");
+    let source = include_str!("../examples/input-staff-routing/input-staff-routing.musicxml");
+    let fixture = source.replace(
+        "<staves>2</staves>",
+        "<staves>2</staves><transpose number=\"2\"><chromatic>12</chromatic></transpose>",
+    );
+    fs::write(&input, fixture).expect("write scoped-transposition score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--input-staff-mode")
+        .arg("separate")
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "scoped transposition failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let first_staff = fs::read_to_string(directory.join("scoped-transposition-staff-1.svg"))
+        .expect("read first staff SVG");
+    let second_staff = fs::read_to_string(directory.join("scoped-transposition-staff-2.svg"))
+        .expect("read second staff SVG");
+    assert!(first_staff.contains("data-octave=\"5\""), "{first_staff}");
+    assert!(second_staff.contains("data-octave=\"4\""), "{second_staff}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn splits_cross_input_staff_chords_only_in_separate_mode() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("cross-staff-chord.musicxml");
+    let source = include_str!("../examples/input-staff-routing/input-staff-routing.musicxml");
+    let fixture = source.replace(
+        "<pitch><step>C</step><octave>3</octave></pitch>",
+        "<chord/><pitch><step>C</step><octave>3</octave></pitch>",
+    );
+    fs::write(&input, fixture).expect("write cross-staff chord score");
+
+    let combined = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run combined CLI");
+    assert!(!combined.status.success());
+    assert!(
+        String::from_utf8_lossy(&combined.stderr).contains("a chord may not mix Input Staves"),
+        "{}",
+        String::from_utf8_lossy(&combined.stderr)
+    );
+    assert!(!directory.join("cross-staff-chord.svg").exists());
+
+    let separate = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--input-staff-mode")
+        .arg("separate")
+        .output()
+        .expect("run separate CLI");
+    assert!(
+        separate.status.success(),
+        "{}",
+        String::from_utf8_lossy(&separate.stderr)
+    );
+    for staff_number in 1..=2 {
+        let svg = fs::read_to_string(
+            directory.join(format!("cross-staff-chord-staff-{staff_number}.svg")),
+        )
+        .expect("read split chord SVG");
+        assert_eq!(svg.matches("class=\"tonehead\"").count(), 1, "{svg}");
+    }
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_notes_on_undeclared_input_staves_with_context() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("undeclared-input-staff.musicxml");
+    let source = include_str!("../examples/input-staff-routing/input-staff-routing.musicxml");
+    let fixture = source.replace(
+        "<type>quarter</type><staff>2</staff>",
+        "<type>quarter</type><staff>3</staff>",
+    );
+    fs::write(&input, fixture).expect("write undeclared-staff score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains("Input Staff 3 is not declared"), "{stderr}");
+    assert!(stderr.contains("line"), "{stderr}");
+    assert!(!directory.join("undeclared-input-staff.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
 fn assert_filled_glyph_paths(svg: &str) {
     for line in svg.lines().filter(|line| {
         line.contains("class=\"tonehead\"")
@@ -1873,11 +2070,15 @@ fn rejects_numeral_harmony_without_required_root() {
 }
 
 #[test]
-fn warns_and_ignores_harmony_position_and_staff_hints() {
+fn routes_numbered_harmony_and_warns_about_position_hints() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
     let input = directory.join("harmony-hints.musicxml");
     let fixture = include_str!("fixtures/chord-symbols.musicxml")
+        .replace(
+            "<attributes><divisions>1</divisions></attributes>",
+            "<attributes><divisions>1</divisions><staves>2</staves></attributes>",
+        )
         .replacen(
             "<harmony>",
             "<harmony placement=\"below\" default-x=\"12\" default-y=\"4\" relative-x=\"1\" relative-y=\"-1\">",
@@ -1888,6 +2089,8 @@ fn warns_and_ignores_harmony_position_and_staff_hints() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
         .arg(&input)
+        .arg("--input-staff-mode")
+        .arg("separate")
         .output()
         .expect("run CLI");
     assert!(
@@ -1901,16 +2104,22 @@ fn warns_and_ignores_harmony_position_and_staff_hints() {
     assert!(stderr.contains("default-y"), "{stderr}");
     assert!(stderr.contains("relative-x"), "{stderr}");
     assert!(stderr.contains("relative-y"), "{stderr}");
-    assert!(stderr.contains("single Dozenal Staff"), "{stderr}");
-    let svg = fs::read_to_string(directory.join("harmony-hints.svg")).expect("read SVG");
+    assert!(!stderr.contains("harmony staff"), "{stderr}");
+    let first_staff =
+        fs::read_to_string(directory.join("harmony-hints-staff-1.svg")).expect("read SVG");
+    let second_staff =
+        fs::read_to_string(directory.join("harmony-hints-staff-2.svg")).expect("read SVG");
     assert_eq!(
-        svg.matches("class=\"chord-symbol-root\"").count(),
-        2,
-        "{svg}"
+        first_staff.matches("class=\"chord-symbol-root\"").count(),
+        1
+    );
+    assert_eq!(
+        second_staff.matches("class=\"chord-symbol-root\"").count(),
+        2
     );
     assert!(
-        svg.contains("transform=\"translate(92 -20) scale(2)\""),
-        "{svg}"
+        second_staff.contains("transform=\"translate(92 -20) scale(2)\""),
+        "{second_staff}"
     );
 
     fs::remove_dir_all(directory).expect("remove test directory");

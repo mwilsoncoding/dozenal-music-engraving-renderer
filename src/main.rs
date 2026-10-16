@@ -16,18 +16,22 @@ struct Tone {
     value: u8,
 }
 
+#[derive(Clone)]
 struct Event {
     tones: Vec<ToneEvent>,
     duration_units: u32,
     duration_name: &'static str,
     dots: u8,
     beams: Vec<BeamMark>,
+    input_staff: u32,
 }
 
+#[derive(Clone)]
 struct ToneEvent {
     tone: Tone,
     tie_start: bool,
     tie_stop: bool,
+    input_staff: u32,
 }
 
 struct ParsedNote {
@@ -50,15 +54,17 @@ enum BeamState {
     BackwardHook,
 }
 
+#[derive(Clone)]
 struct Measure {
     events: Vec<Event>,
     harmonies: Vec<PositionedHarmony>,
     texts: Vec<PositionedText>,
     meter: Option<Meter>,
+    staff_meters: Vec<Option<Meter>>,
     barlines: Vec<MeasureBarline>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct MeasureBarline {
     location: String,
     event_index: usize,
@@ -69,14 +75,17 @@ struct MeasureBarline {
     ending_end: Option<EndingMark>,
 }
 
+#[derive(Clone)]
 struct EndingMark {
     number: String,
     label: String,
     discontinue: bool,
 }
 
+#[derive(Clone)]
 struct Part {
     name: String,
+    input_staff_count: u32,
     measures: Vec<Measure>,
 }
 
@@ -93,8 +102,10 @@ struct RenderedPart {
     barline_positions: Vec<i32>,
 }
 
+#[derive(Clone)]
 struct PositionedText {
     event_index: usize,
+    input_staff: Option<u32>,
     offset_x: f64,
     text: String,
     placement: TextPlacement,
@@ -117,12 +128,14 @@ enum TextPlacement {
     Below,
 }
 
+#[derive(Clone)]
 struct ChordSymbol {
     root: u8,
     bass: Option<u8>,
     tones: Vec<ChordTone>,
 }
 
+#[derive(Clone)]
 struct ChordTone {
     interval: i32,
     tone: u8,
@@ -162,8 +175,10 @@ impl DegreeOperation {
     }
 }
 
+#[derive(Clone)]
 struct PositionedHarmony {
     event_index: usize,
+    input_staff: Option<u32>,
     offset_x: f64,
     symbol: ChordSymbol,
 }
@@ -179,6 +194,18 @@ struct Score {
     warnings: Vec<String>,
 }
 
+struct CliOptions {
+    input_path: PathBuf,
+    output_path: Option<PathBuf>,
+    input_staff_mode: InputStaffMode,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputStaffMode {
+    Combine,
+    Separate,
+}
+
 fn main() {
     if let Err(message) = run() {
         eprintln!("domunor: {message}");
@@ -187,17 +214,23 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let (input_path, output_path) = parse_args()?;
-    let source = xml::read_file(&input_path)
-        .map_err(|error| format!("cannot read {}: {error}", input_path.display()))?;
-    let score =
-        parse_score(&source).map_err(|error| format!("{}: {error}", input_path.display()))?;
+    let options = parse_args()?;
+    let source = xml::read_file(&options.input_path)
+        .map_err(|error| format!("cannot read {}: {error}", options.input_path.display()))?;
+    let score = parse_score_with_mode(&source, options.input_staff_mode)
+        .map_err(|error| format!("{}: {error}", options.input_path.display()))?;
     let mut warnings = score.warnings.clone();
-    let svg = render_svg(&score, &mut warnings);
     for warning in &warnings {
-        eprintln!("domunor: warning: {}: {warning}", input_path.display());
+        eprintln!(
+            "domunor: warning: {}: {warning}",
+            options.input_path.display()
+        );
     }
-
+    let output_path = options.output_path.unwrap_or_else(|| {
+        let mut path = options.input_path.clone();
+        path.set_extension("svg");
+        path
+    });
     if output_path
         .extension()
         .is_none_or(|extension| extension != "svg")
@@ -205,14 +238,36 @@ fn run() -> Result<(), String> {
         return Err("output path must have the .svg extension".to_owned());
     }
 
-    fs::write(&output_path, svg)
-        .map_err(|error| format!("cannot write {}: {error}", output_path.display()))
+    match options.input_staff_mode {
+        InputStaffMode::Combine => {
+            let svg = render_svg(&score, &mut warnings);
+            fs::write(&output_path, svg)
+                .map_err(|error| format!("cannot write {}: {error}", output_path.display()))
+        }
+        InputStaffMode::Separate => {
+            let staff_count = score
+                .parts
+                .iter()
+                .map(|part| part.input_staff_count)
+                .max()
+                .unwrap_or(1);
+            for staff_number in 1..=staff_count {
+                let path = separate_staff_output_path(&output_path, staff_number);
+                let staff_score = score_for_input_staff(&score, staff_number);
+                let svg = render_svg(&staff_score, &mut warnings);
+                fs::write(&path, svg)
+                    .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+            }
+            Ok(())
+        }
+    }
 }
 
-fn parse_args() -> Result<(PathBuf, PathBuf), String> {
+fn parse_args() -> Result<CliOptions, String> {
     let mut args = env::args_os().skip(1);
     let mut input = None;
     let mut output = None;
+    let mut input_staff_mode = None;
 
     while let Some(argument) = args.next() {
         if argument == "--output" {
@@ -223,6 +278,26 @@ fn parse_args() -> Result<(PathBuf, PathBuf), String> {
                 args.next()
                     .ok_or_else(|| "--output requires a path".to_owned())?,
             ));
+        } else if argument == "--input-staff-mode" {
+            if input_staff_mode.is_some() {
+                return Err("--input-staff-mode may only be specified once".to_owned());
+            }
+            input_staff_mode = Some(
+                match args
+                    .next()
+                    .ok_or_else(|| "--input-staff-mode requires combine or separate".to_owned())?
+                    .to_string_lossy()
+                    .as_ref()
+                {
+                    "combine" => InputStaffMode::Combine,
+                    "separate" => InputStaffMode::Separate,
+                    value => {
+                        return Err(format!(
+                            "--input-staff-mode must be 'combine' or 'separate', not {value:?}"
+                        ));
+                    }
+                },
+            );
         } else if argument.to_string_lossy().starts_with('-') {
             return Err(format!("unsupported option {}", argument.to_string_lossy()));
         } else if input.replace(PathBuf::from(argument)).is_some() {
@@ -230,15 +305,126 @@ fn parse_args() -> Result<(PathBuf, PathBuf), String> {
         }
     }
 
-    let input = input.ok_or_else(|| "usage: domunor INPUT [--output FILE.svg]".to_owned())?;
-    let output = output.unwrap_or_else(|| {
-        let mut path = input.clone();
-        path.set_extension("svg");
-        path
-    });
-    Ok((input, output))
+    let input = input.ok_or_else(|| {
+        "usage: domunor INPUT [--output FILE.svg] [--input-staff-mode combine|separate]".to_owned()
+    })?;
+    Ok(CliOptions {
+        input_path: input,
+        output_path: output,
+        input_staff_mode: input_staff_mode.unwrap_or(InputStaffMode::Combine),
+    })
 }
+
+fn separate_staff_output_path(output_path: &std::path::Path, staff_number: u32) -> PathBuf {
+    let stem = output_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("score");
+    let mut path = output_path.to_path_buf();
+    path.set_file_name(format!("{stem}-staff-{staff_number}.svg"));
+    path
+}
+
+fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
+    let parts = score
+        .parts
+        .iter()
+        .map(|part| {
+            let measures = part
+                .measures
+                .iter()
+                .map(|measure| {
+                    let mut events = Vec::new();
+                    let mut event_index_map = Vec::with_capacity(measure.events.len() + 1);
+                    for event in &measure.events {
+                        event_index_map.push(events.len());
+                        let mut selected = event.clone();
+                        if selected.tones.is_empty() {
+                            if selected.input_staff == staff_number {
+                                events.push(selected);
+                            }
+                        } else {
+                            selected
+                                .tones
+                                .retain(|tone| tone.input_staff == staff_number);
+                            if !selected.tones.is_empty() {
+                                events.push(selected);
+                            }
+                        }
+                    }
+                    event_index_map.push(events.len());
+                    let remap_index = |index: usize| {
+                        event_index_map
+                            .get(index)
+                            .copied()
+                            .unwrap_or_else(|| *event_index_map.last().unwrap())
+                    };
+                    let harmonies = measure
+                        .harmonies
+                        .iter()
+                        .filter(|harmony| {
+                            harmony
+                                .input_staff
+                                .is_none_or(|staff| staff == staff_number)
+                        })
+                        .cloned()
+                        .map(|mut harmony| {
+                            harmony.event_index = remap_index(harmony.event_index);
+                            harmony
+                        })
+                        .collect();
+                    let texts = measure
+                        .texts
+                        .iter()
+                        .filter(|text| text.input_staff.is_none_or(|staff| staff == staff_number))
+                        .cloned()
+                        .map(|mut text| {
+                            text.event_index = remap_index(text.event_index);
+                            text
+                        })
+                        .collect();
+                    let barlines = measure
+                        .barlines
+                        .iter()
+                        .cloned()
+                        .map(|mut barline| {
+                            barline.event_index = remap_index(barline.event_index);
+                            barline
+                        })
+                        .collect();
+                    Measure {
+                        events,
+                        harmonies,
+                        texts,
+                        meter: measure
+                            .staff_meters
+                            .get(staff_number as usize - 1)
+                            .copied()
+                            .flatten(),
+                        staff_meters: measure.staff_meters.clone(),
+                        barlines,
+                    }
+                })
+                .collect();
+            Part {
+                name: part.name.clone(),
+                input_staff_count: part.input_staff_count,
+                measures,
+            }
+        })
+        .collect();
+    Score {
+        parts,
+        warnings: score.warnings.clone(),
+    }
+}
+
+#[cfg(test)]
 fn parse_score(source: &[u8]) -> Result<Score, String> {
+    parse_score_with_mode(source, InputStaffMode::Combine)
+}
+
+fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Result<Score, String> {
     let elements = xml::parse(source).map_err(|error| error.to_string())?;
     let root = root_element(&elements)?;
     if !elements[root].namespace.is_empty() || elements[root].name != "score-partwise" {
@@ -369,8 +555,9 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
         }
         require_container_text(&elements[part])?;
         let mut divisions = None;
-        let mut transposition = 0;
-        let mut active_meter = None;
+        let mut transpositions = vec![0];
+        let mut input_staff_count = 1;
+        let mut active_meters = vec![None];
         let mut pending_ties = Vec::new();
         let mut active_ending: Option<String> = None;
         let mut active_beams = [false; 5];
@@ -398,8 +585,7 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
                         require_no_attributes(element)?;
                         require_container_text(element)?;
                         let mut saw_divisions = false;
-                        let mut saw_transpose = false;
-                        let mut saw_time = false;
+                        let mut saw_staves = false;
                         for attribute in &element.children {
                             let attribute_element = &elements[*attribute];
                             match attribute_element.name.as_str() {
@@ -417,13 +603,56 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
                                     divisions = Some(value);
                                     saw_divisions = true;
                                 }
-                                "transpose" if !saw_transpose => {
-                                    transposition = transpose_semitones(&elements, *attribute)?;
-                                    saw_transpose = true;
+                                "staves" if !saw_staves => {
+                                    input_staff_count = leaf_text(attribute_element)?
+                                        .parse::<u32>()
+                                        .ok()
+                                        .filter(|value| *value > 0)
+                                        .ok_or_else(|| {
+                                            element_diagnostic(
+                                                attribute_element,
+                                                "<staves> must be a positive integer".to_owned(),
+                                            )
+                                        })?;
+                                    transpositions.resize(input_staff_count as usize, 0);
+                                    active_meters.resize(input_staff_count as usize, None);
+                                    saw_staves = true;
                                 }
-                                "time" if !saw_time => {
-                                    active_meter = Some(parse_time(&elements, *attribute)?);
-                                    saw_time = true;
+                                "transpose" => {
+                                    let transposition = transpose_semitones(&elements, *attribute)?;
+                                    if let Some(number) =
+                                        optional_attribute(attribute_element, "number")
+                                    {
+                                        let staff_number = parse_input_staff_number(
+                                            attribute_element,
+                                            number,
+                                            input_staff_count,
+                                        )?;
+                                        transpositions[staff_number] = transposition;
+                                    } else {
+                                        transpositions.fill(transposition);
+                                    }
+                                }
+                                "time" => {
+                                    let meter = parse_time(&elements, *attribute)?;
+                                    if let Some(number) =
+                                        optional_attribute(attribute_element, "number")
+                                    {
+                                        let staff_number = parse_input_staff_number(
+                                            attribute_element,
+                                            number,
+                                            input_staff_count,
+                                        )?;
+                                        active_meters[staff_number] = Some(meter);
+                                    } else {
+                                        active_meters.fill(Some(meter));
+                                    }
+                                }
+                                "key" => {
+                                    validate_key_staff(&elements, *attribute, input_staff_count)?
+                                }
+                                "clef" => {
+                                    validate_clef_staff(&elements, *attribute, input_staff_count)?
                                 }
                                 _ => {
                                     return Err(element_diagnostic(
@@ -448,8 +677,14 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
                                     .to_owned(),
                             )
                         })?;
-                        let parsed =
-                            parse_note(&elements, *child, divisions, transposition, &mut warnings)?;
+                        let parsed = parse_note(
+                            &elements,
+                            *child,
+                            divisions,
+                            &transpositions,
+                            input_staff_count,
+                            &mut warnings,
+                        )?;
                         if let Some(chord_marker) = parsed.chord_marker {
                             let Some(target) = chord_target else {
                                 return Err(element_diagnostic(
@@ -472,6 +707,14 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
                                     &elements[chord_marker],
                                     "chord tone beam declarations must match the preceding event"
                                         .to_owned(),
+                                ));
+                            }
+                            if input_staff_mode == InputStaffMode::Combine
+                                && event.input_staff != parsed.event.input_staff
+                            {
+                                return Err(element_diagnostic(
+                                    &elements[chord_marker],
+                                    "a chord may not mix Input Staves in combine mode".to_owned(),
                                 ));
                             }
                             let mut chord_tones = parsed.event.tones;
@@ -502,11 +745,16 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
                         }
                     }
                     "harmony" => {
-                        if let Some((symbol, offset_x)) =
-                            parse_chord_symbol(&elements, *child, &mut warnings, divisions)?
-                        {
+                        if let Some((symbol, offset_x, input_staff)) = parse_chord_symbol(
+                            &elements,
+                            *child,
+                            &mut warnings,
+                            divisions,
+                            input_staff_count,
+                        )? {
                             harmonies.push(PositionedHarmony {
                                 event_index: events.len(),
+                                input_staff,
                                 offset_x,
                                 symbol,
                             });
@@ -517,6 +765,7 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
                         *child,
                         events.len(),
                         divisions,
+                        input_staff_count,
                         &mut warnings,
                     )?),
                     "barline" => {
@@ -572,7 +821,8 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
                 events,
                 harmonies,
                 texts,
-                meter: active_meter,
+                meter: active_meters.first().copied().flatten(),
+                staff_meters: active_meters.clone(),
                 barlines,
             });
         }
@@ -644,6 +894,7 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
         }
         parts.push(Part {
             name: name.clone(),
+            input_staff_count,
             measures,
         });
     }
@@ -887,6 +1138,7 @@ fn parse_direction(
     direction: usize,
     event_index: usize,
     divisions: Option<u32>,
+    input_staff_count: u32,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<PositionedText>, String> {
     let element = &elements[direction];
@@ -924,6 +1176,7 @@ fn parse_direction(
     let mut saw_offset = false;
     let mut offset_ticks = 0i32;
     let mut after_direction_types = false;
+    let mut input_staff = None;
     for child in &element.children {
         let child_element = &elements[*child];
         match child_element.name.as_str() {
@@ -1014,19 +1267,16 @@ fn parse_direction(
                     let staff = value
                         .parse::<u32>()
                         .ok()
-                        .filter(|staff| *staff > 0)
+                        .filter(|staff| *staff > 0 && *staff <= input_staff_count)
                         .ok_or_else(|| {
                             element_diagnostic(
                                 child_element,
-                                "staff must be a positive integer".to_owned(),
+                                format!(
+                                    "direction staff must be between 1 and {input_staff_count}"
+                                ),
                             )
                         })?;
-                    if staff != 1 {
-                        warnings.push(element_diagnostic(
-                            child_element,
-                            "direction staff other than 1 is not supported; routed to the single output Staff".to_owned(),
-                        ));
-                    }
+                    input_staff = Some(staff);
                 }
             }
             "sound" if saw_direction_type => {
@@ -1079,6 +1329,7 @@ fn parse_direction(
     };
     for text in &mut text_items {
         text.offset_x = offset_x;
+        text.input_staff = input_staff;
     }
     Ok(text_items)
 }
@@ -1115,6 +1366,7 @@ fn parse_direction_symbol(
     };
     Ok(Some(PositionedText {
         event_index,
+        input_staff: None,
         offset_x: 0.0,
         text: String::new(),
         placement,
@@ -1366,6 +1618,7 @@ fn parse_direction_mark(
     let glyph_center = (glyph.bounds.1 + glyph.bounds.3) / 2.0;
     Ok(PositionedText {
         event_index,
+        input_staff: None,
         offset_x: 0.0,
         text: String::new(),
         placement,
@@ -1600,6 +1853,7 @@ fn parse_direction_text(
     };
     Ok(Some(PositionedText {
         event_index,
+        input_staff: None,
         offset_x: 0.0,
         text,
         placement,
@@ -1670,7 +1924,8 @@ fn parse_chord_symbol(
     harmony: usize,
     warnings: &mut Vec<String>,
     divisions: Option<u32>,
-) -> Result<Option<(ChordSymbol, f64)>, String> {
+    input_staff_count: u32,
+) -> Result<Option<(ChordSymbol, f64, Option<u32>)>, String> {
     let element = &elements[harmony];
     validate_attributes(
         element,
@@ -2145,6 +2400,7 @@ fn parse_chord_symbol(
         ));
         next_child += 1;
     }
+    let mut input_staff = None;
     if children
         .get(next_child)
         .is_some_and(|child| elements[*child].name == "staff")
@@ -2153,19 +2409,14 @@ fn parse_chord_symbol(
         let value = leaf_text(&elements[staff])?
             .parse::<u32>()
             .ok()
-            .filter(|value| *value > 0)
+            .filter(|value| *value > 0 && *value <= input_staff_count)
             .ok_or_else(|| {
                 element_diagnostic(
                     &elements[staff],
-                    "harmony staff must be a positive integer".to_owned(),
+                    format!("harmony staff must be between 1 and {input_staff_count}"),
                 )
             })?;
-        if value != 1 {
-            warnings.push(element_diagnostic(
-                &elements[staff],
-                "harmony staff references map to the Part's single Dozenal Staff".to_owned(),
-            ));
-        }
+        input_staff = Some(value);
         next_child += 1;
     }
     if next_child != children.len() {
@@ -2192,7 +2443,11 @@ fn parse_chord_symbol(
             true
         }
     });
-    Ok(Some((ChordSymbol { root, bass, tones }, offset_x)))
+    Ok(Some((
+        ChordSymbol { root, bass, tones },
+        offset_x,
+        input_staff,
+    )))
 }
 
 fn parse_chord_degree(elements: &[Element], degree: usize) -> Result<DegreeChange, String> {
@@ -2314,7 +2569,7 @@ fn parse_harmony_pitch(
 
 fn parse_time(elements: &[Element], time: usize) -> Result<Meter, String> {
     let element = &elements[time];
-    require_no_attributes(element)?;
+    validate_attributes(element, &["number"])?;
     require_container_text(element)?;
     let [beats, beat_type] = exact_children(elements, time, &["beats", "beat-type"])?;
     let parse_digit = |id| -> Result<u8, String> {
@@ -2334,6 +2589,156 @@ fn parse_time(elements: &[Element], time: usize) -> Result<Meter, String> {
         beats: parse_digit(beats)?,
         beat_type: parse_digit(beat_type)?,
     })
+}
+
+fn parse_input_staff_number(
+    element: &Element,
+    number: &str,
+    input_staff_count: u32,
+) -> Result<usize, String> {
+    let staff_number = number
+        .parse::<u32>()
+        .ok()
+        .filter(|staff| *staff > 0 && *staff <= input_staff_count)
+        .ok_or_else(|| {
+            element_diagnostic(
+                element,
+                format!(
+                    "Input Staff number must be between 1 and {input_staff_count}, not {number:?}"
+                ),
+            )
+        })?;
+    Ok(staff_number as usize - 1)
+}
+
+fn validate_key_staff(
+    elements: &[Element],
+    key: usize,
+    input_staff_count: u32,
+) -> Result<(), String> {
+    let element = &elements[key];
+    validate_attributes(element, &["number"])?;
+    if let Some(number) = optional_attribute(element, "number") {
+        parse_input_staff_number(element, number, input_staff_count)?;
+    }
+    require_container_text(element)?;
+    if element.children.is_empty() {
+        return Err(element_diagnostic(
+            element,
+            "key must contain a supported key signature".to_owned(),
+        ));
+    }
+    let mut previous_order = 0;
+    for child in &element.children {
+        let child = &elements[*child];
+        let order = match child.name.as_str() {
+            "cancel" => 1,
+            "fifths" => 2,
+            "mode" => 3,
+            _ => {
+                return Err(element_diagnostic(
+                    child,
+                    "unsupported key element".to_owned(),
+                ));
+            }
+        };
+        if order <= previous_order {
+            return Err(element_diagnostic(
+                child,
+                "key elements are duplicated or out of order".to_owned(),
+            ));
+        }
+        previous_order = order;
+        let value = leaf_text(child)?;
+        match child.name.as_str() {
+            "cancel" if value.parse::<u8>().ok().is_some_and(|value| value <= 7) => {}
+            "fifths"
+                if value
+                    .parse::<i8>()
+                    .ok()
+                    .is_some_and(|value| (-7..=7).contains(&value)) => {}
+            "mode"
+                if matches!(
+                    value,
+                    "major"
+                        | "minor"
+                        | "dorian"
+                        | "phrygian"
+                        | "lydian"
+                        | "mixolydian"
+                        | "aeolian"
+                        | "ionian"
+                        | "locrian"
+                        | "none"
+                ) => {}
+            "cancel" | "fifths" | "mode" => {
+                return Err(element_diagnostic(
+                    child,
+                    format!("unsupported key value {value:?}"),
+                ));
+            }
+            _ => unreachable!(),
+        }
+    }
+    if !element
+        .children
+        .iter()
+        .any(|child| elements[*child].name == "fifths")
+    {
+        return Err(element_diagnostic(
+            element,
+            "key requires <fifths>".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_clef_staff(
+    elements: &[Element],
+    clef: usize,
+    input_staff_count: u32,
+) -> Result<(), String> {
+    let element = &elements[clef];
+    validate_attributes(element, &["number"])?;
+    if let Some(number) = optional_attribute(element, "number") {
+        parse_input_staff_number(element, number, input_staff_count)?;
+    }
+    require_container_text(element)?;
+    let mut sign = false;
+    for child in &element.children {
+        let child = &elements[*child];
+        let value = leaf_text(child)?;
+        match child.name.as_str() {
+            "sign" if !sign && matches!(value, "G" | "F" | "C" | "percussion" | "tab" | "none") => {
+                sign = true;
+            }
+            "line"
+                if value
+                    .parse::<u8>()
+                    .ok()
+                    .is_some_and(|line| (1..=5).contains(&line)) => {}
+            "clef-octave-change" if value.parse::<i8>().is_ok() => {}
+            "sign" | "line" | "clef-octave-change" => {
+                return Err(element_diagnostic(
+                    child,
+                    format!("unsupported clef value {value:?}"),
+                ));
+            }
+            _ => {
+                return Err(element_diagnostic(
+                    child,
+                    format!("unsupported clef element <{}>", child.name),
+                ));
+            }
+        }
+    }
+    if !sign {
+        return Err(element_diagnostic(
+            element,
+            "clef requires <sign>".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_beam_group(
@@ -2393,7 +2798,8 @@ fn parse_note(
     elements: &[Element],
     note: usize,
     divisions: u32,
-    transposition: i32,
+    transpositions: &[i32],
+    input_staff_count: u32,
     warnings: &mut Vec<String>,
 ) -> Result<ParsedNote, String> {
     let note_element = &elements[note];
@@ -2524,6 +2930,36 @@ fn parse_note(
     if notehead.is_some() {
         position += 1;
     }
+    let input_staff_element = children
+        .get(position)
+        .filter(|child| elements[**child].name == "staff")
+        .copied();
+    let input_staff = if let Some(staff) = input_staff_element {
+        position += 1;
+        require_no_attributes(&elements[staff])?;
+        leaf_text(&elements[staff])?
+            .parse::<u32>()
+            .ok()
+            .filter(|staff| *staff > 0)
+            .ok_or_else(|| {
+                element_diagnostic(
+                    &elements[staff],
+                    "note staff must be a positive integer".to_owned(),
+                )
+            })?
+    } else {
+        1
+    };
+    if input_staff > input_staff_count {
+        let staff_element = input_staff_element.unwrap_or(note);
+        return Err(element_diagnostic(
+            &elements[staff_element],
+            format!(
+                "Input Staff {input_staff} is not declared; Part declares {input_staff_count} Input Staff(s)"
+            ),
+        ));
+    }
+    let transposition = transpositions[input_staff as usize - 1];
     let mut beams = Vec::new();
     while children
         .get(position)
@@ -2717,6 +3153,7 @@ fn parse_note(
             tone: parse_pitch(elements, event_element, transposition)?,
             tie_start,
             tie_stop,
+            input_staff,
         }]
     };
     Ok(ParsedNote {
@@ -2726,6 +3163,7 @@ fn parse_note(
             duration_name,
             dots: duration_marks,
             beams,
+            input_staff,
         },
         chord_marker,
     })
@@ -3227,7 +3665,7 @@ fn parse_pitch(elements: &[Element], pitch: usize, transposition: i32) -> Result
 }
 
 fn transpose_semitones(elements: &[Element], transpose: usize) -> Result<i32, String> {
-    require_no_attributes(&elements[transpose])?;
+    validate_attributes(&elements[transpose], &["number"])?;
     require_container_text(&elements[transpose])?;
     let children = &elements[transpose].children;
     let mut previous_order = 0;
