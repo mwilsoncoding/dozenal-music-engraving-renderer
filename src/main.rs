@@ -5102,7 +5102,7 @@ fn render_part_svg(
                     PathGeometry::new(
                         Some((start_x, 0)),
                         format!("M0 27V14H{}V27", end_x - start_x),
-                        PathStyle::MediumStroke,
+                        PathStyle::MediumOutline,
                     ),
                 );
             }

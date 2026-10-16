@@ -2579,6 +2579,12 @@ fn renders_repeat_barlines_and_numbered_endings() {
     assert_eq!(svg.matches("class=\"repeat-barline\"").count(), 4, "{svg}");
     assert_eq!(svg.matches("class=\"repeat-dot\"").count(), 4, "{svg}");
     assert_eq!(svg.matches("class=\"ending-bracket\"").count(), 2, "{svg}");
+    for bracket in svg
+        .lines()
+        .filter(|line| line.contains("class=\"ending-bracket\""))
+    {
+        assert!(bracket.contains("fill=\"none\""), "{bracket}");
+    }
     assert_eq!(svg.matches("stroke-width=\"3\"").count(), 2, "{svg}");
     assert!(svg.contains("id=\"repeat-barline-0-104\""), "{svg}");
     assert!(svg.contains("transform=\"translate(108 62)\""), "{svg}");
