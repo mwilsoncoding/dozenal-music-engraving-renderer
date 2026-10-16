@@ -4490,7 +4490,7 @@ fn render_part_svg(
                 } else {
                     format!("meter-denominator-{meter_index}")
                 };
-                let meter_x = if measure_index == 0 { x - 24 } else { x };
+                let meter_x = if measure_index == 0 { x - 34 } else { x };
                 scene.add_path(
                     DrawLayer::Event,
                     numerator_id,

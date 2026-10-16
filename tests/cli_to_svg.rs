@@ -2592,6 +2592,10 @@ fn renders_repeat_barlines_and_numbered_endings() {
     assert!(svg.contains("translate(210 19)"), "{svg}");
     assert!(svg.contains("translate(298 19)"), "{svg}");
     assert_eq!(svg.matches("stroke-width=\"3\"").count(), 2, "{svg}");
+    assert!(
+        svg.contains("id=\"meter-numerator\" transform=\"translate(58 30) scale(2)\""),
+        "{svg}"
+    );
     assert!(svg.contains("id=\"repeat-barline-0-104\""), "{svg}");
     assert!(svg.contains("transform=\"translate(108 62)\""), "{svg}");
     assert!(svg.contains("transform=\"translate(108 74)\""), "{svg}");
@@ -2982,11 +2986,11 @@ fn renders_simple_numeric_meter_and_rests() {
     assert!(svg.contains("id=\"meter-numerator\""), "{svg}");
     assert!(svg.contains("id=\"meter-denominator\""), "{svg}");
     assert!(
-        svg.contains("id=\"meter-numerator\" transform=\"translate(68 30) scale(2)\""),
+        svg.contains("id=\"meter-numerator\" transform=\"translate(58 30) scale(2)\""),
         "time-signature numerator should fill the octave 5/6 lanes: {svg}"
     );
     assert!(
-        svg.contains("id=\"meter-denominator\" transform=\"translate(68 70) scale(2)\""),
+        svg.contains("id=\"meter-denominator\" transform=\"translate(58 70) scale(2)\""),
         "time-signature denominator should fill the octave 3/4 lanes: {svg}"
     );
     assert!(!svg.contains("<text"), "SVG glyphs must not rely on fonts");
