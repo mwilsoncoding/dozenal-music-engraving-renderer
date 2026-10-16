@@ -845,6 +845,34 @@ fn renders_segno_and_coda_marks_in_source_order() {
 }
 
 #[test]
+fn aligns_coda_vertical_center_with_segno() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("aligned-navigation-marks.musicxml");
+    let fixture = include_str!("../examples/segno-coda-directions/segno-coda-directions.musicxml");
+    fs::write(&input, fixture).expect("write aligned navigation score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "navigation marks failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("aligned-navigation-marks.svg")).expect("read SVG");
+    let segno_center = text_path_y(&svg, "direction-segno-1") + 366.0 * 0.04;
+    let coda_center = text_path_y(&svg, "direction-coda-5") + 370.0 * 0.04;
+    assert!(
+        (segno_center - coda_center).abs() < 0.01,
+        "Segno center {segno_center} and Coda center {coda_center} should align"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn warns_and_preserves_siblings_for_valid_unsupported_symbols() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");

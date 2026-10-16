@@ -108,6 +108,7 @@ struct PositionedText {
     path_glyph: Option<bravura_glyphs::Glyph>,
     path_id_prefix: &'static str,
     path_scale: f64,
+    path_y_offset: f64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1127,6 +1128,7 @@ fn parse_direction_symbol(
         path_glyph: Some(glyph),
         path_id_prefix: "symbol",
         path_scale: 1.0,
+        path_y_offset: 0.0,
     }))
 }
 
@@ -1359,6 +1361,9 @@ fn parse_direction_mark(
         }
     }
     let (font_size, color, coordinates) = parse_direction_glyph_style(element, warnings)?;
+    let segno_bounds = bravura_glyphs::segno().bounds;
+    let segno_center = (segno_bounds.1 + segno_bounds.3) / 2.0;
+    let glyph_center = (glyph.bounds.1 + glyph.bounds.3) / 2.0;
     Ok(PositionedText {
         event_index,
         offset_x: 0.0,
@@ -1374,6 +1379,7 @@ fn parse_direction_mark(
         path_glyph: Some(glyph),
         path_id_prefix: if is_segno { "segno" } else { "coda" },
         path_scale: 0.04,
+        path_y_offset: segno_center - glyph_center,
     })
 }
 
@@ -1607,6 +1613,7 @@ fn parse_direction_text(
         path_glyph: None,
         path_id_prefix: "",
         path_scale: 1.0,
+        path_y_offset: 0.0,
     }))
 }
 
@@ -4530,11 +4537,18 @@ fn add_direction_glyph(
             TextPlacement::Above => 16.0,
             TextPlacement::Below => 140.0,
         })
-        - item.relative_y.unwrap_or(0.0) * 2.0;
+        - item.relative_y.unwrap_or(0.0) * 2.0
+        + item.path_y_offset * scale;
     let top = text_y + glyph.bounds.1 * scale;
     let right = left + (glyph.bounds.2 - glyph.bounds.0) * scale;
     let bottom = top + (glyph.bounds.3 - glyph.bounds.1) * scale;
-    let step = (bottom - top + 4.0).max(item.font_size + 4.0);
+    let collision_height = if matches!(item.path_id_prefix, "segno" | "coda") {
+        let segno_bounds = bravura_glyphs::segno().bounds;
+        (segno_bounds.3 - segno_bounds.1) * scale
+    } else {
+        bottom - top
+    };
+    let step = (collision_height + 4.0).max(item.font_size + 4.0);
     let mut shift = 0.0;
     let (box_left, box_top, box_right, box_bottom) = loop {
         let candidate = (left, top + shift, right, bottom + shift);
