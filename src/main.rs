@@ -105,6 +105,9 @@ struct PositionedText {
     default_y: Option<f64>,
     relative_x: Option<f64>,
     relative_y: Option<f64>,
+    path_glyph: Option<bravura_glyphs::Glyph>,
+    path_id_prefix: &'static str,
+    path_scale: f64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -948,8 +951,28 @@ fn parse_direction(
                                 text_items.push(text);
                             }
                         }
-                        "metronome" | "dynamics" | "wedge" | "segno" | "coda" | "symbol"
-                        | "bracket" | "dashes" | "pedal" | "octave-shift" | "other-direction" => {
+                        "symbol" => {
+                            if let Some(symbol) = parse_direction_symbol(
+                                elements,
+                                *item,
+                                event_index,
+                                placement,
+                                warnings,
+                            )? {
+                                text_items.push(symbol);
+                            }
+                        }
+                        "segno" | "coda" => {
+                            text_items.push(parse_direction_mark(
+                                elements,
+                                *item,
+                                event_index,
+                                placement,
+                                warnings,
+                            )?);
+                        }
+                        "metronome" | "dynamics" | "wedge" | "bracket" | "dashes" | "pedal"
+                        | "octave-shift" | "other-direction" => {
                             warnings.push(element_diagnostic(
                                 text_element,
                                 format!(
@@ -1005,7 +1028,10 @@ fn parse_direction(
                     }
                 }
             }
-            "footnote" | "level" | "sound" | "listening" if saw_direction_type => {
+            "sound" if saw_direction_type => {
+                after_direction_types = true;
+            }
+            "footnote" | "level" | "listening" if saw_direction_type => {
                 after_direction_types = true;
                 warnings.push(element_diagnostic(
                     child_element,
@@ -1054,6 +1080,301 @@ fn parse_direction(
         text.offset_x = offset_x;
     }
     Ok(text_items)
+}
+
+fn parse_direction_symbol(
+    elements: &[Element],
+    symbol_id: usize,
+    event_index: usize,
+    placement: TextPlacement,
+    warnings: &mut Vec<String>,
+) -> Result<Option<PositionedText>, String> {
+    let element = &elements[symbol_id];
+    validate_attributes(element, DIRECTION_GLYPH_ATTRIBUTES)?;
+    if !element.children.is_empty() {
+        return Err(element_diagnostic(
+            element,
+            "<symbol> must contain a glyph name".to_owned(),
+        ));
+    }
+    let name = collapse_xml_whitespace(&element.text);
+    if !valid_smufl_glyph_name(&name) {
+        return Err(element_diagnostic(
+            element,
+            format!("invalid SMuFL symbol name {name:?}"),
+        ));
+    }
+    let (font_size, color, coordinates) = parse_direction_glyph_style(element, warnings)?;
+    let Some(glyph) = bravura_glyphs::direction_symbol(&name) else {
+        warnings.push(element_diagnostic(
+            element,
+            format!("SMuFL symbol {name:?} is not supported; omitted"),
+        ));
+        return Ok(None);
+    };
+    Ok(Some(PositionedText {
+        event_index,
+        offset_x: 0.0,
+        text: String::new(),
+        placement,
+        font_size,
+        color,
+        enclosure: None,
+        default_x: coordinates[0],
+        default_y: coordinates[1],
+        relative_x: coordinates[2],
+        relative_y: coordinates[3],
+        path_glyph: Some(glyph),
+        path_id_prefix: "symbol",
+        path_scale: 1.0,
+    }))
+}
+
+const DIRECTION_GLYPH_ATTRIBUTES: &[&str] = &[
+    "id",
+    "default-x",
+    "default-y",
+    "relative-x",
+    "relative-y",
+    "font-family",
+    "font-style",
+    "font-size",
+    "font-weight",
+    "color",
+    "halign",
+    "valign",
+    "justify",
+    "text-decoration",
+    "text-rotation",
+    "letter-spacing",
+    "line-height",
+    "xml:lang",
+    "xml:space",
+    "enclosure",
+];
+
+fn parse_direction_glyph_style(
+    element: &Element,
+    warnings: &mut Vec<String>,
+) -> Result<(f64, String, [Option<f64>; 4]), String> {
+    let font_size = match optional_attribute(element, "font-size") {
+        Some(value) => parse_text_font_size(value)
+            .ok_or_else(|| element_diagnostic(element, "invalid symbol font-size".to_owned()))?,
+        None => 16.0,
+    };
+    let color = optional_attribute(element, "color").unwrap_or("#171717");
+    if !valid_musicxml_color(color) {
+        return Err(element_diagnostic(
+            element,
+            "symbol color must be a six-digit hexadecimal color".to_owned(),
+        ));
+    }
+    if let Some(family) = optional_attribute(element, "font-family") {
+        if family.trim().is_empty() {
+            return Err(element_diagnostic(
+                element,
+                "font-family may not be empty".to_owned(),
+            ));
+        }
+        warnings.push(element_diagnostic(
+            element,
+            "symbol font-family is not supported; bundled glyph is used".to_owned(),
+        ));
+    }
+    for (attribute, allowed) in [
+        ("font-style", &["normal", "italic", "oblique"][..]),
+        ("font-weight", &["normal", "bold"][..]),
+        ("halign", &["left", "center", "right"][..]),
+        ("valign", &["top", "middle", "bottom", "baseline"][..]),
+        ("justify", &["left", "center", "right"][..]),
+        (
+            "text-decoration",
+            &["none", "underline", "overline", "line-through"][..],
+        ),
+    ] {
+        if let Some(value) = optional_attribute(element, attribute) {
+            if !allowed.contains(&value) {
+                return Err(element_diagnostic(
+                    element,
+                    format!("invalid {attribute} value {value:?}"),
+                ));
+            }
+            warnings.push(element_diagnostic(
+                element,
+                format!("symbol {attribute} is not supported; default behavior is used"),
+            ));
+        }
+    }
+    for attribute in ["text-rotation", "letter-spacing", "line-height"] {
+        if let Some(value) = optional_attribute(element, attribute) {
+            if value.parse::<f64>().is_err_and(|_| value != "normal")
+                || value.parse::<f64>().is_ok_and(|number| !number.is_finite())
+            {
+                return Err(element_diagnostic(
+                    element,
+                    format!("text {attribute} must be a finite number"),
+                ));
+            }
+            warnings.push(element_diagnostic(
+                element,
+                format!("symbol {attribute} is not supported; default behavior is used"),
+            ));
+        }
+    }
+    if let Some(value) = optional_attribute(element, "xml:space") {
+        if !matches!(value, "default" | "preserve") {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid xml:space value {value:?}"),
+            ));
+        }
+        warnings.push(element_diagnostic(
+            element,
+            "symbol xml:space is not supported; ignored".to_owned(),
+        ));
+    }
+    if let Some(value) = optional_attribute(element, "xml:lang") {
+        if value.is_empty() || value.chars().any(char::is_whitespace) {
+            return Err(element_diagnostic(
+                element,
+                "invalid xml:lang value".to_owned(),
+            ));
+        }
+        warnings.push(element_diagnostic(
+            element,
+            "symbol language hint is not supported; ignored".to_owned(),
+        ));
+    }
+    if let Some(value) = optional_attribute(element, "enclosure") {
+        if !matches!(
+            value,
+            "none"
+                | "rectangle"
+                | "square"
+                | "oval"
+                | "circle"
+                | "bracket"
+                | "triangle"
+                | "diamond"
+                | "pentagon"
+                | "hexagon"
+                | "heptagon"
+                | "octagon"
+                | "nonagon"
+                | "decagon"
+        ) {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid symbol enclosure {value:?}"),
+            ));
+        }
+        if value != "none" {
+            warnings.push(element_diagnostic(
+                element,
+                "symbol enclosure is not supported; omitted".to_owned(),
+            ));
+        }
+    }
+    let mut coordinates = [None; 4];
+    for (index, attribute) in ["default-x", "default-y", "relative-x", "relative-y"]
+        .into_iter()
+        .enumerate()
+    {
+        if let Some(value) = optional_attribute(element, attribute) {
+            coordinates[index] = Some(
+                value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|number| number.is_finite())
+                    .ok_or_else(|| {
+                        element_diagnostic(
+                            element,
+                            format!("symbol {attribute} must be a finite number"),
+                        )
+                    })?,
+            );
+        }
+    }
+    Ok((font_size, color.to_ascii_lowercase(), coordinates))
+}
+
+fn parse_direction_mark(
+    elements: &[Element],
+    mark_id: usize,
+    event_index: usize,
+    placement: TextPlacement,
+    warnings: &mut Vec<String>,
+) -> Result<PositionedText, String> {
+    let element = &elements[mark_id];
+    let is_segno = element.name == "segno";
+    validate_attributes(
+        element,
+        &[
+            "smufl",
+            "id",
+            "default-x",
+            "default-y",
+            "relative-x",
+            "relative-y",
+            "font-family",
+            "font-style",
+            "font-size",
+            "font-weight",
+            "color",
+            "halign",
+            "valign",
+            "justify",
+            "text-decoration",
+            "text-rotation",
+            "letter-spacing",
+            "line-height",
+            "xml:lang",
+            "xml:space",
+            "enclosure",
+        ],
+    )?;
+    if !element.children.is_empty() || !element.text.trim().is_empty() {
+        return Err(element_diagnostic(
+            element,
+            format!("<{}> must be empty", element.name),
+        ));
+    }
+    let conventional_name = if is_segno { "segno" } else { "coda" };
+    let mut glyph = bravura_glyphs::navigation_mark(conventional_name)
+        .expect("conventional Segno and Coda glyphs are bundled");
+    if let Some(name) = optional_attribute(element, "smufl") {
+        if !valid_smufl_glyph_name(name) {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid SMuFL glyph name {name:?}"),
+            ));
+        }
+        if let Some(override_glyph) = bravura_glyphs::navigation_mark(name) {
+            glyph = override_glyph;
+        } else {
+            warnings.push(element_diagnostic(
+                element,
+                format!("SMuFL glyph override {name:?} is not supported; conventional glyph used"),
+            ));
+        }
+    }
+    let (font_size, color, coordinates) = parse_direction_glyph_style(element, warnings)?;
+    Ok(PositionedText {
+        event_index,
+        offset_x: 0.0,
+        text: String::new(),
+        placement,
+        font_size,
+        color,
+        enclosure: None,
+        default_x: coordinates[0],
+        default_y: coordinates[1],
+        relative_x: coordinates[2],
+        relative_y: coordinates[3],
+        path_glyph: Some(glyph),
+        path_id_prefix: if is_segno { "segno" } else { "coda" },
+        path_scale: 0.04,
+    })
 }
 
 fn parse_direction_text(
@@ -1283,6 +1604,9 @@ fn parse_direction_text(
         default_y,
         relative_x,
         relative_y,
+        path_glyph: None,
+        path_id_prefix: "",
+        path_scale: 1.0,
     }))
 }
 
@@ -3313,6 +3637,9 @@ enum PathClass {
     ChordSymbolBass,
     ChordSymbolTone,
     TextGlyph,
+    DirectionSymbol,
+    SegnoMark,
+    CodaMark,
     TextEnclosure,
     Tie,
     RepeatBarline,
@@ -3788,6 +4115,9 @@ impl Scene {
                 PathClass::ChordSymbolBass => "chord-symbol-bass",
                 PathClass::ChordSymbolTone => "chord-symbol-tone",
                 PathClass::TextGlyph => "text-glyph",
+                PathClass::DirectionSymbol => "direction-symbol",
+                PathClass::SegnoMark => "segno-mark",
+                PathClass::CodaMark => "coda-mark",
                 PathClass::TextEnclosure => "text-enclosure",
                 PathClass::Tie => "tie",
                 PathClass::RepeatBarline => "repeat-barline",
@@ -3876,7 +4206,12 @@ impl Scene {
                 svg.push_str(" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"")
             }
             PathStyle::FilledGlyph => svg.push_str(" fill=\"#171717\" fill-rule=\"evenodd\""),
-            PathStyle::BravuraGlyph => svg.push_str(" fill=\"#171717\" fill-rule=\"nonzero\""),
+            PathStyle::BravuraGlyph => write!(
+                svg,
+                " fill=\"{}\" fill-rule=\"nonzero\"",
+                command.geometry.color.as_deref().unwrap_or("#171717")
+            )
+            .expect("writing to a String cannot fail"),
             PathStyle::TextGlyph => write!(
                 svg,
                 " fill=\"{}\" fill-rule=\"nonzero\"",
@@ -4015,6 +4350,10 @@ fn add_text_item(
     measure_start_x: f64,
     layout: &mut TextLayoutContext<'_>,
 ) {
+    if let Some(glyph) = item.path_glyph {
+        add_direction_glyph(scene, item, glyph, index, anchor_x, measure_start_x, layout);
+        return;
+    }
     let scale = item.font_size / noto_sans_glyphs::UNITS_PER_EM;
     let mut glyphs = Vec::new();
     let mut line_index = 0usize;
@@ -4166,6 +4505,105 @@ fn add_text_item(
     *layout.view_top = (*layout.view_top).min((box_top - enclosure_stroke_padding).floor() as i32);
     *layout.view_bottom =
         (*layout.view_bottom).max((box_bottom + enclosure_stroke_padding).ceil() as i32);
+}
+
+fn add_direction_glyph(
+    scene: &mut Scene,
+    item: &PositionedText,
+    glyph: bravura_glyphs::Glyph,
+    index: usize,
+    anchor_x: f64,
+    measure_start_x: f64,
+    layout: &mut TextLayoutContext<'_>,
+) {
+    let scale = item.font_size / 16.0 * item.path_scale;
+    let left = item
+        .default_x
+        .map(|value| measure_start_x + value * 2.0)
+        .unwrap_or(anchor_x)
+        + item.relative_x.unwrap_or(0.0) * 2.0
+        + glyph.bounds.0 * scale;
+    let text_y = item
+        .default_y
+        .map(|value| 68.0 - value * 2.0)
+        .unwrap_or(match item.placement {
+            TextPlacement::Above => 16.0,
+            TextPlacement::Below => 140.0,
+        })
+        - item.relative_y.unwrap_or(0.0) * 2.0;
+    let top = text_y + glyph.bounds.1 * scale;
+    let right = left + (glyph.bounds.2 - glyph.bounds.0) * scale;
+    let bottom = top + (glyph.bounds.3 - glyph.bounds.1) * scale;
+    let step = (bottom - top + 4.0).max(item.font_size + 4.0);
+    let mut shift = 0.0;
+    let (box_left, box_top, box_right, box_bottom) = loop {
+        let candidate = (left, top + shift, right, bottom + shift);
+        let overlaps_text = layout.occupied.iter().any(|previous| {
+            candidate.0 < previous.right + 2.0
+                && candidate.2 + 2.0 > previous.left
+                && candidate.1 < previous.bottom + 2.0
+                && candidate.3 + 2.0 > previous.top
+        });
+        let overlaps_notation = layout.notation_bounds.iter().any(|previous| {
+            candidate.0 < previous.right + 2.0
+                && candidate.2 + 2.0 > previous.left
+                && candidate.1 < previous.bottom + 2.0
+                && candidate.3 + 2.0 > previous.top
+        });
+        if !overlaps_text && !overlaps_notation {
+            break candidate;
+        }
+        if shift.abs() > 2000.0 {
+            layout.warnings.push(format!(
+                "symbol item {index} could not be separated from nearby text or notation"
+            ));
+            break candidate;
+        }
+        let collision_side = if text_y < 68.0 {
+            TextPlacement::Above
+        } else if text_y > 68.0 {
+            TextPlacement::Below
+        } else {
+            item.placement
+        };
+        shift += match collision_side {
+            TextPlacement::Above => -step,
+            TextPlacement::Below => step,
+        };
+    };
+    layout.occupied.push(TextBounds {
+        left: box_left,
+        top: box_top,
+        right: box_right,
+        bottom: box_bottom,
+    });
+    let x = box_left - glyph.bounds.0 * scale;
+    let y = box_top - glyph.bounds.1 * scale;
+    let x_integer = x.floor() as i32;
+    let y_integer = y.floor() as i32;
+    scene.add_path(
+        DrawLayer::Text,
+        format!("direction-{}-{index}", item.path_id_prefix),
+        Some(match item.path_id_prefix {
+            "segno" => PathClass::SegnoMark,
+            "coda" => PathClass::CodaMark,
+            _ => PathClass::DirectionSymbol,
+        }),
+        Vec::new(),
+        PathGeometry::new(
+            Some((x_integer, y_integer)),
+            glyph.path,
+            PathStyle::BravuraGlyph,
+        )
+        .scaled(scale)
+        .offset_x(x - f64::from(x_integer))
+        .offset_y(y - f64::from(y_integer))
+        .colored(&item.color),
+    );
+    *layout.right = (*layout.right).max(box_right.ceil() as i32 + 8);
+    *layout.left = (*layout.left).min(box_left.floor() as i32 - 8);
+    *layout.view_top = (*layout.view_top).min(box_top.floor() as i32);
+    *layout.view_bottom = (*layout.view_bottom).max(box_bottom.ceil() as i32);
 }
 
 fn enclosure_bounds(

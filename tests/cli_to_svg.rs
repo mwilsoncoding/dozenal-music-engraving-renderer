@@ -700,6 +700,225 @@ fn keeps_explicitly_positioned_text_on_its_coordinate_side_when_colliding() {
 }
 
 #[test]
+fn renders_path_backed_symbol_directions() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("symbol-direction.musicxml");
+    let symbols = [
+        "restWhole",
+        "restHalf",
+        "restQuarter",
+        "rest8th",
+        "rest16th",
+        "rest32nd",
+        "rest64th",
+        "flag8thUp",
+        "flag8thDown",
+        "flag16thUp",
+        "flag16thDown",
+        "flag32ndUp",
+        "flag32ndDown",
+        "flag64thUp",
+        "flag64thDown",
+    ]
+    .map(|name| format!("<symbol>{name}</symbol>"))
+    .join("");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml")
+        .replace("<rehearsal>A</rehearsal>", &symbols);
+    fs::write(&input, fixture).expect("write symbol direction score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "symbol direction failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("<symbol> direction is not supported"),
+        "supported symbol direction should not warn: {stderr}"
+    );
+    let svg = fs::read_to_string(directory.join("symbol-direction.svg")).expect("read SVG");
+    assert!(
+        svg.contains("id=\"direction-symbol-0\" class=\"direction-symbol\""),
+        "symbol direction should render as a path: {svg}"
+    );
+    let first_symbol = svg
+        .lines()
+        .find(|line| line.contains("id=\"direction-symbol-0\""))
+        .expect("first symbol path");
+    assert!(
+        first_symbol.contains("fill=\"#171717\"") && first_symbol.contains("fill-rule=\"nonzero\""),
+        "symbol direction path should be filled: {first_symbol}"
+    );
+    assert_eq!(
+        svg.matches("class=\"direction-symbol\"").count(),
+        15,
+        "every allowlisted Bravura symbol should render as a path"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_segno_and_coda_marks_in_source_order() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("segno-coda.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml")
+        .replace(
+            "<rehearsal>A</rehearsal>",
+            "<words>Start</words><segno smufl=\"segnoSerpent1\" color=\"#006699\" font-size=\"large\" default-x=\"7\" default-y=\"50\"/><words>Return</words><coda smufl=\"codaSquare\" color=\"#994400\"/><segno smufl=\"segnoUnlisted\"/>",
+        )
+        .replacen(
+            "</direction-type>",
+            "</direction-type><sound segno=\"jump\" coda=\"jump\"/>",
+            1,
+        );
+    fs::write(&input, fixture).expect("write Segno and Coda score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "Segno and Coda marks failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("segno-coda.svg")).expect("read SVG");
+    let paths = [
+        "id=\"text-0-glyph-0\"",
+        "id=\"direction-segno-1\"",
+        "id=\"text-2-glyph-0\"",
+        "id=\"direction-coda-3\"",
+    ];
+    let positions = paths.map(|path| svg.find(path).expect("expected direction path"));
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "direction paths should preserve source order: {svg}"
+    );
+    let segno = svg
+        .lines()
+        .find(|line| line.contains("id=\"direction-segno-1\""))
+        .expect("Segno path");
+    assert!(
+        segno.contains("fill=\"#006699\"") && segno.contains("scale(0.045)"),
+        "Segno should honor color and font-size overrides: {segno}"
+    );
+    assert!(
+        segno.contains("d=\"M202-1031")
+            && text_path_y(&svg, "direction-segno-1") < 0.0
+            && (100.0..115.0).contains(&text_path_x(&svg, "direction-segno-1")),
+        "Segno should honor its glyph and explicit coordinates: {segno}"
+    );
+    let coda = svg
+        .lines()
+        .find(|line| line.contains("id=\"direction-coda-3\""))
+        .expect("Coda path");
+    assert!(
+        coda.contains("fill=\"#994400\""),
+        "Coda should honor its color override: {coda}"
+    );
+    assert!(
+        coda.contains("d=\"M807-400") && coda.contains("fill=\"#994400\""),
+        "Coda should honor its path-backed glyph and color overrides: {coda}"
+    );
+    assert!(
+        svg.contains("id=\"direction-segno-4\" class=\"segno-mark\""),
+        "valid unsupported override should fall back to the conventional mark"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("SMuFL glyph override \"segnoUnlisted\" is not supported"),
+        "valid unsupported glyph override should warn and use the conventional path"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("<sound>"),
+        "playback navigation attributes should be silently ignored"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn warns_and_preserves_siblings_for_valid_unsupported_symbols() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("unsupported-symbol.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml").replace(
+        "<rehearsal>A</rehearsal>",
+        "<symbol>accidentalNatural</symbol><words>kept</words>",
+    );
+    fs::write(&input, fixture).expect("write unsupported symbol score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "valid unsupported symbol should warn and render siblings"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("SMuFL symbol \"accidentalNatural\" is not supported; omitted"),
+        "unsupported symbol should produce a contextual warning"
+    );
+    let svg = fs::read_to_string(directory.join("unsupported-symbol.svg")).expect("read SVG");
+    assert!(svg.contains("id=\"text-0-glyph-0\""));
+    assert!(!svg.contains("id=\"direction-symbol-"));
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_malformed_symbol_and_mark_attributes_contextually() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    for (name, item, expected) in [
+        (
+            "symbol",
+            "<symbol>bad name!</symbol>",
+            "invalid SMuFL symbol name",
+        ),
+        ("segno", "<segno color=\"red\"/>", "symbol color must be"),
+        (
+            "coda",
+            "<coda smufl=\"bad name\"/>",
+            "invalid SMuFL glyph name",
+        ),
+    ] {
+        let input = directory.join(format!("malformed-{name}.musicxml"));
+        let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml")
+            .replace("<rehearsal>A</rehearsal>", item);
+        fs::write(&input, fixture).expect("write malformed direction score");
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "malformed {name} should fail: {stderr}"
+        );
+        assert!(
+            stderr.contains(expected),
+            "wrong {name} diagnostic: {stderr}"
+        );
+        assert!(
+            !directory.join(format!("malformed-{name}.svg")).exists(),
+            "malformed {name} must not emit partial SVG"
+        );
+    }
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn draws_bracket_enclosure_as_open_brackets() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
