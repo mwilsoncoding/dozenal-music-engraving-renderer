@@ -5704,7 +5704,7 @@ fn render_part_svg(
                 &pending_ties_for_event,
                 stems_up,
             );
-            if previous_event_onset.is_some_and(|onset| onset <= event.onset_units) {
+            if previous_event_onset.is_some_and(|onset| onset < event.onset_units) {
                 if let Some(previous) = &previous_event_geometry {
                     x = next_event_x(preferred_x, previous, &preferred_geometry);
                 }

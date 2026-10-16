@@ -1734,6 +1734,46 @@ fn accepts_a_single_voice_with_a_nondefault_identifier() {
 }
 
 #[test]
+fn preserves_simultaneous_onsets_when_voice_geometry_overlaps() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("overlapping-voice-onsets.musicxml");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let notes = "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>\n      <backup><duration>1</duration></backup>\n      <note><pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><voice>2</voice><type>quarter</type></note>";
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(original_note, notes);
+    fs::write(&input, fixture).expect("write overlapping-onset score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "overlapping simultaneous Voices failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("overlapping-voice-onsets.svg")).expect("read SVG");
+    let tonehead_x = |tone| {
+        svg.lines()
+            .find(|line| {
+                line.contains("class=\"tonehead\"")
+                    && line.contains(&format!("data-tone=\"{tone}\""))
+            })
+            .and_then(|line| line.split("transform=\"translate(").nth(1))
+            .and_then(|transform| transform.split_whitespace().next())
+            .and_then(|x| x.parse::<f64>().ok())
+            .expect("tonehead position")
+    };
+    assert_eq!(
+        tonehead_x(0),
+        tonehead_x(2),
+        "simultaneous onsets must align: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn renders_parallel_voices_using_backup_cursor_movement() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
