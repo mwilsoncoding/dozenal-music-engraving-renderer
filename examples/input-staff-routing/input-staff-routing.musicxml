@@ -7,11 +7,11 @@
     <measure number="1">
       <attributes>
         <divisions>1</divisions>
-        <staves>2</staves>
         <time><beats>4</beats><beat-type>4</beat-type></time>
         <time number="2"><beats>3</beats><beat-type>4</beat-type></time>
         <key number="1"><fifths>0</fifths><mode>major</mode></key>
         <key number="2"><fifths>0</fifths><mode>major</mode></key>
+        <staves>2</staves>
         <clef number="1"><sign>G</sign><line>2</line></clef>
         <clef number="2"><sign>F</sign><line>4</line></clef>
       </attributes>

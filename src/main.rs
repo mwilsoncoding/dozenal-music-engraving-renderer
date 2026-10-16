@@ -641,6 +641,34 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                     "attributes" => {
                         require_no_attributes(element)?;
                         require_container_text(element)?;
+                        let declared_staves = element
+                            .children
+                            .iter()
+                            .filter(|child| elements[**child].name == "staves")
+                            .copied()
+                            .collect::<Vec<_>>();
+                        if declared_staves.len() > 1 {
+                            return Err(element_diagnostic(
+                                &elements[declared_staves[1]],
+                                "attributes contain multiple <staves> declarations".to_owned(),
+                            ));
+                        }
+                        if let Some(staves) = declared_staves.first() {
+                            input_staff_count = leaf_text(&elements[*staves])?
+                                .parse::<u32>()
+                                .ok()
+                                .filter(|value| *value > 0)
+                                .ok_or_else(|| {
+                                    element_diagnostic(
+                                        &elements[*staves],
+                                        "<staves> must be a positive integer".to_owned(),
+                                    )
+                                })?;
+                            transpositions.resize(input_staff_count as usize, 0);
+                            active_meters.resize(input_staff_count as usize, None);
+                            active_key_signatures.resize(input_staff_count as usize, None);
+                            active_clefs.resize(input_staff_count as usize, None);
+                        }
                         let mut saw_divisions = false;
                         let mut saw_staves = false;
                         for attribute in &element.children {
@@ -661,20 +689,6 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                     saw_divisions = true;
                                 }
                                 "staves" if !saw_staves => {
-                                    input_staff_count = leaf_text(attribute_element)?
-                                        .parse::<u32>()
-                                        .ok()
-                                        .filter(|value| *value > 0)
-                                        .ok_or_else(|| {
-                                            element_diagnostic(
-                                                attribute_element,
-                                                "<staves> must be a positive integer".to_owned(),
-                                            )
-                                        })?;
-                                    transpositions.resize(input_staff_count as usize, 0);
-                                    active_meters.resize(input_staff_count as usize, None);
-                                    active_key_signatures.resize(input_staff_count as usize, None);
-                                    active_clefs.resize(input_staff_count as usize, None);
                                     saw_staves = true;
                                 }
                                 "transpose" => {
