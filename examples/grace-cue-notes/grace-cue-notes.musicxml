@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list>
+    <score-part id="P1"><part-name>Grace and Cue Notes</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>4</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch>
+        <duration>4</duration><voice>1</voice><type>quarter</type>
+      </note>
+      <note>
+        <grace slash="yes"/><pitch><step>D</step><octave>4</octave></pitch>
+        <voice>1</voice>
+      </note>
+      <note>
+        <pitch><step>E</step><octave>4</octave></pitch>
+        <duration>4</duration><voice>1</voice><type>quarter</type>
+      </note>
+      <note>
+        <cue/><pitch><step>F</step><octave>4</octave></pitch>
+        <duration>4</duration><voice>1</voice><type size="cue">quarter</type>
+      </note>
+      <note>
+        <cue/><rest/><duration>4</duration><voice>1</voice><type size="cue">quarter</type>
+      </note>
+      <note>
+        <cue/><unpitched><display-octave>5</display-octave></unpitched>
+        <duration>4</duration><voice>1</voice><type size="cue">quarter</type>
+      </note>
+    </measure>
+  </part>
+</score-partwise>

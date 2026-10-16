@@ -2876,6 +2876,255 @@ fn spaces_sequential_notes_according_to_duration() {
 }
 
 #[test]
+fn grace_and_cue_notes_follow_their_distinct_cursor_rules() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("grace-cue-timing.musicxml");
+    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let notes = r#"      <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+    <note><grace slash="yes"/><pitch><step>D</step><octave>4</octave></pitch><voice>1</voice></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><cue/><pitch><step>F</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type size="cue">quarter</type></note>
+      <note><grace/><cue/><pitch><step>G</step><octave>4</octave></pitch><voice>1</voice><type size="grace-cue">eighth</type></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>eighth</type></note>"#;
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace(original_note, notes)
+        .replace("<divisions>1</divisions>", "<divisions>4</divisions>")
+        .replace(
+            "<attributes><divisions>4</divisions></attributes>",
+            "<attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>",
+        );
+    fs::write(&input, &fixture).expect("write grace-cue timing score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "grace-cue timing score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("underfull") && !stderr.contains("overfull"),
+        "grace/cue cursor handling should fill 4/4 exactly: {stderr}"
+    );
+    let svg = fs::read_to_string(directory.join("grace-cue-timing.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 7, "{svg}");
+    let tonehead = |tone: u8| {
+        svg.lines()
+            .find(|line| {
+                line.contains("class=\"tonehead\"")
+                    && line.contains(&format!("data-tone=\"{tone}\""))
+            })
+            .expect("tonehead path")
+    };
+    assert!(
+        tonehead(2).contains("scale(0.6)"),
+        "Grace Note size: {}",
+        tonehead(2)
+    );
+    assert!(
+        tonehead(5).contains("scale(0.6)"),
+        "Cue note size: {}",
+        tonehead(5)
+    );
+    assert!(
+        tonehead(7).contains("scale(0.6)"),
+        "Grace+Cue size: {}",
+        tonehead(7)
+    );
+    assert!(
+        !tonehead(0).contains("scale("),
+        "full-size note: {}",
+        tonehead(0)
+    );
+    let tonehead_x = |line: &str| {
+        let start = line.find("translate(").expect("tonehead transform") + 10;
+        let end = line[start..].find(' ').expect("x/y separator") + start;
+        line[start..end]
+            .parse::<f64>()
+            .expect("tonehead x coordinate")
+    };
+    assert!(
+        tonehead_x(tonehead(2)) < tonehead_x(tonehead(4)),
+        "Grace Note should precede its principal note: {} then {}",
+        tonehead(2),
+        tonehead(4)
+    );
+    assert!(
+        svg.contains("id=\"flag-1\" class=\"flag\""),
+        "Grace default flag: {svg}"
+    );
+    assert!(svg.contains("class=\"grace-slash\""), "Grace slash: {svg}");
+
+    let tied_path = directory.join("grace-tie.musicxml");
+    let tied_source = fixture
+        .replace(
+            "<note><grace slash=\"yes\"/><pitch><step>D</step><octave>4</octave></pitch><voice>1</voice></note>",
+            "<note><grace slash=\"yes\"/><pitch><step>D</step><octave>4</octave></pitch><tie type=\"start\"/><voice>1</voice><type>eighth</type><notations><tied type=\"start\"/></notations></note>",
+        )
+        .replace(
+            "<note><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>",
+            "<note><pitch><step>D</step><octave>4</octave></pitch><duration>4</duration><tie type=\"stop\"/><voice>1</voice><type>quarter</type><notations><tied type=\"stop\"/></notations></note>",
+        );
+    fs::write(&tied_path, tied_source).expect("write Grace tie score");
+    let tied_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&tied_path)
+        .output()
+        .expect("run CLI for Grace tie");
+    assert!(
+        tied_output.status.success(),
+        "Grace tie failed: {}",
+        String::from_utf8_lossy(&tied_output.stderr)
+    );
+    let tied_svg = fs::read_to_string(directory.join("grace-tie.svg")).expect("read Grace tie SVG");
+    assert!(
+        tied_svg.contains("class=\"tie\""),
+        "visual tie missing: {tied_svg}"
+    );
+
+    let cue_rest_input = directory.join("cue-rest.musicxml");
+    let cue_rest_source = fixture.replace(
+        "<cue/><pitch><step>F</step><octave>4</octave></pitch>",
+        "<cue/><rest/>",
+    );
+    fs::write(&cue_rest_input, cue_rest_source).expect("write Cue Rest score");
+    let cue_rest_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&cue_rest_input)
+        .output()
+        .expect("run CLI for Cue Rest");
+    assert!(
+        cue_rest_output.status.success(),
+        "Cue Rest failed: {}",
+        String::from_utf8_lossy(&cue_rest_output.stderr)
+    );
+    let cue_rest_svg =
+        fs::read_to_string(directory.join("cue-rest.svg")).expect("read Cue Rest SVG");
+    assert!(
+        cue_rest_svg
+            .lines()
+            .any(|line| { line.contains("class=\"rest\"") && line.contains("scale(0.6)") }),
+        "Cue Rest should use Cue scale: {cue_rest_svg}"
+    );
+
+    let cue_unpitched_input = directory.join("cue-unpitched.musicxml");
+    let cue_unpitched_source = fixture.replace(
+        "<cue/><pitch><step>F</step><octave>4</octave></pitch>",
+        "<cue/><unpitched><display-step>F</display-step><display-octave>5</display-octave></unpitched>",
+    );
+    fs::write(&cue_unpitched_input, cue_unpitched_source).expect("write Cue Unpitched score");
+    let cue_unpitched_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&cue_unpitched_input)
+        .output()
+        .expect("run CLI for Cue Unpitched");
+    assert!(
+        cue_unpitched_output.status.success(),
+        "Cue Unpitched failed: {}",
+        String::from_utf8_lossy(&cue_unpitched_output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&cue_unpitched_output.stderr).contains("display-step is ignored"),
+        "Cue Unpitched should warn about display-step"
+    );
+    let cue_unpitched_svg =
+        fs::read_to_string(directory.join("cue-unpitched.svg")).expect("read Cue Unpitched SVG");
+    assert!(
+        cue_unpitched_svg.contains("class=\"unpitched-mark\"")
+            && cue_unpitched_svg.contains("scale(0.6)"),
+        "Cue Unpitched should use the scaled X mark: {cue_unpitched_svg}"
+    );
+
+    let grace_unpitched_input = directory.join("grace-unpitched.musicxml");
+    let grace_unpitched_source = fixture.replace(
+        "<grace slash=\"yes\"/><pitch><step>D</step><octave>4</octave></pitch>",
+        "<grace slash=\"yes\"/><unpitched><display-octave>5</display-octave></unpitched>",
+    );
+    fs::write(&grace_unpitched_input, grace_unpitched_source).expect("write Grace Unpitched score");
+    let grace_unpitched_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&grace_unpitched_input)
+        .output()
+        .expect("run CLI for Grace Unpitched");
+    assert!(
+        !grace_unpitched_output.status.success()
+            && String::from_utf8_lossy(&grace_unpitched_output.stderr)
+                .contains("Grace Notes require a pitched event"),
+        "Grace Unpitched should be rejected: {}",
+        String::from_utf8_lossy(&grace_unpitched_output.stderr)
+    );
+
+    let grace_rest_input = directory.join("grace-rest.musicxml");
+    let grace_rest_source = fixture.replace(
+        "<grace slash=\"yes\"/><pitch><step>D</step><octave>4</octave></pitch>",
+        "<grace slash=\"yes\"/><rest/>",
+    );
+    fs::write(&grace_rest_input, grace_rest_source).expect("write Grace Rest score");
+    let grace_rest_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&grace_rest_input)
+        .output()
+        .expect("run CLI for Grace Rest");
+    assert!(
+        !grace_rest_output.status.success()
+            && String::from_utf8_lossy(&grace_rest_output.stderr)
+                .contains("Grace Notes may not be Rests"),
+        "Grace Rest should be rejected: {}",
+        String::from_utf8_lossy(&grace_rest_output.stderr)
+    );
+
+    let note_size_input = directory.join("cue-note-size-default.musicxml");
+    let note_size_source = fixture.replace(
+        "<score-partwise version=\"4.0\">",
+        "<score-partwise version=\"4.0\"><defaults><appearance><note-size type=\"cue\">80</note-size></appearance></defaults>",
+    );
+    fs::write(&note_size_input, note_size_source).expect("write note-size defaults score");
+    let note_size_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&note_size_input)
+        .output()
+        .expect("run CLI for note-size defaults");
+    assert!(
+        note_size_output.status.success(),
+        "note-size defaults failed: {}",
+        String::from_utf8_lossy(&note_size_output.stderr)
+    );
+    let note_size_svg = fs::read_to_string(directory.join("cue-note-size-default.svg"))
+        .expect("read note-size defaults SVG");
+    let cue_notehead = note_size_svg
+        .lines()
+        .find(|line| line.contains("class=\"tonehead\"") && line.contains("data-tone=\"5\""))
+        .expect("Cue Tonehead with note-size default");
+    assert!(cue_notehead.contains("scale(0.8)"), "{cue_notehead}");
+
+    for (category, expected_scale) in [("full", None), ("large", Some("scale(1.25)"))] {
+        let variant_input = directory.join(format!("cue-{category}.musicxml"));
+        let variant_source = fixture.replace("size=\"cue\"", &format!("size=\"{category}\""));
+        fs::write(&variant_input, variant_source).expect("write Cue size variant");
+        let variant_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&variant_input)
+            .output()
+            .expect("run CLI for Cue size variant");
+        assert!(
+            variant_output.status.success(),
+            "Cue size {category:?} failed: {}",
+            String::from_utf8_lossy(&variant_output.stderr)
+        );
+        let variant_svg = fs::read_to_string(directory.join(format!("cue-{category}.svg")))
+            .expect("read Cue size SVG");
+        let cue_tonehead = variant_svg
+            .lines()
+            .find(|line| line.contains("class=\"tonehead\"") && line.contains("data-tone=\"5\""))
+            .expect("Cue Tonehead");
+        match expected_scale {
+            Some(scale) => assert!(cue_tonehead.contains(scale), "{cue_tonehead}"),
+            None => assert!(!cue_tonehead.contains("scale("), "{cue_tonehead}"),
+        }
+    }
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn enforces_minimum_clearance_between_vertically_overlapping_event_geometry() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");

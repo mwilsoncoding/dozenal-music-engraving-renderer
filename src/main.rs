@@ -36,6 +36,9 @@ struct Event {
     onset_units: f64,
     duration_name: &'static str,
     dots: u8,
+    is_grace: bool,
+    grace_slash: bool,
+    glyph_scale: f64,
     beams: Vec<BeamMark>,
     voice_id: VoiceId,
     input_staff: u32,
@@ -45,14 +48,58 @@ struct Event {
 #[derive(Clone)]
 struct ToneEvent {
     tone: Tone,
+    is_unpitched: bool,
     tie_start: bool,
     tie_stop: bool,
     input_staff: u32,
 }
 
+#[derive(Clone, Copy)]
+struct NoteSizeScales {
+    full: f64,
+    cue: f64,
+    grace_cue: f64,
+    large: f64,
+}
+
+struct NoteParseOptions {
+    input_staff_count: u32,
+    note_size_scales: NoteSizeScales,
+}
+
+impl Default for NoteSizeScales {
+    fn default() -> Self {
+        Self {
+            full: 1.0,
+            cue: 0.6,
+            grace_cue: 0.6,
+            large: 1.25,
+        }
+    }
+}
+
+impl NoteSizeScales {
+    fn scale(self, category: &str) -> Option<f64> {
+        match category {
+            "full" => Some(self.full),
+            "cue" => Some(self.cue),
+            "grace-cue" => Some(self.grace_cue),
+            "large" => Some(self.large),
+            _ => None,
+        }
+    }
+}
+
 struct ParsedNote {
     event: Event,
     chord_marker: Option<usize>,
+    tuplet_boundary: Option<TupletBoundary>,
+}
+
+#[derive(Default)]
+struct NotationMarkers {
+    tie_start: bool,
+    tie_stop: bool,
     tuplet_boundary: Option<TupletBoundary>,
 }
 
@@ -530,6 +577,74 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
     parse_score_with_mode(source, InputStaffMode::Combine)
 }
 
+fn parse_note_size_defaults(
+    elements: &[Element],
+    defaults: usize,
+) -> Result<NoteSizeScales, String> {
+    let defaults_element = &elements[defaults];
+    require_no_attributes(defaults_element)?;
+    require_container_text(defaults_element)?;
+    let [appearance] = exact_children(elements, defaults, &["appearance"])?;
+    require_no_attributes(&elements[appearance])?;
+    require_container_text(&elements[appearance])?;
+    let mut scales = NoteSizeScales::default();
+    let mut seen = Vec::new();
+    for child in &elements[appearance].children {
+        let note_size = &elements[*child];
+        if note_size.name != "note-size" {
+            return Err(element_diagnostic(
+                note_size,
+                "note-size defaults support only <note-size>".to_owned(),
+            ));
+        }
+        validate_attributes(note_size, &["type"])?;
+        let category = required_attribute(note_size, "type")?;
+        let scale = match category {
+            "full" | "cue" | "grace-cue" | "large" => category,
+            value => {
+                return Err(element_diagnostic(
+                    note_size,
+                    format!("unsupported note-size type {value:?}"),
+                ));
+            }
+        };
+        if seen.contains(&scale) {
+            return Err(element_diagnostic(
+                note_size,
+                format!("duplicate note-size type {scale:?}"),
+            ));
+        }
+        seen.push(scale);
+        if !note_size.children.is_empty() {
+            return Err(element_diagnostic(
+                note_size,
+                "note-size must contain plain percentage text".to_owned(),
+            ));
+        }
+        let percentage = note_size
+            .text
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .ok_or_else(|| {
+                element_diagnostic(
+                    note_size,
+                    "note-size must be a positive percentage".to_owned(),
+                )
+            })?;
+        let value = percentage / 100.0;
+        match scale {
+            "full" => scales.full = value,
+            "cue" => scales.cue = value,
+            "grace-cue" => scales.grace_cue = value,
+            "large" => scales.large = value,
+            _ => unreachable!("validated note-size category"),
+        }
+    }
+    Ok(scales)
+}
+
 fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Result<Score, String> {
     let elements = xml::parse(source).map_err(|error| error.to_string())?;
     let root = root_element(&elements)?;
@@ -561,14 +676,32 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
     require_container_text(&elements[root])?;
 
     let root_children = &elements[root].children;
-    if root_children.len() < 2 || elements[root_children[0]].name != "part-list" {
+    let Some(part_list_index) = root_children
+        .iter()
+        .position(|child| elements[*child].name == "part-list")
+    else {
         return Err(element_diagnostic(
             &elements[root],
-            "unsupported shape: <score-partwise> must begin with <part-list> and contain Parts"
-                .to_owned(),
+            "unsupported shape: <score-partwise> must contain <part-list> and Parts".to_owned(),
+        ));
+    };
+    if part_list_index + 1 >= root_children.len()
+        || root_children[..part_list_index]
+            .iter()
+            .any(|child| elements[*child].name != "defaults")
+        || root_children[..part_list_index].len() > 1
+    {
+        return Err(element_diagnostic(
+            &elements[root],
+            "unsupported score-partwise child before <part-list>".to_owned(),
         ));
     }
-    let part_list = root_children[0];
+    let note_size_scales = root_children[..part_list_index]
+        .first()
+        .map(|defaults| parse_note_size_defaults(&elements, *defaults))
+        .transpose()?
+        .unwrap_or_default();
+    let part_list = root_children[part_list_index];
     require_no_attributes(&elements[part_list])?;
     require_container_text(&elements[part_list])?;
     let mut score_parts = Vec::new();
@@ -611,7 +744,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
         ));
     }
     let mut part_elements = Vec::new();
-    for part in &root_children[1..] {
+    for part in &root_children[part_list_index + 1..] {
         let part_element = &elements[*part];
         if part_element.name != "part" {
             return Err(element_diagnostic(
@@ -838,8 +971,11 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                             *child,
                             divisions,
                             &active_staff_states,
-                            input_staff_count,
                             &active_tuplets,
+                            NoteParseOptions {
+                                input_staff_count,
+                                note_size_scales,
+                            },
                             &mut warnings,
                         )?;
                         let tuplet_event_index = parsed
@@ -3231,23 +3367,72 @@ fn parse_tuplet_notations(
     elements: &[Element],
     notations: usize,
     ratio: Option<&TupletRatio>,
-) -> Result<Option<TupletBoundary>, String> {
+) -> Result<NotationMarkers, String> {
     let element = &elements[notations];
     require_no_attributes(element)?;
     require_container_text(element)?;
     if element.children.is_empty() {
         return Err(element_diagnostic(
             element,
-            "<notations> must contain a supported <tuplet> boundary".to_owned(),
+            "<notations> must contain a supported visual tie or tuplet".to_owned(),
         ));
     }
-    if element.children.len() != 1 || elements[element.children[0]].name != "tuplet" {
-        return Err(element_diagnostic(
-            element,
-            "only one <tuplet> boundary per note is supported".to_owned(),
-        ));
+    let mut markers = NotationMarkers::default();
+    let mut tuplet = None;
+    for child in &element.children {
+        let child_element = &elements[*child];
+        match child_element.name.as_str() {
+            "tied" => {
+                validate_attributes(child_element, &["type", "number"])?;
+                require_container_text(child_element)?;
+                if !child_element.children.is_empty() {
+                    return Err(element_diagnostic(
+                        child_element,
+                        "<tied> must be empty".to_owned(),
+                    ));
+                }
+                if let Some(number) = optional_attribute(child_element, "number") {
+                    if number
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|value| *value > 0)
+                        .is_none()
+                    {
+                        return Err(element_diagnostic(
+                            child_element,
+                            "tied number must be a positive integer".to_owned(),
+                        ));
+                    }
+                }
+                match required_attribute(child_element, "type")? {
+                    "start" if !markers.tie_start => markers.tie_start = true,
+                    "stop" if !markers.tie_stop => markers.tie_stop = true,
+                    _ => {
+                        return Err(element_diagnostic(
+                            child_element,
+                            "tied type must be one unique 'start' and/or 'stop'".to_owned(),
+                        ));
+                    }
+                }
+            }
+            "tuplet" if tuplet.is_none() => tuplet = Some(*child),
+            "tuplet" => {
+                return Err(element_diagnostic(
+                    child_element,
+                    "only one <tuplet> boundary per note is supported".to_owned(),
+                ));
+            }
+            _ => {
+                return Err(element_diagnostic(
+                    child_element,
+                    "unsupported notation; expected <tied> or <tuplet>".to_owned(),
+                ));
+            }
+        }
     }
-    let tuplet = element.children[0];
+    let Some(tuplet) = tuplet else {
+        return Ok(markers);
+    };
     let tuplet_element = &elements[tuplet];
     validate_attributes(
         tuplet_element,
@@ -3384,18 +3569,21 @@ fn parse_tuplet_notations(
             ));
         }
     };
-    match tuplet_type {
-        "start" => Ok(Some(TupletBoundary::Start(TupletStart {
+    markers.tuplet_boundary = Some(match tuplet_type {
+        "start" => TupletBoundary::Start(TupletStart {
             number: number.to_owned(),
             display_number,
             bracket,
-        }))),
-        "stop" => Ok(Some(TupletBoundary::Stop(number.to_owned()))),
-        value => Err(element_diagnostic(
-            tuplet_element,
-            format!("tuplet type must be 'start' or 'stop', not {value:?}"),
-        )),
-    }
+        }),
+        "stop" => TupletBoundary::Stop(number.to_owned()),
+        value => {
+            return Err(element_diagnostic(
+                tuplet_element,
+                format!("tuplet type must be 'start' or 'stop', not {value:?}"),
+            ));
+        }
+    });
+    Ok(markers)
 }
 
 fn parse_note(
@@ -3403,16 +3591,71 @@ fn parse_note(
     note: usize,
     divisions: u32,
     input_staff_states: &[InputStaffState],
-    input_staff_count: u32,
     active_tuplets: &VoiceState<Option<ActiveTuplet>>,
+    options: NoteParseOptions,
     warnings: &mut Vec<String>,
 ) -> Result<ParsedNote, String> {
     let note_element = &elements[note];
     require_no_attributes(note_element)?;
     require_container_text(note_element)?;
     let children = &note_element.children;
+    let mut position = 0;
+    let grace_element = children
+        .get(position)
+        .filter(|child| elements[**child].name == "grace")
+        .copied();
+    let is_grace = grace_element.is_some();
+    let grace_slash = if let Some(grace) = grace_element {
+        let grace_element = &elements[grace];
+        validate_attributes(
+            grace_element,
+            &[
+                "slash",
+                "steal-time-previous",
+                "steal-time-following",
+                "make-time",
+            ],
+        )?;
+        require_container_text(grace_element)?;
+        if !grace_element.children.is_empty() {
+            return Err(element_diagnostic(
+                grace_element,
+                "<grace/> must be empty".to_owned(),
+            ));
+        }
+        let slash = match optional_attribute(grace_element, "slash").unwrap_or("no") {
+            "yes" => true,
+            "no" => false,
+            value => {
+                return Err(element_diagnostic(
+                    grace_element,
+                    format!("grace slash must be 'yes' or 'no', not {value:?}"),
+                ));
+            }
+        };
+        position += 1;
+        slash
+    } else {
+        false
+    };
+    let cue_element = children
+        .get(position)
+        .filter(|child| elements[**child].name == "cue")
+        .copied();
+    let is_cue = cue_element.is_some();
+    if let Some(cue) = cue_element {
+        require_no_attributes(&elements[cue])?;
+        require_container_text(&elements[cue])?;
+        if !elements[cue].children.is_empty() {
+            return Err(element_diagnostic(
+                &elements[cue],
+                "<cue/> must be empty".to_owned(),
+            ));
+        }
+        position += 1;
+    }
     let chord_marker = children
-        .first()
+        .get(position)
         .filter(|child| elements[**child].name == "chord")
         .copied();
     if let Some(chord) = chord_marker {
@@ -3424,6 +3667,7 @@ fn parse_note(
                 "<chord/> must be empty".to_owned(),
             ));
         }
+        position += 1;
     } else if let Some(chord) = children
         .iter()
         .find(|child| elements[**child].name == "chord")
@@ -3433,12 +3677,13 @@ fn parse_note(
             "<chord/> must precede <pitch>".to_owned(),
         ));
     }
-    let pitch_position = usize::from(chord_marker.is_some());
-    let event_element = children.get(pitch_position).copied().ok_or_else(|| {
+    let event_element = children.get(position).copied().ok_or_else(|| {
         element_diagnostic(note_element, "unsupported empty note event".to_owned())
     })?;
+    position += 1;
     let is_rest = elements[event_element].name == "rest";
-    if elements[event_element].name != "pitch" && !is_rest {
+    let is_unpitched = elements[event_element].name == "unpitched";
+    if elements[event_element].name != "pitch" && !is_rest && !is_unpitched {
         return Err(element_diagnostic(
             note_element,
             "unsupported note shape; expected <pitch> or <rest> first".to_owned(),
@@ -3452,17 +3697,37 @@ fn parse_note(
             ));
         }
     }
-    let mut position = pitch_position + 1;
-    let duration = *children.get(position).ok_or_else(|| {
-        element_diagnostic(note_element, "note event requires <duration>".to_owned())
-    })?;
-    if elements[duration].name != "duration" {
+    if is_grace && is_unpitched {
         return Err(element_diagnostic(
-            &elements[duration],
-            "expected <duration> after <pitch> or <rest>".to_owned(),
+            &elements[event_element],
+            "Grace Notes require a pitched event".to_owned(),
         ));
     }
-    position += 1;
+    if is_grace && is_rest {
+        return Err(element_diagnostic(
+            &elements[event_element],
+            "Grace Notes may not be Rests".to_owned(),
+        ));
+    }
+    let duration = children
+        .get(position)
+        .filter(|child| elements[**child].name == "duration")
+        .copied();
+    if let Some(duration) = duration.filter(|_| is_grace) {
+        return Err(element_diagnostic(
+            &elements[duration],
+            "Grace Notes may not contain <duration>".to_owned(),
+        ));
+    }
+    if let Some(duration) = duration {
+        require_no_attributes(&elements[duration])?;
+        position += 1;
+    } else if !is_grace {
+        return Err(element_diagnostic(
+            note_element,
+            "note event requires <duration> unless it is a Grace Note".to_owned(),
+        ));
+    }
     let mut tie_start = false;
     let mut tie_stop = false;
     while children
@@ -3500,10 +3765,35 @@ fn parse_note(
             })
             .transpose()?,
     );
-    let note_type = *children
+    let note_type = children
         .get(position)
-        .ok_or_else(|| element_diagnostic(note_element, "note event requires <type>".to_owned()))?;
-    position += 1;
+        .filter(|child| elements[**child].name == "type")
+        .copied();
+    let note_type_name = if let Some(note_type) = note_type {
+        validate_attributes(&elements[note_type], &["size"])?;
+        if !elements[note_type].children.is_empty() {
+            return Err(element_diagnostic(
+                &elements[note_type],
+                "<type> must be text only".to_owned(),
+            ));
+        }
+        let value = elements[note_type].text.trim();
+        if value.is_empty() {
+            return Err(element_diagnostic(
+                &elements[note_type],
+                "<type> may not be empty".to_owned(),
+            ));
+        }
+        position += 1;
+        value
+    } else if is_grace {
+        "eighth"
+    } else {
+        return Err(element_diagnostic(
+            note_element,
+            "note event requires <type>".to_owned(),
+        ));
+    };
     let mut dot_count = 0;
     while children
         .get(position)
@@ -3557,7 +3847,7 @@ fn parse_note(
         position += 1;
         require_no_attributes(&elements[staff])?;
         let value = leaf_text(&elements[staff])?;
-        parse_input_staff_index(&elements[staff], value, input_staff_count)?
+        parse_input_staff_index(&elements[staff], value, options.input_staff_count)?
     } else {
         0
     };
@@ -3619,16 +3909,19 @@ fn parse_note(
         beams.push(BeamMark { level, state });
         position += 1;
     }
-    let tuplet_boundary = children
+    let notation_markers = if let Some(notations) = children
         .get(position)
         .filter(|child| elements[**child].name == "notations")
         .copied()
-        .map(|notations| {
-            position += 1;
-            parse_tuplet_notations(elements, notations, time_modification.as_ref())
-        })
-        .transpose()?
-        .flatten();
+    {
+        position += 1;
+        parse_tuplet_notations(elements, notations, time_modification.as_ref())?
+    } else {
+        NotationMarkers::default()
+    };
+    tie_start |= notation_markers.tie_start;
+    tie_stop |= notation_markers.tie_stop;
+    let tuplet_boundary = notation_markers.tuplet_boundary;
     if position != children.len() {
         return Err(element_diagnostic(
             note_element,
@@ -3645,7 +3938,8 @@ fn parse_note(
             ));
         }
     }
-    let (duration_name, base_units, mark_count) = match leaf_text(&elements[note_type])? {
+    let note_type_element = note_type.map(|note_type| &elements[note_type]);
+    let (duration_name, base_units, mark_count) = match note_type_name {
         "whole" => ("whole", 64, 0),
         "half" => ("half", 32, 2),
         "quarter" => ("quarter", 16, 0),
@@ -3655,7 +3949,7 @@ fn parse_note(
         "64th" => ("64th", 1, 0),
         value => {
             return Err(element_diagnostic(
-                &elements[note_type],
+                note_type_element.unwrap_or(note_element),
                 format!("unsupported note type {value:?}"),
             ));
         }
@@ -3695,7 +3989,7 @@ fn parse_note(
     }
     if dot_count > 0 && !matches!(duration_name, "quarter" | "half") {
         return Err(element_diagnostic(
-            &elements[note_type],
+            note_type_element.unwrap_or(note_element),
             "dots are supported only on quarter and half notes and Rests".to_owned(),
         ));
     }
@@ -3720,29 +4014,35 @@ fn parse_note(
     };
     if let Some(beam) = beams.iter().find(|beam| beam.level > maximum_beam_level) {
         return Err(element_diagnostic(
-            &elements[note_type],
+            note_type_element.unwrap_or(note_element),
             format!(
                 "beam level {} is not supported by {} notes",
                 beam.level, duration_name
             ),
         ));
     }
-    let duration_ticks = leaf_text(&elements[duration])?
-        .parse::<u32>()
-        .ok()
-        .filter(|value| *value > 0)
-        .ok_or_else(|| {
-            element_diagnostic(
-                &elements[duration],
-                "<duration> must be a positive integer".to_owned(),
-            )
-        })?;
+    let duration_ticks = if let Some(duration) = duration {
+        leaf_text(&elements[duration])?
+            .parse::<u32>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                element_diagnostic(
+                    &elements[duration],
+                    "<duration> must be a positive integer".to_owned(),
+                )
+            })?
+    } else {
+        0
+    };
     let display_only_tuplet = time_modification.is_none()
         && (active_tuplets
             .iter()
             .any(|(active_voice, number)| active_voice == &voice_id && number.is_some())
             || matches!(tuplet_boundary, Some(TupletBoundary::Start(_))));
-    if !display_only_tuplet
+    if !is_grace
+        && !is_cue
+        && !display_only_tuplet
         && !duration_matches_type(
             duration_ticks,
             divisions,
@@ -3752,12 +4052,14 @@ fn parse_note(
         )
     {
         return Err(element_diagnostic(
-            &elements[duration],
+            &elements[duration.expect("non-Grace note has a duration")],
             format!("duration {duration_ticks} does not match <type> at divisions {divisions}"),
         ));
     }
     let (dot_numerator, dot_denominator) = duration_dot_factor(dot_count);
-    let duration_units = if display_only_tuplet {
+    let duration_units = if is_grace {
+        0.0
+    } else if is_cue || display_only_tuplet {
         f64::from(duration_ticks) * 16.0 / f64::from(divisions)
     } else {
         f64::from(base_units) * f64::from(dot_numerator) / f64::from(dot_denominator)
@@ -3765,6 +4067,28 @@ fn parse_note(
                 f64::from(ratio.normal) / f64::from(ratio.actual)
             })
     };
+    let size_category = note_type
+        .and_then(|note_type| optional_attribute(&elements[note_type], "size"))
+        .unwrap_or(if is_cue {
+            if is_grace {
+                "grace-cue"
+            } else {
+                "cue"
+            }
+        } else if is_grace {
+            "grace-cue"
+        } else {
+            "full"
+        });
+    let glyph_scale = options
+        .note_size_scales
+        .scale(size_category)
+        .ok_or_else(|| {
+            element_diagnostic(
+                note_type_element.unwrap_or(note_element),
+                format!("unsupported note size {size_category:?}"),
+            )
+        })?;
     let duration_marks = if is_rest {
         dot_count as u8
     } else {
@@ -3778,7 +4102,12 @@ fn parse_note(
         Vec::new()
     } else {
         vec![ToneEvent {
-            tone: parse_pitch(elements, event_element, transposition)?,
+            tone: if is_unpitched {
+                parse_unpitched(elements, event_element, warnings)?
+            } else {
+                parse_pitch(elements, event_element, transposition)?
+            },
+            is_unpitched,
             tie_start,
             tie_stop,
             input_staff,
@@ -3791,6 +4120,9 @@ fn parse_note(
             onset_units: 0.0,
             duration_name,
             dots: duration_marks,
+            is_grace,
+            grace_slash,
+            glyph_scale,
             beams,
             voice_id,
             input_staff,
@@ -4297,6 +4629,61 @@ fn parse_pitch(elements: &[Element], pitch: usize, transposition: i32) -> Result
     })
 }
 
+fn parse_unpitched(
+    elements: &[Element],
+    unpitched: usize,
+    warnings: &mut Vec<String>,
+) -> Result<Tone, String> {
+    let element = &elements[unpitched];
+    require_no_attributes(element)?;
+    require_container_text(element)?;
+    let mut display_step = None;
+    let mut display_octave = None;
+    for child in &element.children {
+        let child_element = &elements[*child];
+        let target = match child_element.name.as_str() {
+            "display-step" => &mut display_step,
+            "display-octave" => &mut display_octave,
+            _ => {
+                return Err(element_diagnostic(
+                    child_element,
+                    "unpitched notes support only display-step and display-octave".to_owned(),
+                ));
+            }
+        };
+        if target.replace(*child).is_some() {
+            return Err(element_diagnostic(
+                child_element,
+                format!("duplicate <{}>", child_element.name),
+            ));
+        }
+        require_no_attributes(child_element)?;
+    }
+    if let Some(display_step) = display_step {
+        warnings.push(element_diagnostic(
+            &elements[display_step],
+            "unpitched display-step is ignored; the X mark is centered on the staff".to_owned(),
+        ));
+    }
+    let octave = display_octave
+        .map(|display_octave| {
+            let value = leaf_text(&elements[display_octave])?
+                .parse::<u8>()
+                .ok()
+                .filter(|value| *value <= 9)
+                .ok_or_else(|| {
+                    element_diagnostic(
+                        &elements[display_octave],
+                        "display-octave must be an integer from 0 through 9".to_owned(),
+                    )
+                })?;
+            Ok::<_, String>(value)
+        })
+        .transpose()?
+        .unwrap_or(5);
+    Ok(Tone { octave, value: 0 })
+}
+
 fn transpose_semitones(elements: &[Element], transpose: usize) -> Result<i32, String> {
     validate_attributes(&elements[transpose], &["number"])?;
     require_container_text(&elements[transpose])?;
@@ -4509,6 +4896,13 @@ fn collect_duration_errors(elements: &[Element]) -> Vec<String> {
                 .filter(|value| *value > 0);
         }
         if element.name != "note" {
+            continue;
+        }
+        if element
+            .children
+            .iter()
+            .any(|child| matches!(elements[*child].name.as_str(), "grace" | "cue"))
+        {
             continue;
         }
         let Some(divisions) = active_divisions else {
@@ -4736,11 +5130,13 @@ enum PathClass {
     DurationMark,
     ChordBracket,
     Tonehead,
+    UnpitchedMark,
     ChordSymbolRoot,
     ChordSymbolBass,
     ChordSymbolTone,
     TupletNumber,
     TupletBracket,
+    GraceSlash,
     TextGlyph,
     DirectionSymbol,
     SegnoMark,
@@ -5252,11 +5648,13 @@ impl Scene {
                 PathClass::DurationMark => "duration-mark",
                 PathClass::ChordBracket => "chord-bracket",
                 PathClass::Tonehead => "tonehead",
+                PathClass::UnpitchedMark => "unpitched-mark",
                 PathClass::ChordSymbolRoot => "chord-symbol-root",
                 PathClass::ChordSymbolBass => "chord-symbol-bass",
                 PathClass::ChordSymbolTone => "chord-symbol-tone",
                 PathClass::TupletNumber => "tuplet-number",
                 PathClass::TupletBracket => "tuplet-bracket",
+                PathClass::GraceSlash => "grace-slash",
                 PathClass::TextGlyph => "text-glyph",
                 PathClass::DirectionSymbol => "direction-symbol",
                 PathClass::SegnoMark => "segno-mark",
@@ -6273,7 +6671,7 @@ fn render_part_svg(
         }
         let event_origin_x = x;
         let mut measure_end_x = x;
-        let mut placed_event_geometries: Vec<(f64, EventGeometry)> = Vec::new();
+        let mut placed_event_geometries: Vec<(f64, bool, EventGeometry)> = Vec::new();
         let mut event_stem_positions = vec![None; measure.events.len()];
         for (measure_event_index, event) in measure.events.iter().enumerate() {
             let preferred_stems_up = group_stem_directions[measure_index][measure_event_index]
@@ -6297,8 +6695,11 @@ fn render_part_svg(
                 &pending_ties_for_event,
                 stems_up,
             );
-            for (previous_onset, previous_geometry) in &placed_event_geometries {
-                if *previous_onset < event.onset_units {
+            for (previous_onset, previous_is_grace, previous_geometry) in &placed_event_geometries {
+                if *previous_onset < event.onset_units
+                    || (*previous_onset == event.onset_units
+                        && (*previous_is_grace || event.is_grace))
+                {
                     let adjusted_x = next_event_x(x, previous_geometry, &geometry);
                     if adjusted_x != x {
                         x = adjusted_x;
@@ -6313,7 +6714,7 @@ fn render_part_svg(
                 }
             }
             event_positions.push(x);
-            placed_event_geometries.push((event.onset_units, geometry.clone()));
+            placed_event_geometries.push((event.onset_units, event.is_grace, geometry.clone()));
             measure_end_x = measure_end_x.max(x + (event.duration_units * 2.5).ceil() as i32);
             notation_bounds.extend(geometry.all().copied());
             while measure
@@ -6373,13 +6774,18 @@ fn render_part_svg(
                 let glyph = bravura_glyphs::rest(event.duration_name);
                 let rest_y = rest_origin_y(event.duration_name, glyph.bounds);
                 let rest_y_base = rest_y.floor() as i32;
+                let scale = event.glyph_scale;
+                let glyph_center_x = (glyph.bounds.0 + glyph.bounds.2) / 2.0;
+                let glyph_center_y = (glyph.bounds.1 + glyph.bounds.3) / 2.0;
                 scene.add_path(
                     DrawLayer::Event,
                     format!("rest-{index}"),
                     Some(PathClass::Rest),
                     vec![PathMetadata::Duration(event.duration_name)],
                     PathGeometry::new(Some((x, rest_y_base)), glyph.path, PathStyle::BravuraGlyph)
-                        .offset_y(rest_y - f64::from(rest_y_base)),
+                        .offset_x(glyph_center_x * (1.0 - scale))
+                        .offset_y(rest_y - f64::from(rest_y_base) + glyph_center_y * (1.0 - scale))
+                        .scaled(scale),
                 );
                 for mark in 0..event.dots {
                     let (mark_x, mark_y) = rest_duration_mark_position(mark, x, rest_y_base);
@@ -6416,7 +6822,13 @@ fn render_part_svg(
             let rightmost_tone_x = *tone_xs.iter().max().expect("event has tones");
             let stem_tone_index = stem_tone_index(event, stems_up);
             let stem_octave_y = lane_y(event.tones[stem_tone_index].tone.octave);
-            let (stem_start, stem_end) = stem_endpoints(stem_octave_y, stems_up);
+            let (full_stem_start, full_stem_end) = stem_endpoints(stem_octave_y, stems_up);
+            let center_y = f64::from(stem_octave_y + 9);
+            let stem_start = (center_y
+                + (f64::from(full_stem_start) - center_y) * event.glyph_scale)
+                .round() as i32;
+            let stem_end = (center_y + (f64::from(full_stem_end) - center_y) * event.glyph_scale)
+                .round() as i32;
             let beam_direction = if stems_up { 1 } else { -1 };
             let stem_id = if index == 0 {
                 "stem".to_owned()
@@ -6455,7 +6867,35 @@ fn render_part_svg(
                             flag_path,
                             PathStyle::BravuraGlyph,
                         )
-                        .offset_x(-0.75),
+                        .offset_x(-0.75)
+                        .scaled(event.glyph_scale),
+                    );
+                }
+                if event.is_grace && event.grace_slash {
+                    let slash_y = if stems_up { stem_end + 9 } else { stem_end - 9 };
+                    let slash_path = if stems_up {
+                        format!(
+                            "M{} {}L{} {}",
+                            stem_x - 2,
+                            slash_y + 3,
+                            stem_x + 7,
+                            slash_y - 3
+                        )
+                    } else {
+                        format!(
+                            "M{} {}L{} {}",
+                            stem_x - 2,
+                            slash_y - 3,
+                            stem_x + 7,
+                            slash_y + 3
+                        )
+                    };
+                    scene.add_path(
+                        DrawLayer::Event,
+                        format!("grace-slash-{index}"),
+                        Some(PathClass::GraceSlash),
+                        Vec::new(),
+                        PathGeometry::new(None, slash_path, PathStyle::MediumStroke),
                     );
                 }
             }
@@ -6681,7 +7121,11 @@ fn render_part_svg(
                 scene.add_path(
                     DrawLayer::Event,
                     tonehead_id,
-                    Some(PathClass::Tonehead),
+                    Some(if tone_event.is_unpitched {
+                        PathClass::UnpitchedMark
+                    } else {
+                        PathClass::Tonehead
+                    }),
                     vec![
                         PathMetadata::Event(index),
                         PathMetadata::ToneIndex(tone_index),
@@ -6691,9 +7135,20 @@ fn render_part_svg(
                     ],
                     PathGeometry::new(
                         Some((tone_x, octave_y)),
-                        glyph_path(tone.value),
-                        PathStyle::FilledGlyph,
+                        if tone_event.is_unpitched {
+                            "M2 2L10 16M10 2L2 16".to_owned()
+                        } else {
+                            glyph_path(tone.value).to_owned()
+                        },
+                        if tone_event.is_unpitched {
+                            PathStyle::MediumStroke
+                        } else {
+                            PathStyle::FilledGlyph
+                        },
                     )
+                    .offset_x(6.0 * (1.0 - event.glyph_scale))
+                    .offset_y(9.0 * (1.0 - event.glyph_scale))
+                    .scaled(event.glyph_scale)
                     .rotated_180_if(tone.value == 10),
                 );
                 let tie_y = octave_y + 18;
