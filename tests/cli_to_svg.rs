@@ -193,6 +193,169 @@ fn renders_words_and_rehearsal_as_ordered_svg_paths() {
 }
 
 #[test]
+fn renders_multiple_parts_as_aligned_named_staves() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("aligned-parts.musicxml");
+    let source = include_str!("../examples/aligned-parts/aligned-parts.musicxml");
+    let first_part_start = source.find("  <part id=\"P1\">").expect("first Part");
+    let second_part_start = source.find("  <part id=\"P2\">").expect("second Part");
+    let first_part_end = first_part_start
+        + source[first_part_start..]
+            .find("  </part>")
+            .expect("first Part end")
+        + "  </part>".len();
+    let second_part_end = second_part_start
+        + source[second_part_start..]
+            .find("  </part>")
+            .expect("second Part end")
+        + "  </part>".len();
+    let reversed_parts = format!(
+        "{}{}\n{}{}",
+        &source[..first_part_start],
+        &source[second_part_start..second_part_end],
+        &source[first_part_start..first_part_end],
+        &source[second_part_end..]
+    );
+    fs::write(&input, reversed_parts).expect("write aligned-parts score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "multiple Parts failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("aligned-parts.svg")).expect("read SVG");
+    assert!(
+        !svg.contains("<text"),
+        "score text must use glyph paths: {svg}"
+    );
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 26, "{svg}");
+    assert_eq!(svg.matches("-barline-").count(), 4, "{svg}");
+    assert!(
+        svg.contains("id=\"part-name-0-glyph-0\""),
+        "first Part name missing: {svg}"
+    );
+    assert!(
+        svg.contains("id=\"part-name-1-glyph-0\""),
+        "second Part name missing: {svg}"
+    );
+    assert!(
+        svg.find("id=\"part-name-0-glyph-0\"") < svg.find("id=\"part-name-1-glyph-0\""),
+        "Part names should follow part-list order: {svg}"
+    );
+    for part_name_id in ["part-name-0-glyph-0", "part-name-1-glyph-0"] {
+        let glyph = svg
+            .lines()
+            .find(|line| line.contains(&format!("id=\"{part_name_id}\"")))
+            .expect("Part-name glyph path");
+        assert!(
+            glyph.contains(" d=\"M"),
+            "Part-name path must have glyph data: {glyph}"
+        );
+    }
+    let first_part_tone = svg
+        .lines()
+        .find(|line| line.contains("id=\"part-0-tonehead\""))
+        .expect("first Part tonehead");
+    let second_part_tone = svg
+        .lines()
+        .find(|line| line.contains("id=\"part-1-tonehead\""))
+        .expect("second Part tonehead");
+    assert!(
+        first_part_tone.contains("data-octave=\"5\""),
+        "{first_part_tone}"
+    );
+    assert!(
+        second_part_tone.contains("data-octave=\"3\""),
+        "{second_part_tone}"
+    );
+    let barline_xs = svg
+        .lines()
+        .filter(|line| line.contains("-barline-"))
+        .map(|line| {
+            line.split(" d=\"M")
+                .nth(1)
+                .and_then(|path| path.split_whitespace().next())
+                .expect("barline path has an x coordinate")
+                .parse::<f64>()
+                .expect("barline x coordinate is numeric")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        &barline_xs[..2],
+        &barline_xs[2..],
+        "ordinal barlines must align"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_invalid_part_identity_and_measure_counts() {
+    let valid = include_str!("../examples/aligned-parts/aligned-parts.musicxml");
+    let coda_start = valid
+        .find("    <measure number=\"coda\">")
+        .expect("coda measure");
+    let coda_end = coda_start
+        + valid[coda_start..]
+            .find("    </measure>")
+            .expect("coda end")
+        + "    </measure>\n".len();
+    let missing_coda = format!("{}{}", &valid[..coda_start], &valid[coda_end..]);
+    let second_part_start = valid.find("  <part id=\"P2\">").expect("second Part");
+    let second_part_end = second_part_start
+        + valid[second_part_start..]
+            .find("  </part>")
+            .expect("second Part end")
+        + "  </part>\n".len();
+    let missing_part = format!(
+        "{}{}",
+        &valid[..second_part_start],
+        &valid[second_part_end..]
+    );
+    let cases = [
+        (
+            valid.replace("<score-part id=\"P2\"", "<score-part id=\"P1\""),
+            "duplicate score-part id",
+        ),
+        (
+            valid.replace("<part id=\"P2\">", "<part id=\"P1\">"),
+            "duplicate Part id",
+        ),
+        (
+            valid.replace("<part id=\"P2\">", "<part id=\"P3\">"),
+            "has no matching score-part",
+        ),
+        (missing_part, "has no matching Part"),
+        (missing_coda, "measures; expected 2 to align"),
+    ];
+    for (index, (source, expected_error)) in cases.into_iter().enumerate() {
+        let directory = scratch_dir();
+        fs::create_dir_all(&directory).expect("create test directory");
+        let input = directory.join(format!("invalid-{index}.musicxml"));
+        fs::write(&input, source).expect("write invalid score");
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(
+            !output.status.success(),
+            "invalid Part structure was accepted"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected_error),
+            "expected {expected_error:?}, got: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+}
+
+#[test]
 fn moves_text_away_from_nearby_extreme_register_notation() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");

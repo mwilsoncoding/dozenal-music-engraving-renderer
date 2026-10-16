@@ -21,7 +21,9 @@ self-contained SVG. Without `--output`, the input extension is replaced with
 `.svg` beside the input.
 
 This SVG-only MVP accepts uncompressed, no-namespace MusicXML 4.0
-`score-partwise` scores with one part and one voice. Supported content includes
+`score-partwise` scores with one or more Parts, each represented by one Dozenal
+Staff and one voice. Part order and names follow the score's part-list, and
+measures align by ordinal position across Parts. Supported content includes
 concert pitches in octaves 0 through 9, the implemented duration and dotted
 forms, rests, ties, explicit beams, representable meters, and in-staff chords.
 Unsupported score content is rejected with contextual diagnostics.

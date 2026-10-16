@@ -57,6 +57,24 @@ struct Measure {
     meter: Option<Meter>,
 }
 
+struct Part {
+    name: String,
+    measures: Vec<Measure>,
+}
+
+struct SvgViewBox {
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+}
+
+struct RenderedPart {
+    svg: String,
+    view_box: SvgViewBox,
+    barline_positions: Vec<i32>,
+}
+
 struct PositionedText {
     event_index: usize,
     offset_x: f64,
@@ -135,7 +153,7 @@ struct Meter {
 }
 
 struct Score {
-    measures: Vec<Measure>,
+    parts: Vec<Part>,
     warnings: Vec<String>,
 }
 
@@ -228,217 +246,316 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
     require_attribute(&elements[root], "version", "4.0")?;
     require_container_text(&elements[root])?;
 
-    let [part_list, part] = exact_children(&elements, root, &["part-list", "part"])?;
-    require_no_attributes(&elements[part_list])?;
-    require_container_text(&elements[part_list])?;
-    let [score_part] = exact_children(&elements, part_list, &["score-part"])?;
-    let part_id = required_attribute(&elements[score_part], "id")?.to_owned();
-    require_container_text(&elements[score_part])?;
-    let [part_name] = exact_children(&elements, score_part, &["part-name"])?;
-    leaf_text(&elements[part_name])?;
-
-    if required_attribute(&elements[part], "id")? != part_id {
+    let root_children = &elements[root].children;
+    if root_children.len() < 2 || elements[root_children[0]].name != "part-list" {
         return Err(element_diagnostic(
-            &elements[part],
-            "unsupported shape: part id does not match score-part id".to_owned(),
+            &elements[root],
+            "unsupported shape: <score-partwise> must begin with <part-list> and contain Parts"
+                .to_owned(),
         ));
     }
-    require_container_text(&elements[part])?;
-    let mut divisions = None;
-    let mut transposition = 0;
-    let mut active_meter = None;
-    let mut pending_ties = Vec::new();
-    let mut active_beams = [false; 5];
-    let mut measures = Vec::new();
-    let mut warnings = Vec::new();
-    for measure_id in &elements[part].children {
-        let measure_element = &elements[*measure_id];
-        if measure_element.name != "measure" {
+    let part_list = root_children[0];
+    require_no_attributes(&elements[part_list])?;
+    require_container_text(&elements[part_list])?;
+    let mut score_parts = Vec::new();
+    for score_part in &elements[part_list].children {
+        let score_part_element = &elements[*score_part];
+        if score_part_element.name != "score-part" {
             return Err(element_diagnostic(
-                measure_element,
-                "unsupported shape: <part> may contain only <measure> elements".to_owned(),
+                score_part_element,
+                "unsupported shape: <part-list> may contain only <score-part>".to_owned(),
             ));
         }
-        required_attribute(measure_element, "number")?;
-        require_container_text(measure_element)?;
-        let mut events: Vec<Event> = Vec::new();
-        let mut harmonies = Vec::new();
-        let mut texts = Vec::new();
-        let mut event_sources = Vec::new();
-        let mut chord_target = None;
-        for child in &measure_element.children {
-            let element = &elements[*child];
-            match element.name.as_str() {
-                "attributes" => {
-                    require_no_attributes(element)?;
-                    require_container_text(element)?;
-                    let mut saw_divisions = false;
-                    let mut saw_transpose = false;
-                    let mut saw_time = false;
-                    for attribute in &element.children {
-                        let attribute_element = &elements[*attribute];
-                        match attribute_element.name.as_str() {
-                            "divisions" if !saw_divisions => {
-                                let value = leaf_text(attribute_element)?
-                                    .parse::<u32>()
-                                    .ok()
-                                    .filter(|value| *value > 0)
-                                    .ok_or_else(|| {
-                                        element_diagnostic(
-                                            attribute_element,
-                                            "<divisions> must be a positive integer".to_owned(),
-                                        )
-                                    })?;
-                                divisions = Some(value);
-                                saw_divisions = true;
-                            }
-                            "transpose" if !saw_transpose => {
-                                transposition = transpose_semitones(&elements, *attribute)?;
-                                saw_transpose = true;
-                            }
-                            "time" if !saw_time => {
-                                active_meter = Some(parse_time(&elements, *attribute)?);
-                                saw_time = true;
-                            }
-                            _ => {
-                                return Err(element_diagnostic(
-                                    attribute_element,
-                                    "unsupported score attribute".to_owned(),
-                                ));
+        let id = required_attribute(score_part_element, "id")?.to_owned();
+        if score_parts
+            .iter()
+            .any(|(existing_id, _): &(String, String)| existing_id == &id)
+        {
+            return Err(element_diagnostic(
+                score_part_element,
+                format!("duplicate score-part id {id:?}"),
+            ));
+        }
+        require_container_text(score_part_element)?;
+        let [part_name] = exact_children(&elements, *score_part, &["part-name"])?;
+        let name = leaf_text(&elements[part_name])?.to_owned();
+        if let Some(character) = name
+            .chars()
+            .find(|character| !noto_sans_glyphs::supports(*character))
+        {
+            return Err(element_diagnostic(
+                &elements[part_name],
+                format!("Part name contains unsupported character {character:?}"),
+            ));
+        }
+        score_parts.push((id, name));
+    }
+    if score_parts.is_empty() {
+        return Err(element_diagnostic(
+            &elements[part_list],
+            "unsupported score: <part-list> must contain at least one <score-part>".to_owned(),
+        ));
+    }
+    let mut part_elements = Vec::new();
+    for part in &root_children[1..] {
+        let part_element = &elements[*part];
+        if part_element.name != "part" {
+            return Err(element_diagnostic(
+                part_element,
+                format!("unsupported score-partwise child <{}>", part_element.name),
+            ));
+        }
+        let id = required_attribute(part_element, "id")?;
+        if part_elements
+            .iter()
+            .any(|(existing_id, _): &(&str, usize)| existing_id == &id)
+        {
+            return Err(element_diagnostic(
+                part_element,
+                format!("duplicate Part id {id:?}"),
+            ));
+        }
+        if !score_parts.iter().any(|(score_id, _)| score_id == id) {
+            return Err(element_diagnostic(
+                part_element,
+                format!("Part id {id:?} has no matching score-part"),
+            ));
+        }
+        part_elements.push((id, *part));
+    }
+    if part_elements.len() != score_parts.len() {
+        let (missing_id, _) = score_parts
+            .iter()
+            .find(|(score_id, _)| !part_elements.iter().any(|(part_id, _)| part_id == score_id))
+            .expect("different counts imply an unmatched score-part");
+        return Err(element_diagnostic(
+            &elements[part_list],
+            format!("score-part id {missing_id:?} has no matching Part"),
+        ));
+    }
+    let mut parts = Vec::new();
+    let mut expected_measure_count = None;
+    let mut warnings = Vec::new();
+    for (score_part_id, name) in &score_parts {
+        let (_, part) = part_elements
+            .iter()
+            .find(|(part_id, _)| part_id == score_part_id)
+            .expect("Part IDs were checked against score-part IDs");
+        let part = *part;
+        if required_attribute(&elements[part], "id")? != score_part_id {
+            unreachable!("Part was selected by matching ID");
+        }
+        require_container_text(&elements[part])?;
+        let mut divisions = None;
+        let mut transposition = 0;
+        let mut active_meter = None;
+        let mut pending_ties = Vec::new();
+        let mut active_beams = [false; 5];
+        let mut measures = Vec::new();
+        for measure_id in &elements[part].children {
+            let measure_element = &elements[*measure_id];
+            if measure_element.name != "measure" {
+                return Err(element_diagnostic(
+                    measure_element,
+                    "unsupported shape: <part> may contain only <measure> elements".to_owned(),
+                ));
+            }
+            required_attribute(measure_element, "number")?;
+            require_container_text(measure_element)?;
+            let mut events: Vec<Event> = Vec::new();
+            let mut harmonies = Vec::new();
+            let mut texts = Vec::new();
+            let mut event_sources = Vec::new();
+            let mut chord_target = None;
+            for child in &measure_element.children {
+                let element = &elements[*child];
+                match element.name.as_str() {
+                    "attributes" => {
+                        require_no_attributes(element)?;
+                        require_container_text(element)?;
+                        let mut saw_divisions = false;
+                        let mut saw_transpose = false;
+                        let mut saw_time = false;
+                        for attribute in &element.children {
+                            let attribute_element = &elements[*attribute];
+                            match attribute_element.name.as_str() {
+                                "divisions" if !saw_divisions => {
+                                    let value = leaf_text(attribute_element)?
+                                        .parse::<u32>()
+                                        .ok()
+                                        .filter(|value| *value > 0)
+                                        .ok_or_else(|| {
+                                            element_diagnostic(
+                                                attribute_element,
+                                                "<divisions> must be a positive integer".to_owned(),
+                                            )
+                                        })?;
+                                    divisions = Some(value);
+                                    saw_divisions = true;
+                                }
+                                "transpose" if !saw_transpose => {
+                                    transposition = transpose_semitones(&elements, *attribute)?;
+                                    saw_transpose = true;
+                                }
+                                "time" if !saw_time => {
+                                    active_meter = Some(parse_time(&elements, *attribute)?);
+                                    saw_time = true;
+                                }
+                                _ => {
+                                    return Err(element_diagnostic(
+                                        attribute_element,
+                                        "unsupported score attribute".to_owned(),
+                                    ));
+                                }
                             }
                         }
+                        if element.children.is_empty() {
+                            return Err(element_diagnostic(
+                                element,
+                                "unsupported shape: <attributes> may not be empty".to_owned(),
+                            ));
+                        }
                     }
-                    if element.children.is_empty() {
+                    "note" => {
+                        let divisions = divisions.ok_or_else(|| {
+                            element_diagnostic(
+                                element,
+                                "a positive <divisions> value is required before note events"
+                                    .to_owned(),
+                            )
+                        })?;
+                        let parsed =
+                            parse_note(&elements, *child, divisions, transposition, &mut warnings)?;
+                        if let Some(chord_marker) = parsed.chord_marker {
+                            let Some(target) = chord_target else {
+                                return Err(element_diagnostic(
+                                    &elements[chord_marker],
+                                    "<chord/> marker requires a preceding pitched event".to_owned(),
+                                ));
+                            };
+                            let event: &mut Event = &mut events[target];
+                            if event.duration_units != parsed.event.duration_units
+                                || event.duration_name != parsed.event.duration_name
+                                || event.dots != parsed.event.dots
+                            {
+                                return Err(element_diagnostic(
+                                    &elements[chord_marker],
+                                    "chord tone duration must match the preceding event".to_owned(),
+                                ));
+                            }
+                            if !same_beams(&event.beams, &parsed.event.beams) {
+                                return Err(element_diagnostic(
+                                    &elements[chord_marker],
+                                    "chord tone beam declarations must match the preceding event"
+                                        .to_owned(),
+                                ));
+                            }
+                            let mut chord_tones = parsed.event.tones;
+                            let tone = chord_tones.pop().ok_or_else(|| {
+                                element_diagnostic(
+                                    &elements[chord_marker],
+                                    "rest chords are unsupported".to_owned(),
+                                )
+                            })?;
+                            if event
+                                .tones
+                                .iter()
+                                .any(|existing| existing.tone == tone.tone)
+                            {
+                                return Err(element_diagnostic(
+                                    &elements[chord_marker],
+                                    "chord contains a duplicate concert pitch".to_owned(),
+                                ));
+                            }
+                            event.tones.push(tone);
+                        } else {
+                            events.push(parsed.event);
+                            event_sources.push(*child);
+                            chord_target = events
+                                .last()
+                                .filter(|event| !event.tones.is_empty())
+                                .map(|_| events.len() - 1);
+                        }
+                    }
+                    "harmony" => {
+                        if let Some((symbol, offset_x)) =
+                            parse_chord_symbol(&elements, *child, &mut warnings, divisions)?
+                        {
+                            harmonies.push(PositionedHarmony {
+                                event_index: events.len(),
+                                offset_x,
+                                symbol,
+                            });
+                        }
+                    }
+                    "direction" => texts.extend(parse_direction(
+                        &elements,
+                        *child,
+                        events.len(),
+                        divisions,
+                        &mut warnings,
+                    )?),
+                    _ => {
                         return Err(element_diagnostic(
                             element,
-                            "unsupported shape: <attributes> may not be empty".to_owned(),
+                            format!("unsupported measure element <{}>", element.name),
                         ));
                     }
                 }
-                "note" => {
-                    let divisions = divisions.ok_or_else(|| {
-                        element_diagnostic(
-                            element,
-                            "a positive <divisions> value is required before note events"
-                                .to_owned(),
-                        )
-                    })?;
-                    let parsed =
-                        parse_note(&elements, *child, divisions, transposition, &mut warnings)?;
-                    if let Some(chord_marker) = parsed.chord_marker {
-                        let Some(target) = chord_target else {
-                            return Err(element_diagnostic(
-                                &elements[chord_marker],
-                                "<chord/> marker requires a preceding pitched event".to_owned(),
-                            ));
-                        };
-                        let event: &mut Event = &mut events[target];
-                        if event.duration_units != parsed.event.duration_units
-                            || event.duration_name != parsed.event.duration_name
-                            || event.dots != parsed.event.dots
-                        {
-                            return Err(element_diagnostic(
-                                &elements[chord_marker],
-                                "chord tone duration must match the preceding event".to_owned(),
-                            ));
-                        }
-                        if !same_beams(&event.beams, &parsed.event.beams) {
-                            return Err(element_diagnostic(
-                                &elements[chord_marker],
-                                "chord tone beam declarations must match the preceding event"
-                                    .to_owned(),
-                            ));
-                        }
-                        let mut chord_tones = parsed.event.tones;
-                        let tone = chord_tones.pop().ok_or_else(|| {
-                            element_diagnostic(
-                                &elements[chord_marker],
-                                "rest chords are unsupported".to_owned(),
-                            )
-                        })?;
-                        if event
-                            .tones
-                            .iter()
-                            .any(|existing| existing.tone == tone.tone)
-                        {
-                            return Err(element_diagnostic(
-                                &elements[chord_marker],
-                                "chord contains a duplicate concert pitch".to_owned(),
-                            ));
-                        }
-                        event.tones.push(tone);
-                    } else {
-                        events.push(parsed.event);
-                        event_sources.push(*child);
-                        chord_target = events
-                            .last()
-                            .filter(|event| !event.tones.is_empty())
-                            .map(|_| events.len() - 1);
-                    }
-                }
-                "harmony" => {
-                    if let Some((symbol, offset_x)) =
-                        parse_chord_symbol(&elements, *child, &mut warnings, divisions)?
-                    {
-                        harmonies.push(PositionedHarmony {
-                            event_index: events.len(),
-                            offset_x,
-                            symbol,
-                        });
-                    }
-                }
-                "direction" => texts.extend(parse_direction(
-                    &elements,
-                    *child,
-                    events.len(),
-                    divisions,
-                    &mut warnings,
-                )?),
-                _ => {
-                    return Err(element_diagnostic(
-                        element,
-                        format!("unsupported measure element <{}>", element.name),
-                    ));
-                }
             }
+            if events.is_empty() {
+                return Err(element_diagnostic(
+                    measure_element,
+                    "unsupported score: a measure must contain at least one event".to_owned(),
+                ));
+            }
+            for (event, source) in events.iter().zip(event_sources) {
+                validate_beam_group(&elements[source], event, &mut active_beams)?;
+                validate_event_ties(&elements[source], event, &mut pending_ties)?;
+            }
+            measures.push(Measure {
+                events,
+                harmonies,
+                texts,
+                meter: active_meter,
+            });
         }
-        if events.is_empty() {
+        if measures.is_empty() {
             return Err(element_diagnostic(
-                measure_element,
-                "unsupported score: a measure must contain at least one event".to_owned(),
+                &elements[part],
+                "unsupported score: <part> must contain at least one measure".to_owned(),
             ));
         }
-        for (event, source) in events.iter().zip(event_sources) {
-            validate_beam_group(&elements[source], event, &mut active_beams)?;
-            validate_event_ties(&elements[source], event, &mut pending_ties)?;
+        if !pending_ties.is_empty() {
+            return Err(element_diagnostic(
+                &elements[part],
+                "tie start has no matching tie stop".to_owned(),
+            ));
         }
-        measures.push(Measure {
-            events,
-            harmonies,
-            texts,
-            meter: active_meter,
+        if active_beams.iter().skip(1).any(|active| *active) {
+            return Err(element_diagnostic(
+                &elements[part],
+                "beam group is missing an end marker".to_owned(),
+            ));
+        }
+
+        if let Some(expected) = expected_measure_count {
+            if measures.len() != expected {
+                return Err(element_diagnostic(
+                    &elements[part],
+                    format!("Part {score_part_id:?} has {} measures; expected {expected} to align with the other Parts", measures.len()),
+                ));
+            }
+        } else {
+            expected_measure_count = Some(measures.len());
+        }
+        parts.push(Part {
+            name: name.clone(),
+            measures,
         });
     }
-    if measures.is_empty() {
-        return Err(element_diagnostic(
-            &elements[part],
-            "unsupported score: <part> must contain at least one measure".to_owned(),
-        ));
-    }
-    if !pending_ties.is_empty() {
-        return Err(element_diagnostic(
-            &elements[part],
-            "tie start has no matching tie stop".to_owned(),
-        ));
-    }
-    if active_beams.iter().skip(1).any(|active| *active) {
-        return Err(element_diagnostic(
-            &elements[part],
-            "beam group is missing an end marker".to_owned(),
-        ));
-    }
 
-    Ok(Score { measures, warnings })
+    Ok(Score { parts, warnings })
 }
 
 fn parse_direction(
@@ -3781,8 +3898,120 @@ fn text_enclosure_path(shape: &str, left: f64, top: f64, right: f64, bottom: f64
 }
 
 fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
+    if score.parts.len() == 1 {
+        return render_part_svg(&score.parts[0], warnings, None).svg;
+    }
+    let provisional = score
+        .parts
+        .iter()
+        .map(|part| {
+            let mut provisional_warnings = Vec::new();
+            render_part_svg(part, &mut provisional_warnings, None)
+        })
+        .collect::<Vec<_>>();
+    let provisional_barline_positions = provisional
+        .iter()
+        .map(|part| &part.barline_positions)
+        .collect::<Vec<_>>();
+    let mut measure_barline_positions = vec![0; score.parts[0].measures.len()];
+    for measure_index in 0..measure_barline_positions.len() {
+        measure_barline_positions[measure_index] = provisional_barline_positions
+            .iter()
+            .map(|positions| {
+                let prior_alignment_offset = if measure_index == 0 {
+                    0
+                } else {
+                    measure_barline_positions[measure_index - 1] - positions[measure_index - 1]
+                };
+                positions[measure_index] + prior_alignment_offset
+            })
+            .max()
+            .expect("a score contains at least one Part");
+    }
+    let rendered = score
+        .parts
+        .iter()
+        .map(|part| render_part_svg(part, warnings, Some(&measure_barline_positions)))
+        .collect::<Vec<_>>();
+    let left = rendered
+        .iter()
+        .map(|part| part.view_box.left)
+        .min()
+        .unwrap_or(0);
+    let notation_right = rendered
+        .iter()
+        .map(|part| part.view_box.left + part.view_box.width)
+        .max()
+        .unwrap_or(128);
+    let part_name_right = score
+        .parts
+        .iter()
+        .map(|part| {
+            12.0 + part
+                .name
+                .chars()
+                .map(|character| {
+                    noto_sans_glyphs::glyph(character)
+                        .expect("Part name was checked against the bundled glyph repertoire")
+                        .advance
+                        * 12.0
+                        / noto_sans_glyphs::UNITS_PER_EM
+                })
+                .sum::<f64>()
+        })
+        .fold(0.0_f64, f64::max)
+        .ceil() as i32;
+    let right = notation_right.max(part_name_right);
+    let width = right - left;
+    let row_heights = rendered
+        .iter()
+        .map(|part| part.view_box.height + 40)
+        .collect::<Vec<_>>();
+    let height = row_heights.iter().sum::<i32>();
+    let mut svg = String::new();
+    writeln!(svg, "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{left} 0 {width} {height}\" role=\"img\">")
+        .expect("writing to a String cannot fail");
+    writeln!(svg, "<rect id=\"background\" x=\"{left}\" y=\"0\" width=\"{width}\" height=\"{height}\" fill=\"#fff\"/>")
+        .expect("writing to a String cannot fail");
+    let mut row_top = 0;
+    for (part_index, (part, rendered_part)) in score.parts.iter().zip(rendered).enumerate() {
+        let offset_y = row_top + 28 - rendered_part.view_box.top;
+        let scale = 12.0 / noto_sans_glyphs::UNITS_PER_EM;
+        let mut name_x = 12.0;
+        for (glyph_index, character) in part.name.chars().enumerate() {
+            let glyph = noto_sans_glyphs::glyph(character)
+                .expect("Part name was checked against the bundled glyph repertoire");
+            if !glyph.path.is_empty() {
+                writeln!(svg, "<path id=\"part-name-{part_index}-glyph-{glyph_index}\" transform=\"translate({name_x:.2} {}) scale({scale:.4})\" d=\"{}\" fill=\"#171717\" fill-rule=\"evenodd\"/>", row_top + 18, glyph.path)
+                    .expect("writing to a String cannot fail");
+            }
+            name_x += glyph.advance * scale;
+        }
+        writeln!(svg, "<g transform=\"translate(0 {offset_y})\">")
+            .expect("writing to a String cannot fail");
+        for line in rendered_part
+            .svg
+            .lines()
+            .skip(2)
+            .take_while(|line| *line != "</svg>")
+        {
+            svg.push_str(&line.replace("id=\"", &format!("id=\"part-{part_index}-")));
+            svg.push('\n');
+        }
+        svg.push_str("</g>\n");
+        row_top += row_heights[part_index];
+    }
+    svg.push_str("</svg>\n");
+    svg
+}
+
+fn render_part_svg(
+    part: &Part,
+    warnings: &mut Vec<String>,
+    measure_barline_positions: Option<&[i32]>,
+) -> RenderedPart {
     let mut scene = Scene::new(0, 0, 0);
-    let group_stem_directions = beamed_group_stem_directions(score);
+    let group_stem_directions = beamed_group_stem_directions(part);
     let mut x = 92;
     let mut left = 0;
     let mut right = 128;
@@ -3794,12 +4023,13 @@ fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
     let mut pending_tie_paths: Vec<(Tone, i32, i32)> = Vec::new();
     let mut active_beams = [None; 5];
     let mut final_barline_x = 0;
+    let mut barline_positions = Vec::new();
     let mut chord_symbol_index = 0;
     let mut text_item_index = 0;
     let mut occupied_text = Vec::new();
     let mut pending_texts = Vec::new();
     let mut notation_bounds = Vec::new();
-    for (measure_index, measure) in score.measures.iter().enumerate() {
+    for (measure_index, measure) in part.measures.iter().enumerate() {
         let measure_start_x = f64::from(x);
         let mut previous_event_geometry = None;
         let mut harmony_index = 0;
@@ -4295,6 +4525,11 @@ fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
                 }
             }
         }
+        if let Some(shared_position) =
+            measure_barline_positions.and_then(|positions| positions.get(measure_index))
+        {
+            barline_x = barline_x.max(*shared_position);
+        }
         notation_bounds.push(ComponentBounds::stroked(
             f64::from(barline_x),
             27.5,
@@ -4314,6 +4549,7 @@ fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
             ),
         );
         final_barline_x = barline_x;
+        barline_positions.push(barline_x);
         right = right.max(barline_x + 12);
         x = barline_x + 4;
     }
@@ -4351,6 +4587,12 @@ fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
     scene.view_top = view_top;
     scene.view_width = view_width;
     scene.view_height = view_bottom - view_top;
+    let view_box = SvgViewBox {
+        left,
+        top: view_top,
+        width: view_width,
+        height: view_bottom - view_top,
+    };
     for (id, path_data) in [
         ("staff-line-1", format!("M12 28H{final_barline_x}")),
         ("staff-line-2", format!("M12 68H{final_barline_x}")),
@@ -4378,7 +4620,11 @@ fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
         Vec::new(),
         PathGeometry::new(Some((26, 69)), glyph_path(4), PathStyle::FilledGlyph),
     );
-    scene.to_svg()
+    RenderedPart {
+        svg: scene.to_svg(),
+        view_box,
+        barline_positions,
+    }
 }
 
 fn unbeamed_flag_levels(event: &Event) -> Vec<u8> {
@@ -4414,15 +4660,15 @@ fn stem_direction_is_up<'a>(tones: impl Iterator<Item = &'a ToneEvent>) -> bool 
     top + bottom >= 2 * 68
 }
 
-fn beamed_group_stem_directions(score: &Score) -> Vec<Vec<Option<bool>>> {
-    let mut directions = score
+fn beamed_group_stem_directions(part: &Part) -> Vec<Vec<Option<bool>>> {
+    let mut directions = part
         .measures
         .iter()
         .map(|measure| vec![None; measure.events.len()])
         .collect::<Vec<_>>();
     let mut group_events = Vec::new();
 
-    for (measure_index, measure) in score.measures.iter().enumerate() {
+    for (measure_index, measure) in part.measures.iter().enumerate() {
         for (event_index, event) in measure.events.iter().enumerate() {
             let Some(primary_beam) = event.beams.iter().find(|beam| beam.level == 1) else {
                 continue;
@@ -4443,7 +4689,7 @@ fn beamed_group_stem_directions(score: &Score) -> Vec<Vec<Option<bool>>> {
                         group_events.push(position);
                         let stems_up = stem_direction_is_up(group_events.iter().flat_map(
                             |(measure_index, event_index)| {
-                                score.measures[*measure_index].events[*event_index]
+                                part.measures[*measure_index].events[*event_index]
                                     .tones
                                     .iter()
                             },
@@ -4675,8 +4921,8 @@ mod tests {
             ),
         ] {
             let score = parse_score(source).expect("fixture should parse");
-            assert_eq!(score.measures.len(), 9, "{name} measure count");
-            for (index, measure) in score.measures.iter().enumerate() {
+            assert_eq!(score.parts[0].measures.len(), 9, "{name} measure count");
+            for (index, measure) in score.parts[0].measures.iter().enumerate() {
                 assert!(
                     measure.meter
                         == Some(Meter {
