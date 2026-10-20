@@ -5130,6 +5130,54 @@ fn renders_beat_repeats_using_meter_denominator_units() {
 }
 
 #[test]
+fn renders_self_closing_beat_repeat_markers_at_attribute_positions() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("positioned-beat-repeat.musicxml");
+    let note = |step: &str| {
+        format!(
+            "<note><pitch><step>{step}</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>quarter</type></note>"
+        )
+    };
+    let fixture = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<score-partwise version=\"4.0\">\n\
+  <part-list><score-part id=\"P1\"><part-name>Positioned repeat</part-name></score-part></part-list>\n\
+  <part id=\"P1\">\n\
+    <measure number=\"1\" implicit=\"yes\"><attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>{}\
+</measure>\n\
+    <measure number=\"2\">{}<attributes><measure-style><beat-repeat type=\"start\"/></measure-style></attributes>{}\
+<attributes><measure-style><beat-repeat type=\"stop\"/></measure-style></attributes>{}{}\
+</measure>\n\
+  </part>\n\
+</score-partwise>\n",
+        note("C"),
+        note("D"),
+        note("E"),
+        note("F"),
+        note("G"),
+    );
+    fs::write(&input, fixture).expect("write positioned beat-repeat score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "self-closing positioned beat-repeat markers should render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let svg = fs::read_to_string(directory.join("positioned-beat-repeat.svg"))
+        .expect("read positioned beat-repeat SVG");
+    assert_eq!(svg.matches("class=\"beat-repeat\"").count(), 1, "{svg}");
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 4, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn finds_beat_repeat_source_across_denominator_change() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");

@@ -163,8 +163,7 @@ struct Measure {
     multiple_rest: Option<MultipleRest>,
     measure_repeat_marker: Option<MeasureRepeatMarker>,
     measure_repeat_display: Option<MeasureRepeatDisplay>,
-    beat_repeat_marker: Option<BeatRepeatMarker>,
-    beat_repeat_display: Option<BeatRepeatDisplay>,
+    beat_repeat_segments: Vec<BeatRepeatSegment>,
     input_staff_states: Vec<InputStaffState>,
     barlines: Vec<MeasureBarline>,
 }
@@ -210,6 +209,20 @@ struct BeatRepeatDisplay {
     slashes: u32,
     use_dots: bool,
     slash_type: String,
+}
+
+#[derive(Clone)]
+struct BeatRepeatSegment {
+    start_units: f64,
+    end_units: f64,
+    beat_offset: f64,
+    display: BeatRepeatDisplay,
+}
+
+struct PositionedBeatRepeatMarker {
+    offset_units: f64,
+    beat_type: Option<u8>,
+    marker: BeatRepeatMarker,
 }
 
 #[derive(Clone, Default)]
@@ -614,8 +627,7 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
                         multiple_rest: measure.multiple_rest.clone(),
                         measure_repeat_marker: measure.measure_repeat_marker.clone(),
                         measure_repeat_display,
-                        beat_repeat_marker: measure.beat_repeat_marker.clone(),
-                        beat_repeat_display: measure.beat_repeat_display.clone(),
+                        beat_repeat_segments: measure.beat_repeat_segments.clone(),
                         input_staff_states: vec![InputStaffState {
                             key_signature: staff_state.key_signature,
                             clef: staff_state.clef,
@@ -869,7 +881,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
         let mut measures = Vec::new();
         let mut multiple_rest_remaining: u32 = 0;
         let mut active_measure_repeat: Option<(usize, usize, usize, Option<u32>)> = None;
-        let mut active_beat_repeat: Option<(usize, BeatRepeatDisplay)> = None;
+        let mut active_beat_repeat: Option<(BeatRepeatDisplay, f64)> = None;
         let part_measure_count = elements[part].children.len();
         for (measure_index, measure_id) in elements[part].children.iter().enumerate() {
             let inside_multiple_rest = multiple_rest_remaining > 0;
@@ -907,9 +919,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                     slashes,
                     input_staff,
                 });
-            let mut beat_repeat_display = active_beat_repeat
-                .as_ref()
-                .map(|(_, display)| display.clone());
+            let mut beat_repeat_segments = Vec::new();
             let mut events: Vec<Event> = Vec::new();
             let mut tuplets = Vec::new();
             let mut harmonies = Vec::new();
@@ -917,8 +927,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
             let mut barlines = Vec::new();
             let mut multiple_rest = None;
             let mut measure_repeat_marker = None;
-            let mut beat_repeat_marker = None;
-            let mut measure_style_seen = false;
+            let mut beat_repeat_markers = Vec::new();
             let mut event_sources = Vec::new();
             let mut cursor_units = 0.0;
             let mut maximum_cursor_units: f64 = 0.0;
@@ -979,14 +988,6 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                     saw_staves = true;
                                 }
                                 "measure-style" => {
-                                    if measure_style_seen {
-                                        return Err(element_diagnostic(
-                                            attribute_element,
-                                            "multiple <measure-style> declarations are unsupported"
-                                                .to_owned(),
-                                        ));
-                                    }
-                                    measure_style_seen = true;
                                     let style_child =
                                         attribute_element.children.first().copied().ok_or_else(
                                             || {
@@ -999,10 +1000,24 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                         )?;
                                     match elements[style_child].name.as_str() {
                                         "multiple-rest" => {
+                                            if multiple_rest.is_some() {
+                                                return Err(element_diagnostic(
+                                                    &elements[style_child],
+                                                    "measure contains multiple multiple-rest declarations"
+                                                        .to_owned(),
+                                                ));
+                                            }
                                             multiple_rest =
                                                 Some(parse_multiple_rest(&elements, *attribute)?);
                                         }
                                         "measure-repeat" => {
+                                            if measure_repeat_marker.is_some() {
+                                                return Err(element_diagnostic(
+                                                    &elements[style_child],
+                                                    "measure contains multiple measure-repeat declarations"
+                                                        .to_owned(),
+                                                ));
+                                            }
                                             measure_repeat_marker = Some(parse_measure_repeat(
                                                 &elements,
                                                 *attribute,
@@ -1010,8 +1025,14 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                             )?);
                                         }
                                         "beat-repeat" => {
-                                            beat_repeat_marker =
-                                                Some(parse_beat_repeat(&elements, *attribute)?);
+                                            beat_repeat_markers.push(PositionedBeatRepeatMarker {
+                                                offset_units: cursor_units,
+                                                beat_type: active_staff_states
+                                                    .first()
+                                                    .and_then(|state| state.meter)
+                                                    .map(|meter| meter.beat_type),
+                                                marker: parse_beat_repeat(&elements, *attribute)?,
+                                            });
                                         }
                                         _ => {
                                             return Err(element_diagnostic(
@@ -1483,86 +1504,123 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                     "Input Staff content conflicts with measure-repeat notation".to_owned(),
                 ));
             }
-            match beat_repeat_marker.as_ref() {
-                Some(BeatRepeatMarker::Start {
-                    pattern_beats,
-                    slashes,
-                    use_dots,
-                    slash_type,
-                }) => {
-                    if active_beat_repeat.is_some() {
-                        return Err(element_diagnostic(
-                            measure_element,
-                            "beat-repeat start overlaps an active repeat span".to_owned(),
-                        ));
-                    }
-                    active_staff_states
-                        .first()
-                        .and_then(|state| state.meter)
-                        .ok_or_else(|| {
+            let mut active_segment_start = active_beat_repeat
+                .as_ref()
+                .map(|(_, displayed_beats)| (0.0, *displayed_beats));
+            for positioned in beat_repeat_markers {
+                match &positioned.marker {
+                    BeatRepeatMarker::Start {
+                        pattern_beats,
+                        slashes,
+                        use_dots,
+                        slash_type,
+                    } => {
+                        if active_beat_repeat.is_some() {
+                            return Err(element_diagnostic(
+                                measure_element,
+                                "beat-repeat start overlaps an active repeat span".to_owned(),
+                            ));
+                        }
+                        let beat_type = positioned.beat_type.ok_or_else(|| {
                             element_diagnostic(
                                 measure_element,
                                 "beat-repeat requires an active time signature".to_owned(),
                             )
                         })?;
-                    let available_beats = measures
-                        .iter()
-                        .map(measure_beat_extent)
-                        .collect::<Option<Vec<_>>>()
-                        .ok_or_else(|| {
+                        let available_beats = measures
+                            .iter()
+                            .map(measure_beat_extent)
+                            .collect::<Option<Vec<_>>>()
+                            .ok_or_else(|| {
+                                element_diagnostic(
+                                    measure_element,
+                                    "beat-repeat source requires a time signature in each source measure"
+                                        .to_owned(),
+                                )
+                            })?
+                            .into_iter()
+                            .sum::<f64>()
+                            + positioned.offset_units * f64::from(beat_type) / 64.0;
+                        if available_beats + f64::EPSILON < f64::from(*pattern_beats) {
+                            return Err(element_diagnostic(
+                                measure_element,
+                                "beat-repeat source pattern does not exist before the start"
+                                    .to_owned(),
+                            ));
+                        }
+                        let display = BeatRepeatDisplay {
+                            pattern_beats: *pattern_beats,
+                            slashes: *slashes,
+                            use_dots: *use_dots,
+                            slash_type: slash_type.clone(),
+                        };
+                        active_beat_repeat = Some((display, 0.0));
+                        active_segment_start = Some((positioned.offset_units, 0.0));
+                    }
+                    BeatRepeatMarker::Stop => {
+                        let Some((display, displayed_beats)) = active_beat_repeat.take() else {
+                            return Err(element_diagnostic(
+                                measure_element,
+                                "beat-repeat stop has no active start".to_owned(),
+                            ));
+                        };
+                        let Some((start_units, _)) = active_segment_start.take() else {
+                            return Err(element_diagnostic(
+                                measure_element,
+                                "beat-repeat stop has no active start".to_owned(),
+                            ));
+                        };
+                        let beat_type = positioned.beat_type.ok_or_else(|| {
                             element_diagnostic(
                                 measure_element,
-                                "beat-repeat source requires a time signature in each source measure"
-                                    .to_owned(),
+                                "beat-repeat region requires an active time signature".to_owned(),
                             )
-                        })?
-                        .into_iter()
-                        .sum::<f64>();
-                    if available_beats + f64::EPSILON < f64::from(*pattern_beats) {
-                        return Err(element_diagnostic(
-                            measure_element,
-                            "beat-repeat source pattern does not exist before the start".to_owned(),
-                        ));
-                    }
-                    let display = BeatRepeatDisplay {
-                        pattern_beats: *pattern_beats,
-                        slashes: *slashes,
-                        use_dots: *use_dots,
-                        slash_type: slash_type.clone(),
-                    };
-                    beat_repeat_display = Some(display.clone());
-                    active_beat_repeat = Some((measure_index, display));
-                }
-                Some(BeatRepeatMarker::Stop) => {
-                    beat_repeat_display = None;
-                    let Some((start, display)) = active_beat_repeat.take() else {
-                        return Err(element_diagnostic(
-                            measure_element,
-                            "beat-repeat stop has no active start".to_owned(),
-                        ));
-                    };
-                    let displayed_beats = measures[start..]
-                        .iter()
-                        .map(measure_beat_extent)
-                        .collect::<Option<Vec<_>>>()
-                        .ok_or_else(|| {
-                            element_diagnostic(
+                        })?;
+                        let segment_beats =
+                            (positioned.offset_units - start_units) * f64::from(beat_type) / 64.0;
+                        let total_beats = displayed_beats + segment_beats;
+                        beat_repeat_segments.push(BeatRepeatSegment {
+                            start_units,
+                            end_units: positioned.offset_units,
+                            beat_offset: displayed_beats,
+                            display: display.clone(),
+                        });
+                        if !is_complete_beat_repeat_cycles(total_beats, display.pattern_beats) {
+                            return Err(element_diagnostic(
                                 measure_element,
-                                "beat-repeat region requires a time signature in each measure"
+                                "beat-repeat region must contain complete source-pattern cycles"
                                     .to_owned(),
-                            )
-                        })?
-                        .into_iter()
-                        .sum::<f64>();
-                    if !is_complete_beat_repeat_cycles(displayed_beats, display.pattern_beats) {
-                        return Err(element_diagnostic(
-                            measure_element,
-                            "beat-repeat region must contain complete source-pattern cycles"
-                                .to_owned(),
-                        ));
+                            ));
+                        }
                     }
                 }
-                None => {}
+            }
+            if let Some((display, displayed_beats)) = active_beat_repeat.as_mut() {
+                let Some((start_units, beat_offset)) = active_segment_start else {
+                    return Err(element_diagnostic(
+                        measure_element,
+                        "beat-repeat start has no display position".to_owned(),
+                    ));
+                };
+                let beat_type = active_staff_states
+                    .first()
+                    .and_then(|state| state.meter)
+                    .map(|meter| meter.beat_type)
+                    .ok_or_else(|| {
+                        element_diagnostic(
+                            measure_element,
+                            "beat-repeat region requires an active time signature".to_owned(),
+                        )
+                    })?;
+                let segment_beats =
+                    (maximum_cursor_units - start_units) * f64::from(beat_type) / 64.0;
+                beat_repeat_segments.push(BeatRepeatSegment {
+                    start_units,
+                    end_units: maximum_cursor_units,
+                    beat_offset,
+                    display: display.clone(),
+                });
+                *displayed_beats += segment_beats;
             }
             if let Some(multiple_rest) = &multiple_rest {
                 if multiple_rest.count as usize > part_measure_count - measure_index {
@@ -1622,8 +1680,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                 multiple_rest,
                 measure_repeat_marker,
                 measure_repeat_display,
-                beat_repeat_marker,
-                beat_repeat_display,
+                beat_repeat_segments,
                 input_staff_states: active_staff_states.clone(),
                 barlines,
             });
@@ -1643,19 +1700,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                 ));
             }
         }
-        if let Some((start, display)) = active_beat_repeat {
-            let displayed_beats = measures[start..]
-                .iter()
-                .map(measure_beat_extent)
-                .collect::<Option<Vec<_>>>()
-                .ok_or_else(|| {
-                    element_diagnostic(
-                        &elements[part],
-                        "beat-repeat region requires a time signature in each measure".to_owned(),
-                    )
-                })?
-                .into_iter()
-                .sum::<f64>();
+        if let Some((display, displayed_beats)) = active_beat_repeat {
             if !is_complete_beat_repeat_cycles(displayed_beats, display.pattern_beats) {
                 return Err(element_diagnostic(
                     &elements[part],
@@ -3575,18 +3620,21 @@ fn parse_beat_repeat(
     }
     match marker_type {
         "start" => {
-            let pattern_beats = repeat
-                .text
-                .trim()
-                .parse::<u32>()
-                .ok()
-                .filter(|beats| *beats > 0)
-                .ok_or_else(|| {
-                    element_diagnostic(
-                        repeat,
-                        "beat-repeat start requires a positive beat count".to_owned(),
-                    )
-                })?;
+            let pattern_text = repeat.text.trim();
+            let pattern_beats = if pattern_text.is_empty() {
+                1
+            } else {
+                pattern_text
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|beats| *beats > 0)
+                    .ok_or_else(|| {
+                        element_diagnostic(
+                            repeat,
+                            "beat-repeat start requires a positive beat count".to_owned(),
+                        )
+                    })?
+            };
             Ok(BeatRepeatMarker::Start {
                 pattern_beats,
                 slashes,
@@ -7500,7 +7548,10 @@ fn render_part_svg(
                             .input_staff
                             .is_none_or(|staff| event.input_staff == staff)
                     });
-            let hidden_by_beat_repeat = measure.beat_repeat_display.is_some();
+            let hidden_by_beat_repeat = measure.beat_repeat_segments.iter().any(|segment| {
+                event.onset_units + f64::EPSILON >= segment.start_units
+                    && event.onset_units < segment.end_units - f64::EPSILON
+            });
             if event.is_spacer || hidden_by_measure_repeat || hidden_by_beat_repeat {
                 index += 1;
                 continue;
@@ -8044,41 +8095,34 @@ fn render_part_svg(
             ));
             right = right.max((first_x + width).ceil() as i32);
         }
-        if let Some(repeat) = &measure.beat_repeat_display {
+        for (segment_index, segment) in measure.beat_repeat_segments.iter().enumerate() {
             let meter = measure
                 .meter
                 .expect("beat-repeat measures were validated to have a meter");
-            let measure_beats = measure_beat_extent(measure)
-                .expect("beat-repeat measures were validated to have a meter");
-            let region_start = (0..measure_index)
-                .rev()
-                .take_while(|index| part.measures[*index].beat_repeat_display.is_some())
-                .last()
-                .unwrap_or(measure_index);
-            let preceding_beats = part.measures[region_start..measure_index]
-                .iter()
-                .map(|measure| {
-                    measure_beat_extent(measure).expect("beat-repeat region meters were validated")
-                })
-                .sum::<f64>();
-            let total_beats = preceding_beats + measure_beats;
+            let repeat = &segment.display;
+            let beat_type = f64::from(meter.beat_type);
+            let segment_start_beats = segment.beat_offset;
+            let segment_end_beats =
+                segment_start_beats + (segment.end_units - segment.start_units) * beat_type / 64.0;
             let pattern = f64::from(repeat.pattern_beats);
-            let first_cycle = (preceding_beats / pattern).floor() as usize;
-            let last_cycle = (total_beats / pattern).ceil() as usize;
+            let first_cycle = (segment_start_beats / pattern).floor() as usize;
+            let last_cycle = (segment_end_beats / pattern).ceil() as usize;
             let beat_units = 64.0 / f64::from(meter.beat_type);
             for cycle in first_cycle..last_cycle {
                 let cycle_center = (cycle as f64 + 0.5) * pattern;
-                if cycle_center < preceding_beats || cycle_center >= total_beats {
+                if cycle_center < segment_start_beats || cycle_center >= segment_end_beats {
                     continue;
                 }
-                let local_units = (cycle_center - preceding_beats) * beat_units;
+                let local_units =
+                    segment.start_units + (cycle_center - segment_start_beats) * beat_units;
                 let center_x = f64::from(event_origin_x) + local_units * 2.5;
                 let group_width = f64::from(repeat.slashes.saturating_sub(1) * 6 + 8);
                 let first_x = center_x - group_width / 2.0;
                 for slash in 0..repeat.slashes {
                     let slash_x = first_x + f64::from(slash) * 6.0;
-                    let id =
-                        format!("beat-repeat-measure{measure_index}-cycle{cycle}-slash{slash}");
+                    let id = format!(
+                        "beat-repeat-measure{measure_index}-segment{segment_index}-cycle{cycle}-slash{slash}"
+                    );
                     scene.add_path(
                         DrawLayer::Event,
                         id,
@@ -8100,7 +8144,7 @@ fn render_part_svg(
                     for beam in 0..beam_count {
                         scene.add_path(
                             DrawLayer::Event,
-                            format!("beat-repeat-detail-{measure_index}-{cycle}-{slash}-{beam}"),
+                                format!("beat-repeat-detail-{measure_index}-{segment_index}-{cycle}-{slash}-{beam}"),
                             None,
                             Vec::new(),
                             PathGeometry::new(
@@ -8113,7 +8157,9 @@ fn render_part_svg(
                     if repeat.use_dots {
                         scene.add_path(
                             DrawLayer::Event,
-                            format!("beat-repeat-dot-{measure_index}-{cycle}-{slash}"),
+                            format!(
+                                "beat-repeat-dot-{measure_index}-{segment_index}-{cycle}-{slash}"
+                            ),
                             None,
                             Vec::new(),
                             PathGeometry::new(
