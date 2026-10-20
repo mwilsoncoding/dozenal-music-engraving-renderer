@@ -4813,6 +4813,503 @@ fn positions_rests_relative_to_the_center_staff_line() {
 }
 
 #[test]
+fn renders_measure_repeat_slashes_between_start_and_stop() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("measure-repeat.musicxml");
+    let repeated_note = "<note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>";
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "  </part>",
+        &format!(
+            "    <measure number=\"2\"><attributes><measure-style><measure-repeat type=\"start\" slashes=\"2\">1</measure-repeat></measure-style></attributes>{repeated_note}</measure>\n    <measure number=\"3\"><attributes><measure-style><measure-repeat type=\"stop\"/></measure-style></attributes>{repeated_note}</measure>\n  </part>"
+        ),
+    );
+    fs::write(&input, fixture).expect("write measure-repeat score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "measure repeat should render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("measure-repeat.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"measure-repeat\"").count(), 2, "{svg}");
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 2, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn measure_repeat_does_not_hide_events_in_other_parts() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("measure-repeat-parts.musicxml");
+    let fixture = r#"<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+    <part-list>
+        <score-part id="P1"><part-name>Repeat</part-name></score-part>
+        <score-part id="P2"><part-name>Unaffected</part-name></score-part>
+    </part-list>
+    <part id="P1">
+        <measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure>
+        <measure number="2"><attributes><measure-style><measure-repeat type="start">1</measure-repeat></measure-style></attributes><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure>
+        <measure number="3"><attributes><measure-style><measure-repeat type="stop"/></measure-style></attributes><note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure>
+    </part>
+    <part id="P2">
+        <measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure>
+        <measure number="2"><note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure>
+        <measure number="3"><note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure>
+    </part>
+</score-partwise>
+"#;
+    fs::write(&input, fixture).expect("write multi-Part repeat score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "multi-Part repeat should render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("measure-repeat-parts.svg"))
+        .expect("read multi-Part SVG");
+    assert_eq!(svg.matches("class=\"measure-repeat\"").count(), 1, "{svg}");
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 5, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_incomplete_measure_repeat_cycles() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("incomplete-measure-repeat.musicxml");
+    let note = "<note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>";
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "  </part>",
+        &format!(
+            "    <measure number=\"2\">{note}</measure>\n    <measure number=\"3\"><attributes><measure-style><measure-repeat type=\"start\">2</measure-repeat></measure-style></attributes>{note}</measure>\n    <measure number=\"4\"><attributes><measure-style><measure-repeat type=\"stop\"/></measure-style></attributes>{note}</measure>\n  </part>"
+        ),
+    );
+    fs::write(&input, fixture).expect("write incomplete measure-repeat score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        !output.status.success(),
+        "incomplete repeat cycle must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("complete source-pattern cycles"),
+        "{stderr}"
+    );
+    assert!(!directory.join("incomplete-measure-repeat.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_measure_repeat_without_preceding_source() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("measure-repeat-without-source.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<attributes><divisions>1</divisions></attributes>",
+        "<attributes><divisions>1</divisions><measure-style><measure-repeat type=\"start\">1</measure-repeat></measure-style></attributes>",
+    );
+    fs::write(&input, fixture).expect("write measure-repeat without source");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success(), "missing source must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("source pattern does not exist"), "{stderr}");
+    assert!(!directory.join("measure-repeat-without-source.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn measure_repeat_start_can_continue_to_part_end() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("measure-repeat-to-end.musicxml");
+    let note = "<note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>";
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "  </part>",
+        &format!(
+            "    <measure number=\"2\"><attributes><measure-style><measure-repeat type=\"start\">1</measure-repeat></measure-style></attributes>{note}</measure>\n  </part>"
+        ),
+    );
+    fs::write(&input, fixture).expect("write open-ended measure-repeat score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "open-ended repeat should render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("measure-repeat-to-end.svg"))
+        .expect("read open-ended repeat SVG");
+    assert_eq!(svg.matches("class=\"measure-repeat\"").count(), 1, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn routes_measure_repeat_to_its_input_staff_in_separate_mode() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("staff-scoped-measure-repeat.musicxml");
+    let source_note = |step: &str, staff: u32| {
+        format!(
+            "<note><pitch><step>{step}</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><staff>{staff}</staff></note>"
+        )
+    };
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<divisions>1</divisions>", "<divisions>1</divisions><staves>2</staves>")
+        .replace(
+            "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>",
+            &format!("{}{}", source_note("C", 1), source_note("E", 2)),
+        )
+        .replace(
+            "  </part>",
+            &format!(
+                "    <measure number=\"2\"><attributes><measure-style number=\"2\"><measure-repeat type=\"start\">1</measure-repeat></measure-style></attributes>{}{}</measure>\n    <measure number=\"3\"><attributes><measure-style number=\"2\"><measure-repeat type=\"stop\"/></measure-style></attributes>{}{}</measure>\n  </part>",
+                source_note("D", 1), source_note("F", 2), source_note("G", 1), source_note("A", 2)
+            ),
+        );
+    fs::write(&input, fixture).expect("write staff-scoped measure-repeat score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--input-staff-mode")
+        .arg("separate")
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "staff-scoped measure repeat should render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let staff_one = fs::read_to_string(directory.join("staff-scoped-measure-repeat-staff-1.svg"))
+        .expect("read Staff 1 SVG");
+    let staff_two = fs::read_to_string(directory.join("staff-scoped-measure-repeat-staff-2.svg"))
+        .expect("read Staff 2 SVG");
+    assert!(
+        !staff_one.contains("class=\"measure-repeat\""),
+        "{staff_one}"
+    );
+    assert!(
+        staff_two.contains("class=\"measure-repeat\""),
+        "{staff_two}"
+    );
+
+    let combined_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run combined-staff CLI");
+    assert!(
+        !combined_output.status.success(),
+        "conflicting Input Staff content must fail in combined mode"
+    );
+    let stderr = String::from_utf8_lossy(&combined_output.stderr);
+    assert!(
+        stderr.contains("conflicts with measure-repeat notation"),
+        "{stderr}"
+    );
+    assert!(!directory.join("staff-scoped-measure-repeat.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn input_staff_target_ends_before_measure_repeat_stop_measure() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("measure-repeat-stop-staff.musicxml");
+    let fixture = r#"<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Repeat scope</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1"><attributes><divisions>1</divisions><staves>2</staves></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><staff>2</staff></note></measure>
+    <measure number="2"><attributes><measure-style number="2"><measure-repeat type="start">1</measure-repeat></measure-style></attributes><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><staff>2</staff></note></measure>
+    <measure number="3"><attributes><measure-style number="2"><measure-repeat type="stop"/></measure-style></attributes><note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><staff>1</staff></note></measure>
+  </part>
+</score-partwise>
+"#;
+    fs::write(&input, fixture).expect("write stop-measure Input Staff score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "stop measure is outside repeat scope: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("measure-repeat-stop-staff.svg"))
+        .expect("read stop-measure scope SVG");
+    assert_eq!(svg.matches("class=\"measure-repeat\"").count(), 1);
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 2);
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_beat_repeats_using_meter_denominator_units() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("beat-repeat.musicxml");
+    let note = |step: &str, duration: u32, note_type: &str| {
+        format!(
+            "<note><pitch><step>{step}</step><octave>4</octave></pitch><duration>{duration}</duration><voice>1</voice><type>{note_type}</type></note>"
+        )
+    };
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace(
+            "<measure number=\"1\">",
+            "<measure number=\"1\" implicit=\"yes\">",
+        )
+        .replace(
+            "<attributes><divisions>1</divisions></attributes>",
+            "<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>",
+        )
+        .replace("<divisions>1</divisions>", "<divisions>2</divisions>")
+        .replace(
+            "<duration>1</duration><voice>1</voice><type>quarter</type>",
+            "<duration>2</duration><voice>1</voice><type>quarter</type>",
+        )
+        .replace(
+            "  </part>",
+            &format!(
+                "    <measure number=\"2\"><attributes><time><beats>4</beats><beat-type>4</beat-type></time><measure-style><beat-repeat type=\"start\" slashes=\"2\" use-dots=\"yes\" slash-type=\"16th\">1</beat-repeat></measure-style></attributes>{}{}{}{}</measure>\n    <measure number=\"3\"><attributes><time><beats>6</beats><beat-type>8</beat-type></time></attributes>{}{}{}{}{}{}</measure>\n    <measure number=\"4\"><attributes><measure-style><beat-repeat type=\"stop\"/></measure-style></attributes>{}{}{}{}{}{}</measure>\n  </part>",
+                note("C", 2, "quarter"), note("D", 2, "quarter"),
+                note("E", 2, "quarter"), note("F", 2, "quarter"),
+                note("G", 1, "eighth"), note("A", 1, "eighth"),
+                note("B", 1, "eighth"), note("C", 1, "eighth"),
+                note("D", 1, "eighth"), note("E", 1, "eighth"),
+                note("F", 1, "eighth"), note("G", 1, "eighth"),
+                note("A", 1, "eighth"), note("B", 1, "eighth"),
+                note("C", 1, "eighth"), note("D", 1, "eighth")
+            ),
+        );
+    fs::write(&input, fixture).expect("write beat-repeat score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "beat repeat should render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let svg = fs::read_to_string(directory.join("beat-repeat.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"beat-repeat\"").count(), 20, "{svg}");
+    assert_eq!(svg.matches("id=\"beat-repeat-dot-").count(), 20, "{svg}");
+    assert_eq!(svg.matches("id=\"beat-repeat-detail-").count(), 40, "{svg}");
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 7, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn finds_beat_repeat_source_across_denominator_change() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("beat-repeat-source-denominator-change.musicxml");
+    let note = |step: &str, duration: u32, note_type: &str| {
+        format!(
+            "<note><pitch><step>{step}</step><octave>4</octave></pitch><duration>{duration}</duration><voice>1</voice><type>{note_type}</type></note>"
+        )
+    };
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace(
+            "<attributes><divisions>1</divisions></attributes>",
+            "<attributes><divisions>2</divisions><time><beats>8</beats><beat-type>8</beat-type></time></attributes>",
+        )
+        .replace(
+            "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>",
+            &[
+                note("C", 1, "eighth"),
+                note("D", 1, "eighth"),
+                note("E", 1, "eighth"),
+                note("F", 1, "eighth"),
+                note("G", 1, "eighth"),
+                note("A", 1, "eighth"),
+                note("B", 1, "eighth"),
+                note("C", 1, "eighth"),
+            ]
+            .join(""),
+        )
+        .replace(
+            "  </part>",
+            &format!(
+                "    <measure number=\"2\"><attributes><time><beats>4</beats><beat-type>4</beat-type></time><measure-style><beat-repeat type=\"start\">6</beat-repeat></measure-style></attributes>{}{}{}{}</measure>\n    <measure number=\"3\"><attributes><time><beats>2</beats><beat-type>4</beat-type></time></attributes>{}{}</measure>\n    <measure number=\"4\"><attributes><measure-style><beat-repeat type=\"stop\"/></measure-style></attributes>{}{}</measure>\n  </part>",
+                note("D", 2, "quarter"),
+                note("E", 2, "quarter"),
+                note("F", 2, "quarter"),
+                note("G", 2, "quarter"),
+                note("A", 2, "quarter"),
+                note("B", 2, "quarter"),
+                note("C", 2, "quarter"),
+                note("D", 2, "quarter")
+            ),
+        );
+    fs::write(&input, fixture).expect("write denominator-change source score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "valid prior source should render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let svg = fs::read_to_string(directory.join("beat-repeat-source-denominator-change.svg"))
+        .expect("read denominator-change source SVG");
+    assert_eq!(svg.matches("class=\"beat-repeat\"").count(), 1, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_beat_repeat_without_preceding_source() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("beat-repeat-without-source.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace(
+            "<attributes><divisions>1</divisions></attributes>",
+            "<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time><measure-style><beat-repeat type=\"start\">1</beat-repeat></measure-style></attributes>",
+        )
+        .replace(
+            "  </part>",
+            "    <measure number=\"2\"><attributes><measure-style><beat-repeat type=\"stop\"/></measure-style></attributes></measure>\n  </part>",
+        );
+    fs::write(&input, fixture).expect("write beat-repeat without source");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success(), "missing source must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("beat-repeat source pattern does not exist"),
+        "{stderr}"
+    );
+    assert!(!directory.join("beat-repeat-without-source.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_partial_beat_repeat_cycle() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("partial-beat-repeat.musicxml");
+    let note = "<note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>";
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace(
+            "<attributes><divisions>1</divisions></attributes>",
+            "<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>",
+        )
+        .replace(
+            "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>",
+            &format!("{note}{note}"),
+        )
+        .replace(
+            "  </part>",
+            &format!(
+                "    <measure number=\"2\"><attributes><measure-style><beat-repeat type=\"start\">2</beat-repeat></measure-style></attributes>{note}{note}{note}</measure>\n    <measure number=\"3\"><attributes><measure-style><beat-repeat type=\"stop\"/></measure-style></attributes>{note}</measure>\n  </part>"
+            ),
+        );
+    fs::write(&input, fixture).expect("write partial beat-repeat score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success(), "partial cycle must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("complete source-pattern cycles"),
+        "{stderr}"
+    );
+    assert!(!directory.join("partial-beat-repeat.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_beat_repeat_stop_without_start() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("beat-repeat-without-start.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "  </part>",
+        "    <measure number=\"2\"><attributes><measure-style><beat-repeat type=\"stop\"/></measure-style></attributes><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure>\n  </part>",
+    );
+    fs::write(&input, fixture).expect("write beat-repeat without start");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        !output.status.success(),
+        "unmatched beat-repeat stop must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("stop has no active start"), "{stderr}");
+    assert!(!directory.join("beat-repeat-without-start.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_measure_repeat_stop_without_start() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("measure-repeat-without-start.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "  </part>",
+        "    <measure number=\"2\"><attributes><measure-style><measure-repeat type=\"stop\"/></measure-style></attributes><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure>\n  </part>",
+    );
+    fs::write(&input, fixture).expect("write measure-repeat without start");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success(), "unmatched stop must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("stop has no active start"), "{stderr}");
+    assert!(!directory.join("measure-repeat-without-start.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn renders_simple_numeric_meter_and_rests() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
