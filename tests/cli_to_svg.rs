@@ -4531,6 +4531,35 @@ fn separates_same_octave_chord_tones_and_clears_the_preceding_event() {
 }
 
 #[test]
+fn rejects_music_in_the_first_measure_of_a_multiple_rest_span() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("multiple-rest-with-music.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<attributes><divisions>1</divisions></attributes>",
+        "<attributes><divisions>1</divisions><measure-style><multiple-rest>1</multiple-rest></measure-style></attributes>",
+    );
+    fs::write(&input, fixture).expect("write conflicting multiple-rest score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        !output.status.success(),
+        "music inside a multi-measure Rest must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("music is not allowed inside a multiple-rest span"),
+        "{stderr}"
+    );
+    assert!(!directory.join("multiple-rest-with-music.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn substitutes_matching_meter_symbol_for_multiple_rest() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");

@@ -1004,7 +1004,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                         }
                     }
                     "note" => {
-                        if inside_multiple_rest {
+                        if inside_multiple_rest || multiple_rest.is_some() {
                             return Err(element_diagnostic(
                                 element,
                                 "music is not allowed inside a multiple-rest span".to_owned(),
@@ -1211,7 +1211,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                         }
                     }
                     "backup" | "forward" => {
-                        if inside_multiple_rest {
+                        if inside_multiple_rest || multiple_rest.is_some() {
                             return Err(element_diagnostic(
                                 element,
                                 "cursor movement is not allowed inside a multiple-rest span"
