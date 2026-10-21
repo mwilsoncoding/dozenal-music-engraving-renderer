@@ -147,6 +147,21 @@ fn renders_articulation_ornament_fermata_example() {
             .unwrap_or_else(|| panic!("missing {id} path in {svg}"));
         assert!(path.contains("fill=\"none\""), "{path}");
     }
+    let staccato_line = svg
+        .lines()
+        .find(|line| line.contains("id=\"articulation-0-0\""))
+        .expect("first note staccato path");
+    let tonehead_line = svg
+        .lines()
+        .find(|line| line.contains("id=\"tonehead\""))
+        .expect("first note Tonehead path");
+    let (staccato_x, _) = path_translation(staccato_line);
+    let (tonehead_x, _) = path_translation(tonehead_line);
+    assert_eq!(
+        staccato_x + 3,
+        tonehead_x + 6,
+        "{staccato_line}\n{tonehead_line}"
+    );
     let fermata_dot = svg
         .lines()
         .find(|line| line.contains("id=\"fermata-11-0-dot\""))

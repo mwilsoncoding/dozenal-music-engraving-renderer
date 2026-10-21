@@ -7073,6 +7073,12 @@ fn articulation_layouts(event: &Event, x: i32, stems_up: bool) -> Vec<Articulati
                 }
             };
             *stack += 1;
+            let glyph_center_x =
+                if event.articulations[mark_index].kind == ArticulationKind::Staccato {
+                    3.0
+                } else {
+                    5.0
+                };
             ArticulationLayout {
                 mark_index,
                 placement,
@@ -7081,7 +7087,7 @@ fn articulation_layouts(event: &Event, x: i32, stems_up: bool) -> Vec<Articulati
                         MarkPlacement::Above => top_tone_index,
                         MarkPlacement::Below => bottom_tone_index,
                     }] + 6,
-                ) - 5.0 * event.glyph_scale,
+                ) - glyph_center_x * event.glyph_scale,
                 top,
             }
         })
