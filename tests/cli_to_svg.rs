@@ -29,6 +29,328 @@ fn path_translation(line: &str) -> (i32, i32) {
 }
 
 #[test]
+fn renders_supported_articulation_marks() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("articulation.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace(
+            "</type>",
+            "</type><notations><articulations><staccato/></articulations></notations>",
+        )
+        .replace(
+            "</measure>",
+            "<note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><notations><articulations><staccato placement=\"below\"/></articulations></notations></note></measure>",
+        );
+    fs::write(&input, fixture).expect("write articulation score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "articulation render failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("articulation.svg")).expect("read SVG");
+    assert_eq!(
+        svg.matches("class=\"articulation-mark\"").count(),
+        1,
+        "{svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_ornament_and_note_fermata_marks() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("ornament-fermata.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "</type>",
+        "</type><notations><ornaments><trill-mark/><turn/><mordent/></ornaments><fermata type=\"upright\">normal</fermata></notations>",
+    );
+    fs::write(&input, fixture).expect("write ornament score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "ornament render failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("ornament-fermata.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"ornament-mark\"").count(), 3, "{svg}");
+    assert_eq!(svg.matches("class=\"fermata-mark\"").count(), 1, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_fermata_marks_on_rests_and_barlines() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("rest-barline-fermata.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "</part>",
+        "<measure number=\"2\"><note><rest/><duration>1</duration><voice>1</voice><type>quarter</type><notations><fermata type=\"inverted\">double-square</fermata></notations></note><barline><fermata type=\"upright\">angled</fermata></barline></measure></part>",
+    );
+    fs::write(&input, fixture).expect("write Rest and barline score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "Rest/barline fermata render failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("rest-barline-fermata.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"fermata-mark\"").count(), 2, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_articulation_ornament_fermata_example() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("articulation-ornament-fermata.musicxml");
+    fs::write(
+        &input,
+        include_str!(
+            "../examples/articulation-ornament-fermata/articulation-ornament-fermata.musicxml"
+        ),
+    )
+    .expect("write example score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "example render failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("conflicting ornament placements on simultaneous tones"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("articulation-ornament-fermata.svg"))
+        .expect("read example SVG");
+    assert_eq!(
+        svg.matches("class=\"articulation-mark\"").count(),
+        6,
+        "{svg}"
+    );
+    assert_eq!(svg.matches("class=\"ornament-mark\"").count(), 5, "{svg}");
+    assert_eq!(svg.matches("class=\"fermata-mark\"").count(), 5, "{svg}");
+    assert!(svg.contains("stroke=\"#cc0000\""), "{svg}");
+    assert!(svg.contains("stroke=\"#00aa00\""), "{svg}");
+    let fermata_line = svg
+        .lines()
+        .find(|line| line.contains("id=\"fermata-0-0\""))
+        .expect("note Fermata path");
+    let ornament_line = svg
+        .lines()
+        .find(|line| line.contains("id=\"ornament-0-0\""))
+        .expect("note Ornament path");
+    let (fermata_x, fermata_y) = path_translation(fermata_line);
+    let (_, ornament_y) = path_translation(ornament_line);
+    assert_eq!(fermata_x, 127);
+    assert!(
+        fermata_y + 14 <= ornament_y,
+        "{fermata_line}\n{ornament_line}"
+    );
+    assert!(fermata_y + 14 <= 39, "{fermata_line}");
+    assert!(svg.contains("scale(2)"), "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn warns_for_unsupported_marks_and_rejects_malformed_articulations() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let source = include_str!("fixtures/minimal.musicxml");
+    let unsupported_input = directory.join("unsupported-marks.musicxml");
+    let unsupported_fixture = source.replace(
+        "</type>",
+        "</type><notations><articulations><staccato/><detached-legato/><other-articulation>custom accent</other-articulation></articulations><ornaments><wavy-line type=\"start\"/><other-ornament>custom turn</other-ornament></ornaments></notations>",
+    );
+    fs::write(&unsupported_input, unsupported_fixture).expect("write unsupported score");
+    let unsupported = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&unsupported_input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        unsupported.status.success(),
+        "valid unsupported marks should not prevent rendering: {}",
+        String::from_utf8_lossy(&unsupported.stderr)
+    );
+    let warnings = String::from_utf8_lossy(&unsupported.stderr);
+    assert!(
+        warnings.contains("unsupported articulation <detached-legato>"),
+        "{warnings}"
+    );
+    assert!(
+        warnings.contains("unsupported ornament <wavy-line>"),
+        "{warnings}"
+    );
+    assert!(
+        warnings.contains("unsupported articulation <other-articulation>"),
+        "{warnings}"
+    );
+    assert!(
+        warnings.contains("unsupported ornament <other-ornament>"),
+        "{warnings}"
+    );
+    let svg =
+        fs::read_to_string(directory.join("unsupported-marks.svg")).expect("read warning output");
+    assert_eq!(
+        svg.matches("class=\"articulation-mark\"").count(),
+        1,
+        "{svg}"
+    );
+    assert!(!svg.contains("class=\"ornament-mark\""), "{svg}");
+
+    let malformed_input = directory.join("malformed-articulation.musicxml");
+    let malformed_fixture = source.replace(
+        "</type>",
+        "</type><notations><articulations><strong-accent type=\"side\"/></articulations></notations>",
+    );
+    fs::write(&malformed_input, malformed_fixture).expect("write malformed score");
+    let malformed = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&malformed_input)
+        .output()
+        .expect("run CLI");
+    let error = String::from_utf8_lossy(&malformed.stderr);
+    assert!(!malformed.status.success(), "{error}");
+    assert!(
+        error.contains("strong-accent type must be 'up' or 'down'"),
+        "{error}"
+    );
+    assert!(error.contains("XML path /score-partwise/part"), "{error}");
+    assert!(
+        !directory.join("malformed-articulation.svg").exists(),
+        "fatal errors must not write partial output"
+    );
+
+    for (name, notation, expected_error) in [
+        (
+            "malformed-ornament",
+            "<ornaments><wavy-line type=\"middle\"/></ornaments>",
+            "wavy-line type must be 'start' or 'stop'",
+        ),
+        (
+            "malformed-fermata",
+            "<fermata type=\"side\">normal</fermata>",
+            "invalid fermata orientation",
+        ),
+    ] {
+        let input = directory.join(format!("{name}.musicxml"));
+        let fixture = source.replace(
+            "</type>",
+            &format!("</type><notations>{notation}</notations>"),
+        );
+        fs::write(&input, fixture).expect("write malformed mark score");
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{error}");
+        assert!(error.contains(expected_error), "{error}");
+        assert!(
+            !directory.join(format!("{name}.svg")).exists(),
+            "fatal errors must not write partial output"
+        );
+    }
+
+    let fallback_input = directory.join("fallback-fermata.musicxml");
+    let fallback_fixture = source.replace(
+        "</type>",
+        "</type><notations><fermata>short</fermata></notations>",
+    );
+    fs::write(&fallback_input, fallback_fixture).expect("write fallback Fermata score");
+    let fallback = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&fallback_input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        fallback.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fallback.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&fallback.stderr).contains("normal shape is used"),
+        "{}",
+        String::from_utf8_lossy(&fallback.stderr)
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn scales_marks_with_grace_and_cue_notes() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let source = include_str!("fixtures/minimal.musicxml");
+    for (name, fixture) in [
+        (
+            "grace-marks",
+            source
+                .replace("<note>\n", "<note>\n        <grace slash=\"yes\"/>\n")
+                .replace("<duration>1</duration>", "")
+                .replace(
+                    "</type>",
+                    "</type><notations><articulations><staccato/></articulations><ornaments><turn/></ornaments><fermata>normal</fermata></notations>",
+                ),
+        ),
+        (
+            "cue-marks",
+            source
+                .replace("<note>\n", "<note>\n        <cue/>\n")
+                .replace(
+                    "</type>",
+                    "</type><notations><articulations><staccato/></articulations><ornaments><turn/></ornaments><fermata>normal</fermata></notations>",
+                ),
+        ),
+    ] {
+        let input = directory.join(format!("{name}.musicxml"));
+        fs::write(&input, fixture).expect("write scaled-mark score");
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(
+            output.status.success(),
+            "{name} render failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let svg = fs::read_to_string(directory.join(format!("{name}.svg")))
+            .expect("read scaled-mark SVG");
+        for class in ["articulation-mark", "ornament-mark", "fermata-mark"] {
+            let mark = svg
+                .lines()
+                .find(|line| line.contains(&format!("class=\"{class}\"")))
+                .unwrap_or_else(|| panic!("missing {class} in {svg}"));
+            assert!(mark.contains("scale(0.6)"), "{mark}");
+        }
+    }
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn renders_each_input_staff_to_its_own_svg() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");

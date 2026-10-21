@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list>
+    <score-part id="P1"><part-name>Marks</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+        <notations>
+          <articulations><staccato/><strong-accent type="up"/></articulations>
+          <ornaments><trill-mark placement="above"/></ornaments>
+          <fermata type="upright" default-x="5" default-y="3" color="#00aa00">normal</fermata>
+        </notations>
+      </note>
+      <note>
+        <chord/><pitch><step>E</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+        <notations>
+          <articulations><staccato/><staccatissimo/><tenuto/></articulations>
+          <ornaments><trill-mark placement="below"/><turn placement="above" color="#cc0000" font-size="24"/></ornaments>
+          <fermata type="inverted">angled</fermata>
+        </notations>
+      </note>
+      <note>
+        <pitch><step>G</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+        <notations>
+          <articulations><accent placement="below"/><strong-accent type="down"/></articulations>
+          <ornaments><inverted-turn/><mordent/><inverted-mordent/></ornaments>
+        </notations>
+      </note>
+      <note>
+        <rest/><duration>1</duration><voice>1</voice><type>quarter</type>
+        <notations><fermata type="inverted">square</fermata></notations>
+      </note>
+      <barline location="right">
+        <fermata type="upright">double-angled</fermata>
+        <fermata type="inverted">double-square</fermata>
+      </barline>
+    </measure>
+  </part>
+</score-partwise>

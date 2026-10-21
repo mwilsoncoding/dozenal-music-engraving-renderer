@@ -44,6 +44,9 @@ struct Event {
     voice_id: VoiceId,
     input_staff: u32,
     is_spacer: bool,
+    articulations: Vec<ArticulationMark>,
+    ornaments: Vec<OrnamentMark>,
+    fermatas: Vec<FermataMark>,
 }
 
 #[derive(Clone)]
@@ -97,11 +100,79 @@ struct ParsedNote {
     tuplet_boundary: Option<TupletBoundary>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MarkPlacement {
+    Above,
+    Below,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArticulationKind {
+    Staccato,
+    Staccatissimo,
+    Accent,
+    StrongAccentUp,
+    StrongAccentDown,
+    Tenuto,
+}
+
+#[derive(Clone)]
+struct ArticulationMark {
+    kind: ArticulationKind,
+    placement: Option<MarkPlacement>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OrnamentKind {
+    Trill,
+    Turn,
+    InvertedTurn,
+    Mordent,
+    InvertedMordent,
+}
+
+#[derive(Clone)]
+struct OrnamentMark {
+    kind: OrnamentKind,
+    placement: Option<MarkPlacement>,
+    scale: f64,
+    color: String,
+    source_element: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FermataShape {
+    Normal,
+    Angled,
+    Square,
+    DoubleAngled,
+    DoubleSquare,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FermataOrientation {
+    Upright,
+    Inverted,
+}
+
+#[derive(Clone)]
+struct FermataMark {
+    shape: FermataShape,
+    orientation: FermataOrientation,
+    orientation_explicit: bool,
+    coordinates: [Option<f64>; 4],
+    color: String,
+    tone_index: Option<usize>,
+}
+
 #[derive(Default)]
 struct NotationMarkers {
     tie_start: bool,
     tie_stop: bool,
     tuplet_boundary: Option<TupletBoundary>,
+    articulations: Vec<ArticulationMark>,
+    ornaments: Vec<OrnamentMark>,
+    fermatas: Vec<FermataMark>,
 }
 
 #[derive(Clone)]
@@ -234,6 +305,7 @@ struct MeasureBarline {
     repeat_end: bool,
     ending_start: Option<EndingMark>,
     ending_end: Option<EndingMark>,
+    fermatas: Vec<FermataMark>,
 }
 
 #[derive(Clone)]
@@ -1311,7 +1383,63 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                     "chord contains a duplicate concert pitch".to_owned(),
                                 ));
                             }
+                            let chord_tone_index = event.tones.len();
                             event.tones.push(tone);
+                            let default_placement = default_mark_placement(
+                                event,
+                                stem_direction_is_up(event.tones.iter()),
+                            );
+                            for mark in parsed.event.articulations {
+                                if let Some(existing) =
+                                    event.articulations.iter_mut().find(|existing| {
+                                        existing.kind == mark.kind
+                                            && existing.placement.unwrap_or(default_placement)
+                                                == mark.placement.unwrap_or(default_placement)
+                                    })
+                                {
+                                    if existing.placement.is_none() {
+                                        existing.placement = mark.placement;
+                                    }
+                                } else {
+                                    event.articulations.push(mark);
+                                }
+                            }
+                            for mark in parsed.event.ornaments {
+                                if let Some(existing) =
+                                    event.ornaments.iter_mut().find(|existing| {
+                                        existing.kind == mark.kind
+                                            && existing.scale == mark.scale
+                                            && existing.color == mark.color
+                                    })
+                                {
+                                    if let (Some(first), Some(later)) =
+                                        (existing.placement, mark.placement)
+                                    {
+                                        if first != later {
+                                            warnings.push(element_diagnostic(
+                                                &elements[mark.source_element],
+                                                "conflicting ornament placements on simultaneous tones; first explicit placement is used"
+                                                    .to_owned(),
+                                            ));
+                                        }
+                                    } else if existing.placement.is_none() {
+                                        existing.placement = mark.placement;
+                                    }
+                                } else {
+                                    event.ornaments.push(mark);
+                                }
+                            }
+                            for mut fermata in parsed.event.fermatas {
+                                fermata.tone_index = Some(chord_tone_index);
+                                if !event.fermatas.iter().any(|existing| {
+                                    existing.shape == fermata.shape
+                                        && existing.orientation == fermata.orientation
+                                        && existing.coordinates == fermata.coordinates
+                                        && existing.color == fermata.color
+                                }) {
+                                    event.fermatas.push(fermata);
+                                }
+                            }
                         } else {
                             let duration_units = parsed.event.duration_units;
                             let voice_id = parsed.event.voice_id.clone();
@@ -1390,7 +1518,8 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                         &mut warnings,
                     )?),
                     "barline" => {
-                        let parsed = parse_repeat_barline(&elements, *child, events.len())?;
+                        let parsed =
+                            parse_repeat_barline(&elements, *child, events.len(), &mut warnings)?;
                         if let Some(label) = &parsed.ending_start {
                             if active_ending.is_some() {
                                 return Err(element_diagnostic(
@@ -1785,6 +1914,7 @@ fn parse_repeat_barline(
     elements: &[Element],
     barline: usize,
     event_index: usize,
+    warnings: &mut Vec<String>,
 ) -> Result<MeasureBarline, String> {
     let element = &elements[barline];
     validate_attributes(element, &["location"])?;
@@ -1805,6 +1935,17 @@ fn parse_repeat_barline(
     for child in &element.children {
         let child_element = &elements[*child];
         match child_element.name.as_str() {
+            "fermata" => {
+                if barline.fermatas.len() == 2 {
+                    return Err(element_diagnostic(
+                        child_element,
+                        "barline supports at most two fermatas".to_owned(),
+                    ));
+                }
+                let mut fermata = parse_fermata(child_element, false, warnings)?;
+                fermata.tone_index = None;
+                barline.fermatas.push(fermata);
+            }
             "bar-style" => {
                 if barline.style.is_some() {
                     return Err(element_diagnostic(
@@ -4066,10 +4207,752 @@ fn parse_time_modification(
     Ok(TupletRatio { actual, normal })
 }
 
+fn parse_articulations(
+    elements: &[Element],
+    articulations: usize,
+    is_rest: bool,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<ArticulationMark>, String> {
+    let container = &elements[articulations];
+    require_no_attributes(container)?;
+    require_container_text(container)?;
+    if container.children.is_empty() {
+        return Err(element_diagnostic(
+            container,
+            "<articulations> must contain at least one mark".to_owned(),
+        ));
+    }
+    let mut marks = Vec::new();
+    for child in &container.children {
+        let element = &elements[*child];
+        validate_attributes(
+            element,
+            &[
+                "placement",
+                "type",
+                "default-x",
+                "default-y",
+                "relative-x",
+                "relative-y",
+                "font-family",
+                "font-style",
+                "font-size",
+                "font-weight",
+                "color",
+                "smufl",
+            ],
+        )?;
+        let placement = match optional_attribute(element, "placement") {
+            None => None,
+            Some("above") => Some(MarkPlacement::Above),
+            Some("below") => Some(MarkPlacement::Below),
+            Some(value) => {
+                return Err(element_diagnostic(
+                    element,
+                    format!("invalid articulation placement {value:?}"),
+                ));
+            }
+        };
+        let kind = match element.name.as_str() {
+            "staccato" => Some(ArticulationKind::Staccato),
+            "staccatissimo" => Some(ArticulationKind::Staccatissimo),
+            "accent" => Some(ArticulationKind::Accent),
+            "tenuto" => Some(ArticulationKind::Tenuto),
+            "strong-accent" => Some(match optional_attribute(element, "type").unwrap_or("up") {
+                "up" => ArticulationKind::StrongAccentUp,
+                "down" => ArticulationKind::StrongAccentDown,
+                value => {
+                    return Err(element_diagnostic(
+                        element,
+                        format!("strong-accent type must be 'up' or 'down', not {value:?}"),
+                    ));
+                }
+            }),
+            _ => None,
+        };
+        if element.name == "other-articulation" {
+            if !element.children.is_empty() || element.text.trim().is_empty() {
+                return Err(element_diagnostic(
+                    element,
+                    "other-articulation requires plain text".to_owned(),
+                ));
+            }
+        } else {
+            require_container_text(element)?;
+            if !element.children.is_empty() {
+                return Err(element_diagnostic(
+                    element,
+                    "articulation marks must be empty".to_owned(),
+                ));
+            }
+        }
+        if !matches!(
+            kind,
+            Some(ArticulationKind::StrongAccentUp | ArticulationKind::StrongAccentDown)
+        ) && optional_attribute(element, "type").is_some()
+        {
+            return Err(element_diagnostic(
+                element,
+                "type is supported only for <strong-accent>".to_owned(),
+            ));
+        }
+        for attribute in ["default-x", "default-y", "relative-x", "relative-y"] {
+            if let Some(value) = optional_attribute(element, attribute) {
+                if value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|number| number.is_finite())
+                    .is_none()
+                {
+                    return Err(element_diagnostic(
+                        element,
+                        format!("articulation {attribute} must be a finite number"),
+                    ));
+                }
+                warnings.push(element_diagnostic(
+                    element,
+                    "articulation position hint is not supported; default placement is used"
+                        .to_owned(),
+                ));
+                break;
+            }
+        }
+        if let Some(color) = optional_attribute(element, "color") {
+            if !valid_musicxml_color(color) {
+                return Err(element_diagnostic(
+                    element,
+                    "articulation color must be a six-digit hexadecimal color".to_owned(),
+                ));
+            }
+            warnings.push(element_diagnostic(
+                element,
+                "articulation color is not supported; standard color is used".to_owned(),
+            ));
+        }
+        if let Some(family) = optional_attribute(element, "font-family") {
+            if family.trim().is_empty() {
+                return Err(element_diagnostic(
+                    element,
+                    "articulation font-family may not be empty".to_owned(),
+                ));
+            }
+            warnings.push(element_diagnostic(
+                element,
+                "articulation font-family is not supported; conventional glyph is used".to_owned(),
+            ));
+        }
+        for (attribute, allowed) in [
+            ("font-style", &["normal", "italic", "oblique"][..]),
+            ("font-weight", &["normal", "bold"][..]),
+        ] {
+            if let Some(value) = optional_attribute(element, attribute) {
+                if !allowed.contains(&value) {
+                    return Err(element_diagnostic(
+                        element,
+                        format!("invalid articulation {attribute} {value:?}"),
+                    ));
+                }
+                warnings.push(element_diagnostic(
+                    element,
+                    format!(
+                        "articulation {attribute} is not supported; conventional glyph is used"
+                    ),
+                ));
+            }
+        }
+        if let Some(size) = optional_attribute(element, "font-size") {
+            if !valid_musicxml_font_size(size) {
+                return Err(element_diagnostic(
+                    element,
+                    format!("invalid articulation font-size {size:?}"),
+                ));
+            }
+            warnings.push(element_diagnostic(
+                element,
+                "articulation font-size is not supported; event size is used".to_owned(),
+            ));
+        }
+        if let Some(smufl) = optional_attribute(element, "smufl") {
+            if smufl.trim().is_empty() {
+                return Err(element_diagnostic(
+                    element,
+                    "articulation smufl override may not be empty".to_owned(),
+                ));
+            }
+            warnings.push(element_diagnostic(
+                element,
+                "articulation smufl override is not supported; conventional glyph is used"
+                    .to_owned(),
+            ));
+        }
+        if kind.is_none() {
+            if [
+                "detached-legato",
+                "spiccato",
+                "scoop",
+                "plop",
+                "doit",
+                "falloff",
+                "breath-mark",
+                "caesura",
+                "stress",
+                "unstress",
+                "other-articulation",
+            ]
+            .contains(&element.name.as_str())
+            {
+                warnings.push(element_diagnostic(
+                    element,
+                    format!("unsupported articulation <{}>; omitted", element.name),
+                ));
+                continue;
+            }
+            return Err(element_diagnostic(
+                element,
+                format!("unsupported articulation element <{}>", element.name),
+            ));
+        }
+        if is_rest {
+            warnings.push(element_diagnostic(
+                element,
+                "articulations on Rests are unsupported; mark omitted".to_owned(),
+            ));
+            continue;
+        }
+        let mark = ArticulationMark {
+            kind: kind.expect("supported articulation was identified"),
+            placement,
+        };
+        if !marks.iter().any(|existing: &ArticulationMark| {
+            existing.kind == mark.kind && existing.placement == mark.placement
+        }) {
+            marks.push(mark);
+        }
+    }
+    Ok(marks)
+}
+
+fn parse_ornaments(
+    elements: &[Element],
+    ornaments: usize,
+    is_rest: bool,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<OrnamentMark>, String> {
+    let container = &elements[ornaments];
+    require_no_attributes(container)?;
+    require_container_text(container)?;
+    if container.children.is_empty() {
+        return Err(element_diagnostic(
+            container,
+            "<ornaments> must contain at least one mark".to_owned(),
+        ));
+    }
+    let mut marks: Vec<OrnamentMark> = Vec::new();
+    for child in &container.children {
+        let element = &elements[*child];
+        validate_attributes(
+            element,
+            &[
+                "placement",
+                "long",
+                "slash",
+                "type",
+                "number",
+                "default-x",
+                "default-y",
+                "relative-x",
+                "relative-y",
+                "font-family",
+                "font-style",
+                "font-size",
+                "font-weight",
+                "color",
+                "smufl",
+            ],
+        )?;
+        if element.name == "other-ornament" {
+            if !element.children.is_empty() || element.text.trim().is_empty() {
+                return Err(element_diagnostic(
+                    element,
+                    "other-ornament requires plain text".to_owned(),
+                ));
+            }
+        } else {
+            require_container_text(element)?;
+        }
+        for nested in &element.children {
+            let nested_element = &elements[*nested];
+            if nested_element.name != "accidental-mark"
+                || !matches!(
+                    element.name.as_str(),
+                    "trill-mark" | "turn" | "inverted-turn" | "mordent" | "inverted-mordent"
+                )
+            {
+                return Err(element_diagnostic(
+                    nested_element,
+                    "unsupported nested ornament content".to_owned(),
+                ));
+            }
+            validate_attributes(nested_element, &["smufl", "placement", "color"])?;
+            if !nested_element.children.is_empty() || nested_element.text.trim().is_empty() {
+                return Err(element_diagnostic(
+                    nested_element,
+                    "accidental-mark requires plain text".to_owned(),
+                ));
+            }
+            let value = nested_element.text.trim();
+            if ![
+                "sharp",
+                "natural",
+                "flat",
+                "double-sharp",
+                "sharp-sharp",
+                "flat-flat",
+                "natural-sharp",
+                "natural-flat",
+                "quarter-flat",
+                "quarter-sharp",
+                "three-quarters-flat",
+                "three-quarters-sharp",
+            ]
+            .contains(&value)
+            {
+                return Err(element_diagnostic(
+                    nested_element,
+                    format!("invalid ornament accidental-mark value {value:?}"),
+                ));
+            }
+            if let Some(placement) = optional_attribute(nested_element, "placement") {
+                if !matches!(placement, "above" | "below") {
+                    return Err(element_diagnostic(
+                        nested_element,
+                        format!("invalid ornament accidental-mark placement {placement:?}"),
+                    ));
+                }
+            }
+            warnings.push(element_diagnostic(
+                nested_element,
+                "ornament accidental-mark is unsupported; omitted".to_owned(),
+            ));
+        }
+        let placement = match optional_attribute(element, "placement") {
+            None => None,
+            Some("above") => Some(MarkPlacement::Above),
+            Some("below") => Some(MarkPlacement::Below),
+            Some(value) => {
+                return Err(element_diagnostic(
+                    element,
+                    format!("invalid ornament placement {value:?}"),
+                ));
+            }
+        };
+        let kind = match element.name.as_str() {
+            "trill-mark" => Some(OrnamentKind::Trill),
+            "turn" => Some(OrnamentKind::Turn),
+            "inverted-turn" => Some(OrnamentKind::InvertedTurn),
+            "mordent" => Some(OrnamentKind::Mordent),
+            "inverted-mordent" => Some(OrnamentKind::InvertedMordent),
+            _ => None,
+        };
+        if kind.is_some()
+            && (optional_attribute(element, "type").is_some()
+                || optional_attribute(element, "number").is_some())
+        {
+            return Err(element_diagnostic(
+                element,
+                "type and number are supported only on deferred ornaments".to_owned(),
+            ));
+        }
+        if let Some(value) = optional_attribute(element, "long") {
+            if !matches!(value, "yes" | "no")
+                || !matches!(element.name.as_str(), "mordent" | "inverted-mordent")
+            {
+                return Err(element_diagnostic(
+                    element,
+                    format!("invalid ornament long value {value:?}"),
+                ));
+            }
+            if value == "yes" {
+                warnings.push(element_diagnostic(
+                    element,
+                    "long mordent glyph is unavailable; ordinary mordent is used".to_owned(),
+                ));
+            }
+        }
+        if let Some(value) = optional_attribute(element, "slash") {
+            if !matches!(value, "yes" | "no") {
+                return Err(element_diagnostic(
+                    element,
+                    format!("ornament slash must be 'yes' or 'no', not {value:?}"),
+                ));
+            }
+            warnings.push(element_diagnostic(
+                element,
+                "ornament slash hint is not supported; conventional glyph is used".to_owned(),
+            ));
+        }
+        for attribute in ["default-x", "default-y", "relative-x", "relative-y"] {
+            if let Some(value) = optional_attribute(element, attribute) {
+                if value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|number| number.is_finite())
+                    .is_none()
+                {
+                    return Err(element_diagnostic(
+                        element,
+                        format!("ornament {attribute} must be a finite number"),
+                    ));
+                }
+                warnings.push(element_diagnostic(
+                    element,
+                    "ornament position hint is not supported; default placement is used".to_owned(),
+                ));
+            }
+        }
+        let color = optional_attribute(element, "color").unwrap_or("#171717");
+        if !valid_musicxml_color(color) {
+            return Err(element_diagnostic(
+                element,
+                "ornament color must be a six-digit hexadecimal color".to_owned(),
+            ));
+        }
+        let scale = match optional_attribute(element, "font-size") {
+            None => 1.0,
+            Some(value) => parse_text_font_size(value)
+                .map(|size| size / 16.0)
+                .filter(|size| size.is_finite() && *size > 0.0)
+                .ok_or_else(|| {
+                    element_diagnostic(element, format!("invalid ornament font-size {value:?}"))
+                })?,
+        };
+        if let Some(family) = optional_attribute(element, "font-family") {
+            if family.trim().is_empty() {
+                return Err(element_diagnostic(
+                    element,
+                    "ornament font-family may not be empty".to_owned(),
+                ));
+            }
+            warnings.push(element_diagnostic(
+                element,
+                "ornament font-family is not supported; conventional glyph is used".to_owned(),
+            ));
+        }
+        for (attribute, allowed) in [
+            ("font-style", &["normal", "italic", "oblique"][..]),
+            ("font-weight", &["normal", "bold"][..]),
+        ] {
+            if let Some(value) = optional_attribute(element, attribute) {
+                if !allowed.contains(&value) {
+                    return Err(element_diagnostic(
+                        element,
+                        format!("invalid ornament {attribute} {value:?}"),
+                    ));
+                }
+                warnings.push(element_diagnostic(
+                    element,
+                    format!("ornament {attribute} is not supported; conventional glyph is used"),
+                ));
+            }
+        }
+        if let Some(smufl) = optional_attribute(element, "smufl") {
+            if !valid_smufl_glyph_name(smufl) {
+                return Err(element_diagnostic(
+                    element,
+                    format!("invalid ornament SMuFL glyph name {smufl:?}"),
+                ));
+            }
+            warnings.push(element_diagnostic(
+                element,
+                format!("ornament SMuFL override {smufl:?} is not supported; conventional glyph is used"),
+            ));
+        }
+        if kind.is_none() {
+            validate_deferred_ornament(element, warnings)?;
+            continue;
+        }
+        if is_rest {
+            warnings.push(element_diagnostic(
+                element,
+                "ornaments on Rests are unsupported; mark omitted".to_owned(),
+            ));
+            continue;
+        }
+        let mark = OrnamentMark {
+            kind: kind.expect("supported ornament was identified"),
+            placement,
+            scale,
+            color: color.to_ascii_lowercase(),
+            source_element: *child,
+        };
+        if !marks.iter().any(|existing| {
+            existing.kind == mark.kind
+                && existing.placement == mark.placement
+                && existing.scale == mark.scale
+                && existing.color == mark.color
+        }) {
+            marks.push(mark);
+        }
+    }
+    Ok(marks)
+}
+
+fn validate_deferred_ornament(element: &Element, warnings: &mut Vec<String>) -> Result<(), String> {
+    match element.name.as_str() {
+        "wavy-line" => {
+            require_container_text(element)?;
+            if !element.children.is_empty() {
+                return Err(element_diagnostic(
+                    element,
+                    "wavy-line must be empty".to_owned(),
+                ));
+            }
+            match required_attribute(element, "type")? {
+                "start" | "stop" => {}
+                value => {
+                    return Err(element_diagnostic(
+                        element,
+                        format!("wavy-line type must be 'start' or 'stop', not {value:?}"),
+                    ));
+                }
+            }
+            if let Some(number) = optional_attribute(element, "number") {
+                if number
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|number| *number > 0)
+                    .is_none()
+                {
+                    return Err(element_diagnostic(
+                        element,
+                        format!("wavy-line number must be a positive integer, not {number:?}"),
+                    ));
+                }
+            }
+        }
+        "tremolo" => {
+            match required_attribute(element, "type")? {
+                "single" | "start" | "stop" => {}
+                value => {
+                    return Err(element_diagnostic(
+                        element,
+                        format!("tremolo type is invalid: {value:?}"),
+                    ));
+                }
+            }
+            if !element.children.is_empty() || element.text.trim().is_empty() {
+                return Err(element_diagnostic(
+                    element,
+                    "tremolo requires plain-text marks".to_owned(),
+                ));
+            }
+            if element
+                .text
+                .trim()
+                .parse::<u8>()
+                .ok()
+                .filter(|marks| (1..=8).contains(marks))
+                .is_none()
+            {
+                return Err(element_diagnostic(
+                    element,
+                    "tremolo marks must be an integer from 1 through 8".to_owned(),
+                ));
+            }
+        }
+        "other-ornament" => {
+            if !element.children.is_empty() || element.text.trim().is_empty() {
+                return Err(element_diagnostic(
+                    element,
+                    "other-ornament requires plain text".to_owned(),
+                ));
+            }
+        }
+        "accidental-mark" => {
+            if !element.children.is_empty() || element.text.trim().is_empty() {
+                return Err(element_diagnostic(
+                    element,
+                    "accidental-mark requires plain text".to_owned(),
+                ));
+            }
+            let value = element.text.trim();
+            if ![
+                "sharp",
+                "natural",
+                "flat",
+                "double-sharp",
+                "sharp-sharp",
+                "flat-flat",
+                "natural-sharp",
+                "natural-flat",
+                "quarter-flat",
+                "quarter-sharp",
+                "three-quarters-flat",
+                "three-quarters-sharp",
+            ]
+            .contains(&value)
+            {
+                return Err(element_diagnostic(
+                    element,
+                    format!("invalid ornament accidental-mark value {value:?}"),
+                ));
+            }
+        }
+        _ => {
+            return Err(element_diagnostic(
+                element,
+                format!("unsupported ornament element <{}>", element.name),
+            ));
+        }
+    }
+    warnings.push(element_diagnostic(
+        element,
+        format!("unsupported ornament <{}>; omitted", element.name),
+    ));
+    Ok(())
+}
+
+fn parse_fermata(
+    element: &Element,
+    is_rest: bool,
+    warnings: &mut Vec<String>,
+) -> Result<FermataMark, String> {
+    validate_attributes(
+        element,
+        &[
+            "type",
+            "default-x",
+            "default-y",
+            "relative-x",
+            "relative-y",
+            "font-family",
+            "font-style",
+            "font-size",
+            "font-weight",
+            "color",
+        ],
+    )?;
+    if !element.children.is_empty() {
+        return Err(element_diagnostic(
+            element,
+            "fermata must contain only its shape text".to_owned(),
+        ));
+    }
+    let orientation = match optional_attribute(element, "type").unwrap_or("upright") {
+        "upright" => FermataOrientation::Upright,
+        "inverted" => FermataOrientation::Inverted,
+        value => {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid fermata orientation {value:?}"),
+            ));
+        }
+    };
+    let shape_text = element.text.trim();
+    let shape = match shape_text {
+        "" | "normal" => FermataShape::Normal,
+        "angled" => FermataShape::Angled,
+        "square" => FermataShape::Square,
+        "double-angled" => FermataShape::DoubleAngled,
+        "double-square" => FermataShape::DoubleSquare,
+        "short" | "long" | "very-short" | "very-long" => {
+            warnings.push(element_diagnostic(
+                element,
+                format!("fermata shape {shape_text:?} is unavailable; normal shape is used"),
+            ));
+            FermataShape::Normal
+        }
+        value => {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid fermata shape {value:?}"),
+            ));
+        }
+    };
+    let color = optional_attribute(element, "color").unwrap_or("#171717");
+    if !valid_musicxml_color(color) {
+        return Err(element_diagnostic(
+            element,
+            "fermata color must be a six-digit hexadecimal color".to_owned(),
+        ));
+    }
+    for (attribute, allowed) in [
+        ("font-style", &["normal", "italic", "oblique"][..]),
+        ("font-weight", &["normal", "bold"][..]),
+    ] {
+        if let Some(value) = optional_attribute(element, attribute) {
+            if !allowed.contains(&value) {
+                return Err(element_diagnostic(
+                    element,
+                    format!("invalid fermata {attribute} {value:?}"),
+                ));
+            }
+            warnings.push(element_diagnostic(
+                element,
+                format!("fermata {attribute} is not supported; standard glyph is used"),
+            ));
+        }
+    }
+    if let Some(size) = optional_attribute(element, "font-size") {
+        if !valid_musicxml_font_size(size) {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid fermata font-size {size:?}"),
+            ));
+        }
+        warnings.push(element_diagnostic(
+            element,
+            "fermata font-size is not supported; standard glyph size is used".to_owned(),
+        ));
+    }
+    if let Some(family) = optional_attribute(element, "font-family") {
+        if family.trim().is_empty() {
+            return Err(element_diagnostic(
+                element,
+                "fermata font-family may not be empty".to_owned(),
+            ));
+        }
+        warnings.push(element_diagnostic(
+            element,
+            "fermata font-family is not supported; standard glyph is used".to_owned(),
+        ));
+    }
+    let mut coordinates = [None; 4];
+    for (index, attribute) in ["default-x", "default-y", "relative-x", "relative-y"]
+        .into_iter()
+        .enumerate()
+    {
+        if let Some(value) = optional_attribute(element, attribute) {
+            coordinates[index] = Some(
+                value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|number| number.is_finite())
+                    .ok_or_else(|| {
+                        element_diagnostic(
+                            element,
+                            format!("fermata {attribute} must be a finite number"),
+                        )
+                    })?,
+            );
+        }
+    }
+    Ok(FermataMark {
+        shape,
+        orientation,
+        orientation_explicit: optional_attribute(element, "type").is_some(),
+        coordinates,
+        color: color.to_ascii_lowercase(),
+        tone_index: (!is_rest).then_some(0),
+    })
+}
+
 fn parse_tuplet_notations(
     elements: &[Element],
     notations: usize,
     ratio: Option<&TupletRatio>,
+    is_rest: bool,
+    warnings: &mut Vec<String>,
 ) -> Result<NotationMarkers, String> {
     let element = &elements[notations];
     require_no_attributes(element)?;
@@ -4082,9 +4965,34 @@ fn parse_tuplet_notations(
     }
     let mut markers = NotationMarkers::default();
     let mut tuplet = None;
+    let mut saw_articulations = false;
+    let mut saw_ornaments = false;
     for child in &element.children {
         let child_element = &elements[*child];
         match child_element.name.as_str() {
+            "articulations" if !saw_articulations => {
+                saw_articulations = true;
+                markers.articulations = parse_articulations(elements, *child, is_rest, warnings)?;
+            }
+            "articulations" => {
+                return Err(element_diagnostic(
+                    child_element,
+                    "only one <articulations> group per note is supported".to_owned(),
+                ));
+            }
+            "ornaments" if !saw_ornaments => {
+                saw_ornaments = true;
+                markers.ornaments = parse_ornaments(elements, *child, is_rest, warnings)?;
+            }
+            "ornaments" => {
+                return Err(element_diagnostic(
+                    child_element,
+                    "only one <ornaments> group per note is supported".to_owned(),
+                ));
+            }
+            "fermata" => markers
+                .fermatas
+                .push(parse_fermata(child_element, is_rest, warnings)?),
             "tied" => {
                 validate_attributes(child_element, &["type", "number"])?;
                 require_container_text(child_element)?;
@@ -4639,7 +5547,13 @@ fn parse_note(
         .copied()
     {
         position += 1;
-        parse_tuplet_notations(elements, notations, time_modification.as_ref())?
+        parse_tuplet_notations(
+            elements,
+            notations,
+            time_modification.as_ref(),
+            is_rest,
+            warnings,
+        )?
     } else {
         NotationMarkers::default()
     };
@@ -4861,6 +5775,9 @@ fn parse_note(
             voice_id,
             input_staff,
             is_spacer: false,
+            articulations: notation_markers.articulations,
+            ornaments: notation_markers.ornaments,
+            fermatas: notation_markers.fermatas,
         },
         chord_marker,
         tuplet_boundary,
@@ -5891,6 +6808,9 @@ enum PathClass {
     MultipleRest,
     MeasureRepeat,
     BeatRepeat,
+    ArticulationMark,
+    OrnamentMark,
+    FermataMark,
 }
 
 #[derive(Clone)]
@@ -6031,6 +6951,10 @@ impl ComponentBounds {
     fn overlaps_vertically(self, other: Self) -> bool {
         self.top <= other.bottom && other.top <= self.bottom
     }
+
+    fn overlaps(self, other: Self) -> bool {
+        self.left <= other.right && other.left <= self.right && self.overlaps_vertically(other)
+    }
 }
 
 #[derive(Clone)]
@@ -6043,6 +6967,353 @@ impl EventGeometry {
     fn all(&self) -> impl Iterator<Item = &ComponentBounds> {
         self.primary.iter().chain(&self.incoming)
     }
+}
+
+struct ArticulationLayout {
+    mark_index: usize,
+    placement: MarkPlacement,
+    left: f64,
+    top: f64,
+}
+
+fn default_mark_placement(event: &Event, stems_up: bool) -> MarkPlacement {
+    if event.duration_name != "whole" {
+        if stems_up {
+            MarkPlacement::Below
+        } else {
+            MarkPlacement::Above
+        }
+    } else {
+        let tone_center = event
+            .tones
+            .iter()
+            .map(|tone| f64::from(lane_y(tone.tone.octave) + 9))
+            .sum::<f64>()
+            / event.tones.len() as f64;
+        if tone_center < 68.0 {
+            MarkPlacement::Above
+        } else {
+            MarkPlacement::Below
+        }
+    }
+}
+
+fn articulation_layouts(event: &Event, x: i32, stems_up: bool) -> Vec<ArticulationLayout> {
+    if event.articulations.is_empty() || event.tones.is_empty() {
+        return Vec::new();
+    }
+    let mut ordered = (0..event.articulations.len()).collect::<Vec<_>>();
+    ordered.sort_by_key(|index| match event.articulations[*index].kind {
+        ArticulationKind::Staccato => 0,
+        ArticulationKind::Tenuto | ArticulationKind::Accent => 1,
+        ArticulationKind::Staccatissimo
+        | ArticulationKind::StrongAccentUp
+        | ArticulationKind::StrongAccentDown => 2,
+    });
+    let mut lane_offsets = [0; 10];
+    let tone_xs = event
+        .tones
+        .iter()
+        .map(|tone| {
+            let octave = usize::from(tone.tone.octave);
+            let tone_x = x + lane_offsets[octave];
+            lane_offsets[octave] += 12;
+            tone_x
+        })
+        .collect::<Vec<_>>();
+    let top_tone_index = event
+        .tones
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, tone)| lane_y(tone.tone.octave))
+        .map(|(index, _)| index)
+        .expect("event has tones");
+    let bottom_tone_index = event
+        .tones
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, tone)| lane_y(tone.tone.octave))
+        .map(|(index, _)| index)
+        .expect("event has tones");
+    let topmost_y = event
+        .tones
+        .iter()
+        .map(|tone| lane_y(tone.tone.octave))
+        .min()
+        .expect("event has tones");
+    let bottommost_y = event
+        .tones
+        .iter()
+        .map(|tone| lane_y(tone.tone.octave) + 18)
+        .max()
+        .expect("event has tones");
+    let default_placement = default_mark_placement(event, stems_up);
+    let mut stack_counts = [0; 2];
+    ordered
+        .into_iter()
+        .map(|mark_index| {
+            let placement = event.articulations[mark_index]
+                .placement
+                .unwrap_or(default_placement);
+            let stack = match placement {
+                MarkPlacement::Above => &mut stack_counts[0],
+                MarkPlacement::Below => &mut stack_counts[1],
+            };
+            let top = match placement {
+                MarkPlacement::Above => {
+                    topmost_y as f64
+                        - 10.0 * event.glyph_scale
+                        - f64::from(*stack) * 9.0 * event.glyph_scale
+                }
+                MarkPlacement::Below => {
+                    bottommost_y as f64
+                        + 2.0 * event.glyph_scale
+                        + f64::from(*stack) * 9.0 * event.glyph_scale
+                }
+            };
+            *stack += 1;
+            ArticulationLayout {
+                mark_index,
+                placement,
+                left: f64::from(
+                    tone_xs[match placement {
+                        MarkPlacement::Above => top_tone_index,
+                        MarkPlacement::Below => bottom_tone_index,
+                    }] + 6,
+                ) - 5.0 * event.glyph_scale,
+                top,
+            }
+        })
+        .collect()
+}
+
+fn articulation_glyph(
+    kind: ArticulationKind,
+    placement: MarkPlacement,
+) -> (&'static str, PathStyle) {
+    match kind {
+        ArticulationKind::Staccato => ("M1 3A2 2 0 1 0 5 3A2 2 0 1 0 1 3Z", PathStyle::FilledGlyph),
+        ArticulationKind::Staccatissimo => (
+            match placement {
+                MarkPlacement::Above => "M1 0H9L5 8Z",
+                MarkPlacement::Below => "M5 0L9 8H1Z",
+            },
+            PathStyle::FilledGlyph,
+        ),
+        ArticulationKind::Accent => (
+            match placement {
+                MarkPlacement::Above => "M1 0L9 4L1 8",
+                MarkPlacement::Below => "M1 8L9 4L1 0",
+            },
+            PathStyle::MediumStroke,
+        ),
+        ArticulationKind::StrongAccentUp => ("M1 8L5 0L9 8Z", PathStyle::FilledGlyph),
+        ArticulationKind::StrongAccentDown => ("M1 0L5 8L9 0Z", PathStyle::FilledGlyph),
+        ArticulationKind::Tenuto => ("M1 4H9", PathStyle::MediumStroke),
+    }
+}
+
+struct OrnamentLayout {
+    mark_index: usize,
+    placement: MarkPlacement,
+    left: f64,
+    top: f64,
+}
+
+fn ornament_layouts(event: &Event, x: i32, stems_up: bool) -> Vec<OrnamentLayout> {
+    if event.ornaments.is_empty() || event.tones.is_empty() {
+        return Vec::new();
+    }
+    let articulation_layout = articulation_layouts(event, x, stems_up);
+    let mut stack_counts = [0usize; 2];
+    for layout in articulation_layout {
+        stack_counts[usize::from(layout.placement == MarkPlacement::Below)] += 1;
+    }
+    let mut lane_offsets = [0; 10];
+    let tone_xs = event
+        .tones
+        .iter()
+        .map(|tone| {
+            let octave = usize::from(tone.tone.octave);
+            let tone_x = x + lane_offsets[octave];
+            lane_offsets[octave] += 12;
+            tone_x
+        })
+        .collect::<Vec<_>>();
+    let top_tone_index = event
+        .tones
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, tone)| lane_y(tone.tone.octave))
+        .map(|(index, _)| index)
+        .expect("event has tones");
+    let bottom_tone_index = event
+        .tones
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, tone)| lane_y(tone.tone.octave))
+        .map(|(index, _)| index)
+        .expect("event has tones");
+    let topmost_y = event
+        .tones
+        .iter()
+        .map(|tone| lane_y(tone.tone.octave))
+        .min()
+        .expect("event has tones");
+    let bottommost_y = event
+        .tones
+        .iter()
+        .map(|tone| lane_y(tone.tone.octave) + 18)
+        .max()
+        .expect("event has tones");
+    let default_placement = default_mark_placement(event, stems_up);
+    event
+        .ornaments
+        .iter()
+        .enumerate()
+        .map(|(mark_index, mark)| {
+            let placement = mark.placement.unwrap_or(default_placement);
+            let stack = &mut stack_counts[usize::from(placement == MarkPlacement::Below)];
+            let scale = event.glyph_scale * mark.scale;
+            let top = match placement {
+                MarkPlacement::Above => {
+                    topmost_y as f64 - 13.0 * scale - *stack as f64 * 12.0 * scale
+                }
+                MarkPlacement::Below => {
+                    bottommost_y as f64 + 3.0 * scale + *stack as f64 * 12.0 * scale
+                }
+            };
+            *stack += 1;
+            OrnamentLayout {
+                mark_index,
+                placement,
+                left: f64::from(
+                    tone_xs[match placement {
+                        MarkPlacement::Above => top_tone_index,
+                        MarkPlacement::Below => bottom_tone_index,
+                    }] + 6,
+                ) - 9.0 * scale,
+                top,
+            }
+        })
+        .collect()
+}
+
+fn ornament_glyph(kind: OrnamentKind, placement: MarkPlacement) -> &'static str {
+    match (kind, placement) {
+        (OrnamentKind::Trill, _) => "M0 10C2 0 4 12 6 3S10 12 12 2S16 10 18 1",
+        (OrnamentKind::Turn, _) => "M0 8C3 0 6 0 9 5C12 10 15 10 18 2M8 5H13",
+        (OrnamentKind::InvertedTurn, _) => "M0 2C3 10 6 10 9 5C12 0 15 0 18 8M8 5H13",
+        (OrnamentKind::Mordent, MarkPlacement::Above) => "M0 10L4 2L8 10L12 2L16 10",
+        (OrnamentKind::Mordent, MarkPlacement::Below) => "M0 2L4 10L8 2L12 10L16 2",
+        (OrnamentKind::InvertedMordent, MarkPlacement::Above) => "M0 2L4 10L8 2L12 10L16 2",
+        (OrnamentKind::InvertedMordent, MarkPlacement::Below) => "M0 10L4 2L8 10L12 2L16 10",
+    }
+}
+
+fn fermata_glyph(shape: FermataShape) -> &'static str {
+    match shape {
+        FermataShape::Normal => "M0 10C0 0 18 0 18 10M8 12A1 1 0 1 0 10 12A1 1 0 1 0 8 12Z",
+        FermataShape::Angled => "M1 10L4 2Q10 -2 17 8M8 12A1 1 0 1 0 10 12A1 1 0 1 0 8 12Z",
+        FermataShape::Square => "M1 10V4Q9 0 17 4V10M8 12A1 1 0 1 0 10 12A1 1 0 1 0 8 12Z",
+        FermataShape::DoubleAngled => {
+            "M0 10C0 0 18 0 18 10M2 10C2 3 16 3 16 10M8 12A1 1 0 1 0 10 12A1 1 0 1 0 8 12Z"
+        }
+        FermataShape::DoubleSquare => {
+            "M1 10V4Q9 0 17 4V10M3 10V5Q9 2 15 5V10M8 12A1 1 0 1 0 10 12A1 1 0 1 0 8 12Z"
+        }
+    }
+}
+
+fn fermata_position(
+    mark: &FermataMark,
+    anchor_x: f64,
+    anchor_top: f64,
+    anchor_bottom: f64,
+    scale: f64,
+) -> (f64, f64) {
+    let [default_x, default_y, relative_x, relative_y] = mark.coordinates;
+    let x_offset = (default_x.unwrap_or(0.0) + relative_x.unwrap_or(0.0)) * 2.0;
+    let y_offset = (default_y.unwrap_or(0.0) + relative_y.unwrap_or(0.0)) * 2.0;
+    let default_top = match mark.orientation {
+        FermataOrientation::Upright => anchor_top - 16.0 * scale,
+        FermataOrientation::Inverted => anchor_bottom + 4.0 * scale,
+    };
+    let left = anchor_x + x_offset - 9.0 * scale;
+    let top = if default_y.is_some() || relative_y.is_some() {
+        anchor_top - 10.0 * scale - y_offset
+    } else {
+        default_top + y_offset
+    };
+    (left, top)
+}
+
+fn fermata_layout(
+    mark: &FermataMark,
+    anchor_x: f64,
+    anchor_top: f64,
+    anchor_bottom: f64,
+    scale: f64,
+    occupied: &[ComponentBounds],
+) -> (f64, f64, ComponentBounds) {
+    let (left, mut top) = fermata_position(mark, anchor_x, anchor_top, anchor_bottom, scale);
+    let vertical_step = 12.0 * scale;
+    let vertical_direction = if mark.orientation == FermataOrientation::Upright {
+        -1.0
+    } else {
+        1.0
+    };
+    let mut bounds = ComponentBounds::stroked(
+        left,
+        top,
+        left + 18.0 * scale,
+        top + 14.0 * scale,
+        1.5 * scale,
+    );
+    for _ in 0..=occupied.len() {
+        if !occupied.iter().any(|other| bounds.overlaps(*other)) {
+            break;
+        }
+        top += vertical_direction * vertical_step;
+        bounds = ComponentBounds::stroked(
+            left,
+            top,
+            left + 18.0 * scale,
+            top + 14.0 * scale,
+            1.5 * scale,
+        );
+    }
+    (left, top, bounds)
+}
+
+fn draw_fermata(
+    scene: &mut Scene,
+    id: String,
+    mark: &FermataMark,
+    anchor_x: f64,
+    anchor_top: f64,
+    anchor_bottom: f64,
+    scale: f64,
+    occupied: &[ComponentBounds],
+) -> ComponentBounds {
+    let (left, top, bounds) =
+        fermata_layout(mark, anchor_x, anchor_top, anchor_bottom, scale, occupied);
+    let left_i = left.floor() as i32;
+    let top_i = top.floor() as i32;
+    let path = fermata_glyph(mark.shape);
+    scene.add_path(
+        DrawLayer::Event,
+        id,
+        Some(PathClass::FermataMark),
+        Vec::new(),
+        PathGeometry::new(Some((left_i, top_i)), path, PathStyle::MediumStroke)
+            .offset_x(left - f64::from(left_i))
+            .offset_y(top - f64::from(top_i))
+            .scaled(scale)
+            .rotated_180_about_if(mark.orientation == FermataOrientation::Inverted, 9, 6)
+            .colored(&mark.color),
+    );
+    bounds
 }
 
 fn duration_mark_position(
@@ -6094,6 +7365,19 @@ fn event_geometry(
                 f64::from(mark_x) + 2.4,
                 f64::from(mark_y) + 1.2,
             ));
+        }
+        let mut occupied = primary.clone();
+        for fermata in &event.fermatas {
+            let (_, _, bounds) = fermata_layout(
+                fermata,
+                f64::from(x + 7),
+                rest_y,
+                rest_y + 18.0,
+                event.glyph_scale,
+                &occupied,
+            );
+            primary.push(bounds);
+            occupied.push(bounds);
         }
         return EventGeometry { primary, incoming };
     }
@@ -6284,6 +7568,41 @@ fn event_geometry(
         ));
     }
 
+    for layout in articulation_layouts(event, x, stems_up) {
+        primary.push(ComponentBounds::filled(
+            layout.left,
+            layout.top,
+            layout.left + 10.0 * event.glyph_scale,
+            layout.top + 8.0 * event.glyph_scale,
+        ));
+    }
+    for layout in ornament_layouts(event, x, stems_up) {
+        let mark = &event.ornaments[layout.mark_index];
+        let scale = event.glyph_scale * mark.scale;
+        primary.push(ComponentBounds::stroked(
+            layout.left,
+            layout.top,
+            layout.left + 20.0 * scale,
+            layout.top + 12.0 * scale,
+            1.0 * scale,
+        ));
+    }
+    let mut occupied = primary.clone();
+    for fermata in &event.fermatas {
+        let tone_index = fermata.tone_index.unwrap_or(0).min(event.tones.len() - 1);
+        let tone_y = lane_y(event.tones[tone_index].tone.octave);
+        let (_, _, bounds) = fermata_layout(
+            fermata,
+            f64::from(tone_xs[tone_index] + 6),
+            f64::from(tone_y),
+            f64::from(tone_y + 18),
+            event.glyph_scale,
+            &occupied,
+        );
+        primary.push(bounds);
+        occupied.push(bounds);
+    }
+
     EventGeometry { primary, incoming }
 }
 
@@ -6424,6 +7743,9 @@ impl Scene {
                 PathClass::MultipleRest => "multiple-rest",
                 PathClass::MeasureRepeat => "measure-repeat",
                 PathClass::BeatRepeat => "beat-repeat",
+                PathClass::ArticulationMark => "articulation-mark",
+                PathClass::OrnamentMark => "ornament-mark",
+                PathClass::FermataMark => "fermata-mark",
             };
             write!(svg, " class=\"{class}\"").expect("writing to a String cannot fail");
         }
@@ -6518,7 +7840,12 @@ impl Scene {
             .expect("writing to a String cannot fail");
         match command.geometry.style {
             PathStyle::StaffLine => svg.push_str(" stroke=\"#171717\""),
-            PathStyle::MediumStroke => svg.push_str(" stroke=\"#171717\" stroke-width=\"1.5\""),
+            PathStyle::MediumStroke => write!(
+                svg,
+                " stroke=\"{}\" stroke-width=\"1.5\"",
+                command.geometry.color.as_deref().unwrap_or("#171717")
+            )
+            .expect("writing to a String cannot fail"),
             PathStyle::HeavyStroke => svg.push_str(" stroke=\"#171717\" stroke-width=\"3\""),
             PathStyle::DottedStroke => {
                 svg.push_str(" stroke=\"#171717\" stroke-width=\"1.5\" stroke-dasharray=\"1 3\"")
@@ -7594,6 +8921,29 @@ fn render_part_svg(
                         ),
                     );
                 }
+                let mut occupied_fermata_bounds = Vec::new();
+                let rest_occupied_count = 1 + usize::from(event.dots);
+                for (fermata_index, fermata) in event.fermatas.iter().enumerate() {
+                    let occupied = geometry.primary[..rest_occupied_count]
+                        .iter()
+                        .chain(&occupied_fermata_bounds)
+                        .copied()
+                        .collect::<Vec<_>>();
+                    let bounds = draw_fermata(
+                        &mut scene,
+                        format!("fermata-{index}-{fermata_index}"),
+                        fermata,
+                        f64::from(x + 7),
+                        rest_y,
+                        rest_y + 18.0,
+                        event.glyph_scale,
+                        &occupied,
+                    );
+                    occupied_fermata_bounds.push(bounds);
+                    view_top = view_top.min(bounds.top.floor() as i32);
+                    view_bottom = view_bottom.max(bounds.bottom.ceil() as i32);
+                    right = right.max(bounds.right.ceil() as i32);
+                }
                 right = right.max(x + 24);
                 previous_event_geometry = Some(geometry);
                 index += 1;
@@ -7613,6 +8963,21 @@ fn render_part_svg(
                 .collect::<Vec<_>>();
             let leftmost_tone_x = *tone_xs.iter().min().expect("event has tones");
             let rightmost_tone_x = *tone_xs.iter().max().expect("event has tones");
+            let mut event_mark_bounds = event
+                .tones
+                .iter()
+                .enumerate()
+                .map(|(tone_index, tone)| {
+                    let tone_y = lane_y(tone.tone.octave);
+                    ComponentBounds::stroked(
+                        f64::from(tone_xs[tone_index] + 1),
+                        f64::from(tone_y + 2),
+                        f64::from(tone_xs[tone_index] + 11),
+                        f64::from(tone_y + 16),
+                        1.8,
+                    )
+                })
+                .collect::<Vec<_>>();
             let stem_tone_index = stem_tone_index(event, stems_up);
             let stem_octave_y = lane_y(event.tones[stem_tone_index].tone.octave);
             let (full_stem_start, full_stem_end) = stem_endpoints(stem_octave_y, stems_up);
@@ -7630,6 +8995,26 @@ fn render_part_svg(
             };
             let pending_stem_id = stem_id.clone();
             let stem_x = tone_xs[stem_tone_index] + 6;
+            if event.duration_name != "whole" {
+                event_mark_bounds.push(ComponentBounds::stroked(
+                    f64::from(stem_x),
+                    f64::from(stem_start.min(stem_end)),
+                    f64::from(stem_x),
+                    f64::from(stem_start.max(stem_end)),
+                    1.5,
+                ));
+                let flag_levels = unbeamed_flag_levels(event);
+                if !flag_levels.is_empty() {
+                    let flag =
+                        bravura_glyphs::flag(flag_level_count(event.duration_name), stems_up);
+                    event_mark_bounds.push(ComponentBounds::filled(
+                        f64::from(stem_x) + flag.bounds.0 * event.glyph_scale - 0.75,
+                        f64::from(stem_end) + flag.bounds.1 * event.glyph_scale,
+                        f64::from(stem_x) + flag.bounds.2 * event.glyph_scale - 0.75,
+                        f64::from(stem_end) + flag.bounds.3 * event.glyph_scale,
+                    ));
+                }
+            }
             if event.duration_name != "whole" {
                 event_stem_positions[measure_event_index] = Some((stem_x, stem_end, stems_up));
                 view_top = view_top.min(stem_start.min(stem_end));
@@ -7982,6 +9367,80 @@ fn render_part_svg(
                 view_top = view_top.min(octave_y - 20);
                 view_bottom = view_bottom.max(octave_y + 37);
             }
+            for layout in articulation_layouts(event, x, stems_up) {
+                let mark = &event.articulations[layout.mark_index];
+                let (path, style) = articulation_glyph(mark.kind, layout.placement);
+                let left = layout.left.floor() as i32;
+                let top = layout.top.floor() as i32;
+                scene.add_path(
+                    DrawLayer::Event,
+                    format!("articulation-{index}-{}", layout.mark_index),
+                    Some(PathClass::ArticulationMark),
+                    Vec::new(),
+                    PathGeometry::new(Some((left, top)), path, style)
+                        .offset_x(layout.left - f64::from(left))
+                        .offset_y(layout.top - f64::from(top))
+                        .scaled(event.glyph_scale),
+                );
+                event_mark_bounds.push(ComponentBounds::filled(
+                    layout.left,
+                    layout.top,
+                    layout.left + 10.0 * event.glyph_scale,
+                    layout.top + 8.0 * event.glyph_scale,
+                ));
+                view_top = view_top.min(top);
+                view_bottom = view_bottom.max((layout.top + 8.0 * event.glyph_scale).ceil() as i32);
+                right = right.max((layout.left + 10.0 * event.glyph_scale).ceil() as i32);
+            }
+            for layout in ornament_layouts(event, x, stems_up) {
+                let mark = &event.ornaments[layout.mark_index];
+                let scale = event.glyph_scale * mark.scale;
+                let left = layout.left.floor() as i32;
+                let top = layout.top.floor() as i32;
+                scene.add_path(
+                    DrawLayer::Event,
+                    format!("ornament-{index}-{}", layout.mark_index),
+                    Some(PathClass::OrnamentMark),
+                    Vec::new(),
+                    PathGeometry::new(
+                        Some((left, top)),
+                        ornament_glyph(mark.kind, layout.placement),
+                        PathStyle::MediumStroke,
+                    )
+                    .offset_x(layout.left - f64::from(left))
+                    .offset_y(layout.top - f64::from(top))
+                    .scaled(scale)
+                    .colored(&mark.color),
+                );
+                event_mark_bounds.push(ComponentBounds::stroked(
+                    layout.left,
+                    layout.top,
+                    layout.left + 20.0 * scale,
+                    layout.top + 12.0 * scale,
+                    1.0 * scale,
+                ));
+                view_top = view_top.min(top);
+                view_bottom = view_bottom.max((layout.top + 12.0 * scale).ceil() as i32);
+                right = right.max((layout.left + 20.0 * scale).ceil() as i32);
+            }
+            for (fermata_index, fermata) in event.fermatas.iter().enumerate() {
+                let tone_index = fermata.tone_index.unwrap_or(0).min(tone_xs.len() - 1);
+                let tone_y = lane_y(event.tones[tone_index].tone.octave);
+                let bounds = draw_fermata(
+                    &mut scene,
+                    format!("fermata-{index}-{fermata_index}"),
+                    fermata,
+                    f64::from(tone_xs[tone_index] + 6),
+                    f64::from(tone_y),
+                    f64::from(tone_y + 18),
+                    event.glyph_scale,
+                    &event_mark_bounds,
+                );
+                event_mark_bounds.push(bounds);
+                view_top = view_top.min(bounds.top.floor() as i32);
+                view_bottom = view_bottom.max(bounds.bottom.ceil() as i32);
+                right = right.max(bounds.right.ceil() as i32);
+            }
             right = right.max(x + 28);
             previous_event_geometry = Some(geometry);
             index += 1;
@@ -8270,6 +9729,38 @@ fn render_part_svg(
             }
         }
         for barline in &measure.barlines {
+            let mut occupied_fermata_bounds = Vec::new();
+            for (fermata_index, stored_fermata) in barline.fermatas.iter().enumerate() {
+                let mut fermata = stored_fermata.clone();
+                if !fermata.orientation_explicit {
+                    fermata.orientation = if barline.fermatas.len() > 1 && fermata_index > 0 {
+                        FermataOrientation::Inverted
+                    } else {
+                        FermataOrientation::Upright
+                    };
+                }
+                let fermata_x = measure_barline_position(
+                    barline,
+                    measure_start_x as i32,
+                    barline_x,
+                    &event_positions,
+                );
+                let bounds = draw_fermata(
+                    &mut scene,
+                    format!("fermata-barline-{measure_index}-{fermata_index}"),
+                    &fermata,
+                    f64::from(fermata_x),
+                    27.5,
+                    108.5,
+                    1.0,
+                    &occupied_fermata_bounds,
+                );
+                occupied_fermata_bounds.push(bounds);
+                view_top = view_top.min(bounds.top.floor() as i32);
+                view_bottom = view_bottom.max(bounds.bottom.ceil() as i32);
+                right = right.max(bounds.right.ceil() as i32);
+                notation_bounds.push(bounds);
+            }
             if let Some(label) = &barline.ending_start {
                 let start_x = measure_barline_position(
                     barline,
