@@ -6811,6 +6811,7 @@ enum PathClass {
     ArticulationMark,
     OrnamentMark,
     FermataMark,
+    FermataDot,
 }
 
 #[derive(Clone)]
@@ -7213,15 +7214,11 @@ fn ornament_glyph(kind: OrnamentKind, placement: MarkPlacement) -> &'static str 
 
 fn fermata_glyph(shape: FermataShape) -> &'static str {
     match shape {
-        FermataShape::Normal => "M0 10C0 0 18 0 18 10M8 12A1 1 0 1 0 10 12A1 1 0 1 0 8 12Z",
-        FermataShape::Angled => "M1 10L4 2Q10 -2 17 8M8 12A1 1 0 1 0 10 12A1 1 0 1 0 8 12Z",
-        FermataShape::Square => "M1 10V4Q9 0 17 4V10M8 12A1 1 0 1 0 10 12A1 1 0 1 0 8 12Z",
-        FermataShape::DoubleAngled => {
-            "M0 10C0 0 18 0 18 10M2 10C2 3 16 3 16 10M8 12A1 1 0 1 0 10 12A1 1 0 1 0 8 12Z"
-        }
-        FermataShape::DoubleSquare => {
-            "M1 10V4Q9 0 17 4V10M3 10V5Q9 2 15 5V10M8 12A1 1 0 1 0 10 12A1 1 0 1 0 8 12Z"
-        }
+        FermataShape::Normal => "M0 10C0 0 18 0 18 10",
+        FermataShape::Angled => "M1 10L4 2Q10 -2 17 8",
+        FermataShape::Square => "M1 10V4Q9 0 17 4V10",
+        FermataShape::DoubleAngled => "M0 10C0 0 18 0 18 10M2 10C2 3 16 3 16 10",
+        FermataShape::DoubleSquare => "M1 10V4Q9 0 17 4V10M3 10V5Q9 2 15 5V10",
     }
 }
 
@@ -7303,7 +7300,7 @@ fn draw_fermata(
     let path = fermata_glyph(mark.shape);
     scene.add_path(
         DrawLayer::Event,
-        id,
+        id.clone(),
         Some(PathClass::FermataMark),
         Vec::new(),
         PathGeometry::new(Some((left_i, top_i)), path, PathStyle::MediumStroke)
@@ -7312,6 +7309,21 @@ fn draw_fermata(
             .scaled(scale)
             .rotated_180_about_if(mark.orientation == FermataOrientation::Inverted, 9, 6)
             .colored(&mark.color),
+    );
+    scene.add_path(
+        DrawLayer::Event,
+        format!("{id}-dot"),
+        Some(PathClass::FermataDot),
+        Vec::new(),
+        PathGeometry::new(
+            Some((left_i, top_i)),
+            "M8 12A1 1 0 1 0 10 12A1 1 0 1 0 8 12Z",
+            PathStyle::FilledGlyph,
+        )
+        .offset_x(left - f64::from(left_i))
+        .offset_y(top - f64::from(top_i))
+        .scaled(scale)
+        .colored(&mark.color),
     );
     bounds
 }
@@ -7746,6 +7758,7 @@ impl Scene {
                 PathClass::ArticulationMark => "articulation-mark",
                 PathClass::OrnamentMark => "ornament-mark",
                 PathClass::FermataMark => "fermata-mark",
+                PathClass::FermataDot => "fermata-dot",
             };
             write!(svg, " class=\"{class}\"").expect("writing to a String cannot fail");
         }
@@ -7842,7 +7855,7 @@ impl Scene {
             PathStyle::StaffLine => svg.push_str(" stroke=\"#171717\""),
             PathStyle::MediumStroke => write!(
                 svg,
-                " stroke=\"{}\" stroke-width=\"1.5\"",
+                " fill=\"none\" stroke=\"{}\" stroke-width=\"1.5\"",
                 command.geometry.color.as_deref().unwrap_or("#171717")
             )
             .expect("writing to a String cannot fail"),
@@ -7856,7 +7869,12 @@ impl Scene {
             PathStyle::MediumOutline => {
                 svg.push_str(" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"")
             }
-            PathStyle::FilledGlyph => svg.push_str(" fill=\"#171717\" fill-rule=\"evenodd\""),
+            PathStyle::FilledGlyph => write!(
+                svg,
+                " fill=\"{}\" fill-rule=\"evenodd\"",
+                command.geometry.color.as_deref().unwrap_or("#171717")
+            )
+            .expect("writing to a String cannot fail"),
             PathStyle::BravuraGlyph => write!(
                 svg,
                 " fill=\"{}\" fill-rule=\"nonzero\"",

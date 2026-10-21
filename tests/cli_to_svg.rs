@@ -146,6 +146,18 @@ fn renders_articulation_ornament_fermata_example() {
     );
     let svg = fs::read_to_string(directory.join("articulation-ornament-fermata.svg"))
         .expect("read example SVG");
+    for id in ["articulation-0-3", "ornament-0-0", "fermata-0-0"] {
+        let path = svg
+            .lines()
+            .find(|line| line.contains(&format!("id=\"{id}\"")))
+            .unwrap_or_else(|| panic!("missing {id} path in {svg}"));
+        assert!(path.contains("fill=\"none\""), "{path}");
+    }
+    let fermata_dot = svg
+        .lines()
+        .find(|line| line.contains("id=\"fermata-0-0-dot\""))
+        .expect("filled Fermata dot path");
+    assert!(fermata_dot.contains("fill=\"#00aa00\""), "{fermata_dot}");
     assert_eq!(
         svg.matches("class=\"articulation-mark\"").count(),
         6,
@@ -153,6 +165,7 @@ fn renders_articulation_ornament_fermata_example() {
     );
     assert_eq!(svg.matches("class=\"ornament-mark\"").count(), 5, "{svg}");
     assert_eq!(svg.matches("class=\"fermata-mark\"").count(), 5, "{svg}");
+    assert_eq!(svg.matches("class=\"fermata-dot\"").count(), 5, "{svg}");
     assert!(svg.contains("stroke=\"#cc0000\""), "{svg}");
     assert!(svg.contains("stroke=\"#00aa00\""), "{svg}");
     let fermata_line = svg
