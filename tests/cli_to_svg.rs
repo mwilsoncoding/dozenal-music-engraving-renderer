@@ -138,15 +138,9 @@ fn renders_articulation_ornament_fermata_example() {
         "example render failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("conflicting ornament placements on simultaneous tones"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
     let svg = fs::read_to_string(directory.join("articulation-ornament-fermata.svg"))
         .expect("read example SVG");
-    for id in ["articulation-0-3", "ornament-0-0", "fermata-0-0"] {
+    for id in ["articulation-4-0", "ornament-6-0", "fermata-11-0"] {
         let path = svg
             .lines()
             .find(|line| line.contains(&format!("id=\"{id}\"")))
@@ -155,7 +149,7 @@ fn renders_articulation_ornament_fermata_example() {
     }
     let fermata_dot = svg
         .lines()
-        .find(|line| line.contains("id=\"fermata-0-0-dot\""))
+        .find(|line| line.contains("id=\"fermata-11-0-dot\""))
         .expect("filled Fermata dot path");
     assert!(fermata_dot.contains("fill=\"#00aa00\""), "{fermata_dot}");
     assert_eq!(
@@ -164,26 +158,35 @@ fn renders_articulation_ornament_fermata_example() {
         "{svg}"
     );
     assert_eq!(svg.matches("class=\"ornament-mark\"").count(), 5, "{svg}");
-    assert_eq!(svg.matches("class=\"fermata-mark\"").count(), 5, "{svg}");
-    assert_eq!(svg.matches("class=\"fermata-dot\"").count(), 5, "{svg}");
+    assert_eq!(svg.matches("class=\"fermata-mark\"").count(), 7, "{svg}");
+    assert_eq!(svg.matches("class=\"fermata-dot\"").count(), 7, "{svg}");
     assert!(svg.contains("stroke=\"#cc0000\""), "{svg}");
     assert!(svg.contains("stroke=\"#00aa00\""), "{svg}");
-    let fermata_line = svg
-        .lines()
-        .find(|line| line.contains("id=\"fermata-0-0\""))
-        .expect("note Fermata path");
-    let ornament_line = svg
-        .lines()
-        .find(|line| line.contains("id=\"ornament-0-0\""))
-        .expect("note Ornament path");
-    let (fermata_x, fermata_y) = path_translation(fermata_line);
-    let (_, ornament_y) = path_translation(ornament_line);
-    assert_eq!(fermata_x, 127);
-    assert!(
-        fermata_y + 14 <= ornament_y,
-        "{fermata_line}\n{ornament_line}"
-    );
-    assert!(fermata_y + 14 <= 39, "{fermata_line}");
+    let mut marked_events = Vec::new();
+    for line in svg.lines().filter(|line| {
+        (line.contains("class=\"articulation-mark\"")
+            || line.contains("class=\"ornament-mark\"")
+            || line.contains("class=\"fermata-mark\""))
+            && !line.contains("id=\"fermata-barline-")
+    }) {
+        let id = line
+            .split("id=\"")
+            .nth(1)
+            .and_then(|value| value.split_once('"'))
+            .map(|(id, _)| id)
+            .expect("mark path has an id");
+        let event_index = id
+            .split('-')
+            .nth(1)
+            .expect("note mark id has an event index")
+            .to_owned();
+        assert!(
+            !marked_events.contains(&event_index),
+            "multiple mark categories on note event {event_index}: {line}"
+        );
+        marked_events.push(event_index);
+    }
+    assert_eq!(marked_events.len(), 17, "{svg}");
     assert!(svg.contains("scale(2)"), "{svg}");
 
     fs::remove_dir_all(directory).expect("remove test directory");

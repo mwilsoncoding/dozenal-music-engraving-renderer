@@ -12,37 +12,108 @@
       <note>
         <pitch><step>C</step><octave>4</octave></pitch>
         <duration>1</duration><voice>1</voice><type>quarter</type>
-        <notations>
-          <articulations><staccato/><strong-accent type="up"/></articulations>
-          <ornaments><trill-mark placement="above"/></ornaments>
-          <fermata type="upright" default-x="5" default-y="3" color="#00aa00">normal</fermata>
-        </notations>
+        <notations><articulations><staccato/></articulations></notations>
       </note>
       <note>
-        <chord/><pitch><step>E</step><octave>4</octave></pitch>
+        <pitch><step>E</step><octave>4</octave></pitch>
         <duration>1</duration><voice>1</voice><type>quarter</type>
-        <notations>
-          <articulations><staccato/><staccatissimo/><tenuto/></articulations>
-          <ornaments><trill-mark placement="below"/><turn placement="above" color="#cc0000" font-size="24"/></ornaments>
-          <fermata type="inverted">angled</fermata>
-        </notations>
+        <notations><articulations><staccatissimo placement="above"/></articulations></notations>
       </note>
       <note>
         <pitch><step>G</step><octave>4</octave></pitch>
         <duration>1</duration><voice>1</voice><type>quarter</type>
-        <notations>
-          <articulations><accent placement="below"/><strong-accent type="down"/></articulations>
-          <ornaments><inverted-turn/><mordent/><inverted-mordent/></ornaments>
-        </notations>
+        <notations><articulations><accent placement="below"/></articulations></notations>
       </note>
+      <note>
+        <pitch><step>A</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+        <notations><articulations><strong-accent type="up"/></articulations></notations>
+      </note>
+    </measure>
+    <measure number="2">
+      <note>
+        <pitch><step>B</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+        <notations><articulations><tenuto/></articulations></notations>
+      </note>
+      <note>
+        <pitch><step>D</step><octave>5</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+        <notations><articulations><strong-accent type="down"/></articulations></notations>
+      </note>
+      <note>
+        <pitch><step>F</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+        <notations><ornaments><trill-mark placement="above"/></ornaments></notations>
+      </note>
+      <note>
+        <pitch><step>A</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+        <notations><ornaments><turn placement="above" color="#cc0000" font-size="24"/></ornaments></notations>
+      </note>
+    </measure>
+    <measure number="3">
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+        <notations><ornaments><inverted-turn placement="below"/></ornaments></notations>
+      </note>
+      <note>
+        <pitch><step>E</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+        <notations><ornaments><mordent/></ornaments></notations>
+      </note>
+      <note>
+        <pitch><step>G</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+        <notations><ornaments><inverted-mordent/></ornaments></notations>
+      </note>
+      <note>
+        <pitch><step>B</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+        <notations><fermata type="upright" default-x="5" default-y="3" color="#00aa00">normal</fermata></notations>
+      </note>
+    </measure>
+    <measure number="4">
+      <note>
+        <pitch><step>D</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+        <notations><fermata type="inverted">angled</fermata></notations>
+      </note>
+      <note>
+        <pitch><step>F</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+        <notations><fermata type="upright">square</fermata></notations>
+      </note>
+      <note>
+        <pitch><step>A</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+        <notations><fermata type="inverted">double-angled</fermata></notations>
+      </note>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+        <notations><fermata type="upright">double-square</fermata></notations>
+      </note>
+    </measure>
+    <measure number="5">
       <note>
         <rest/><duration>1</duration><voice>1</voice><type>quarter</type>
         <notations><fermata type="inverted">square</fermata></notations>
       </note>
-      <barline location="right">
-        <fermata type="upright">double-angled</fermata>
-        <fermata type="inverted">double-square</fermata>
-      </barline>
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+      </note>
+      <note>
+        <pitch><step>E</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+      </note>
+      <note>
+        <pitch><step>G</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+      </note>
+      <barline location="right"><fermata type="upright">angled</fermata></barline>
     </measure>
   </part>
 </score-partwise>
