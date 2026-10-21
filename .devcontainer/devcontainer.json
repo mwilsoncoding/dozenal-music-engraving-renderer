@@ -37,7 +37,7 @@
       "ghcr.io/devcontainers/features/github-cli": {},
       "ghcr.io/devcontainers/features/node": {},
       "ghcr.io/devcontainers-extra/features/lefthook-asdf": {},
-      "ghcr.io/devcontainers-extra/features/ripgrep": {},
+      // "ghcr.io/devcontainers-extra/features/ripgrep": {},
       "ghcr.io/devcontainers-extra/features/shellcheck": {}
     },
 
