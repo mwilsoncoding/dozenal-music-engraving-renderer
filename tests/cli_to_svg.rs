@@ -10,6 +10,24 @@ fn scratch_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("domunor-cli-{}-{nonce}", std::process::id()))
 }
 
+fn path_translation(line: &str) -> (i32, i32) {
+    let coordinates = line
+        .split("transform=\"translate(")
+        .nth(1)
+        .and_then(|value| value.split_once(')'))
+        .map(|(value, _)| value)
+        .expect("path has a translation");
+    let mut coordinates = coordinates.split_whitespace().map(|value| {
+        value
+            .parse::<i32>()
+            .expect("translation coordinate is an integer")
+    });
+    (
+        coordinates.next().expect("translation has an x coordinate"),
+        coordinates.next().expect("translation has a y coordinate"),
+    )
+}
+
 #[test]
 fn renders_each_input_staff_to_its_own_svg() {
     let directory = scratch_dir();
@@ -4837,6 +4855,43 @@ fn renders_measure_repeat_slashes_between_start_and_stop() {
     );
     let svg = fs::read_to_string(directory.join("measure-repeat.svg")).expect("read SVG");
     assert_eq!(svg.matches("class=\"measure-repeat\"").count(), 2, "{svg}");
+    assert_eq!(
+        svg.matches("class=\"measure-repeat-dot\"").count(),
+        2,
+        "each measure-repeat symbol has exactly two dots: {svg}"
+    );
+    let slash_lines = svg
+        .lines()
+        .filter(|line| line.contains("class=\"measure-repeat\""))
+        .collect::<Vec<_>>();
+    assert_eq!(slash_lines.len(), 2, "{svg}");
+    let upper_dot_line = svg
+        .lines()
+        .find(|line| line.contains("id=\"measure-repeat-dot-1-0\""))
+        .expect("measure-repeat symbol has an upper-left dot");
+    let lower_dot_line = svg
+        .lines()
+        .find(|line| line.contains("id=\"measure-repeat-dot-1-1\""))
+        .expect("measure-repeat symbol has a lower-right dot");
+    let first_slash_position = path_translation(slash_lines[0]);
+    let last_slash_position = path_translation(slash_lines[1]);
+    assert_eq!(
+        last_slash_position.0,
+        first_slash_position.0 + 6,
+        "measure-repeat slash spacing matches beat-repeat"
+    );
+    assert_eq!(
+        path_translation(upper_dot_line),
+        (first_slash_position.0, first_slash_position.1 - 8),
+        "upper-left dot top and left edges align with the first slash"
+    );
+    assert_eq!(
+        path_translation(lower_dot_line),
+        (last_slash_position.0 + 4, last_slash_position.1 + 4),
+        "lower-right dot bottom and right edges align with the last slash"
+    );
+    assert!(upper_dot_line.contains("d=\"M2 0A2 2 0 0 1 2 4A2 2 0 0 1 2 0Z\""));
+    assert!(lower_dot_line.contains("d=\"M2 0A2 2 0 0 1 2 4A2 2 0 0 1 2 0Z\""));
     assert_eq!(svg.matches("class=\"tonehead\"").count(), 2, "{svg}");
 
     fs::remove_dir_all(directory).expect("remove test directory");
@@ -4965,6 +5020,36 @@ fn measure_repeat_start_can_continue_to_part_end() {
     let svg = fs::read_to_string(directory.join("measure-repeat-to-end.svg"))
         .expect("read open-ended repeat SVG");
     assert_eq!(svg.matches("class=\"measure-repeat\"").count(), 1, "{svg}");
+    assert_eq!(
+        svg.matches("class=\"measure-repeat-dot\"").count(),
+        2,
+        "one-slash symbol has exactly two dots: {svg}"
+    );
+    let slash_line = svg
+        .lines()
+        .find(|line| line.contains("class=\"measure-repeat\""))
+        .expect("measure-repeat slash exists");
+    let upper_dot_line = svg
+        .lines()
+        .find(|line| line.contains("id=\"measure-repeat-dot-1-0\""))
+        .expect("measure-repeat symbol has an upper-left dot");
+    let lower_dot_line = svg
+        .lines()
+        .find(|line| line.contains("id=\"measure-repeat-dot-1-1\""))
+        .expect("measure-repeat symbol has a lower-right dot");
+    let slash_position = path_translation(slash_line);
+    assert_eq!(
+        path_translation(upper_dot_line),
+        (slash_position.0, slash_position.1 - 8),
+        "single-slash upper-left dot aligns with the slash bounds"
+    );
+    assert_eq!(
+        path_translation(lower_dot_line),
+        (slash_position.0 + 4, slash_position.1 + 4),
+        "single-slash lower-right dot aligns with the slash bounds"
+    );
+    assert!(upper_dot_line.contains("d=\"M2 0A2 2 0 0 1 2 4A2 2 0 0 1 2 0Z\""));
+    assert!(lower_dot_line.contains("d=\"M2 0A2 2 0 0 1 2 4A2 2 0 0 1 2 0Z\""));
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }

@@ -5885,6 +5885,7 @@ enum PathClass {
     Tie,
     RepeatBarline,
     RepeatDot,
+    MeasureRepeatDot,
     EndingBracket,
     EndingLabel,
     MultipleRest,
@@ -6417,6 +6418,7 @@ impl Scene {
                 PathClass::Tie => "tie",
                 PathClass::RepeatBarline => "repeat-barline",
                 PathClass::RepeatDot => "repeat-dot",
+                PathClass::MeasureRepeatDot => "measure-repeat-dot",
                 PathClass::EndingBracket => "ending-bracket",
                 PathClass::EndingLabel => "ending-label",
                 PathClass::MultipleRest => "multiple-rest",
@@ -8069,11 +8071,12 @@ fn render_part_svg(
             1.0,
         ));
         if let Some(repeat) = &measure.measure_repeat_display {
-            let width = (repeat.slashes.saturating_sub(1) * 12 + 8) as f64;
+            let slash_spacing = 6.0;
+            let width = repeat.slashes.saturating_sub(1) as f64 * slash_spacing + 8.0;
             let center_x = (f64::from(event_origin_x) + f64::from(barline_x)) / 2.0;
             let first_x = center_x - width / 2.0;
             for slash_index in 0..repeat.slashes {
-                let slash_x = first_x + slash_index as f64 * 12.0;
+                let slash_x = first_x + slash_index as f64 * slash_spacing;
                 scene.add_path(
                     DrawLayer::Event,
                     format!("measure-repeat-{measure_index}-{slash_index}"),
@@ -8086,14 +8089,31 @@ fn render_part_svg(
                     ),
                 );
             }
+            let last_slash_x = first_x + (repeat.slashes - 1) as f64 * slash_spacing;
+            let dot_positions = [(first_x, 60), (last_slash_x + 4.0, 72)];
+            for (dot_index, (dot_x, dot_y)) in dot_positions.into_iter().enumerate() {
+                scene.add_path(
+                    DrawLayer::Event,
+                    format!("measure-repeat-dot-{measure_index}-{dot_index}"),
+                    Some(PathClass::MeasureRepeatDot),
+                    Vec::new(),
+                    PathGeometry::new(
+                        Some((dot_x.round() as i32, dot_y)),
+                        "M2 0A2 2 0 0 1 2 4A2 2 0 0 1 2 0Z",
+                        PathStyle::Solid,
+                    ),
+                );
+            }
+            let symbol_left = first_x;
+            let symbol_right = last_slash_x + 8.0;
             notation_bounds.push(ComponentBounds::stroked(
-                first_x,
+                symbol_left,
                 60.0,
-                first_x + width,
+                symbol_right,
                 76.0,
                 2.0,
             ));
-            right = right.max((first_x + width).ceil() as i32);
+            right = right.max(symbol_right.ceil() as i32);
         }
         for (segment_index, segment) in measure.beat_repeat_segments.iter().enumerate() {
             let meter = measure
