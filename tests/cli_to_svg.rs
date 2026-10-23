@@ -28,6 +28,24 @@ fn path_translation(line: &str) -> (i32, i32) {
     )
 }
 
+fn path_translation_f64(line: &str) -> (f64, f64) {
+    let coordinates = line
+        .split("transform=\"translate(")
+        .nth(1)
+        .and_then(|value| value.split_once(')'))
+        .map(|(value, _)| value)
+        .expect("path has a translation");
+    let mut coordinates = coordinates.split_whitespace().map(|value| {
+        value
+            .parse::<f64>()
+            .expect("translation coordinate is numeric")
+    });
+    (
+        coordinates.next().expect("translation has an x coordinate"),
+        coordinates.next().expect("translation has a y coordinate"),
+    )
+}
+
 #[test]
 fn renders_supported_articulation_marks() {
     let directory = scratch_dir();
@@ -91,6 +109,92 @@ fn renders_ornament_and_note_fermata_marks() {
 }
 
 #[test]
+fn centers_trill_above_staff_on_its_tonehead_at_barline_fermata_height() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("trill-placement.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace(
+            "</type>",
+            "</type><notations><ornaments><trill-mark/></ornaments></notations>",
+        )
+        .replace(
+            "</measure>",
+            "<barline><fermata type=\"upright\">normal</fermata></barline></measure>",
+        );
+    fs::write(&input, fixture).expect("write trill placement score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "trill render failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("trill-placement.svg")).expect("read SVG");
+    let trill = svg
+        .lines()
+        .find(|line| line.contains("id=\"ornament-0-0\""))
+        .expect("trill path");
+    let tonehead = svg
+        .lines()
+        .find(|line| line.contains("id=\"tonehead\""))
+        .expect("attached Tonehead path");
+    let barline_fermata = svg
+        .lines()
+        .find(|line| line.contains("id=\"fermata-barline-0-0\""))
+        .expect("barline fermata path");
+    let (trill_x, trill_y) = path_translation_f64(trill);
+    let (tonehead_x, _) = path_translation_f64(tonehead);
+    let (_, fermata_y) = path_translation_f64(barline_fermata);
+    assert_eq!(trill_x + 10.0, tonehead_x + 6.0, "{trill}\n{tonehead}");
+    assert_eq!(trill_y, fermata_y, "{trill}\n{barline_fermata}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn raises_trill_when_a_high_tonehead_intrudes_on_its_default_position() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("high-trill.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace("<octave>4</octave>", "<octave>7</octave>")
+        .replace(
+            "</type>",
+            "</type><notations><ornaments><trill-mark/></ornaments></notations>",
+        );
+    fs::write(&input, fixture).expect("write high trill score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "high trill render failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("high-trill.svg")).expect("read SVG");
+    let trill = svg
+        .lines()
+        .find(|line| line.contains("id=\"ornament-0-0\""))
+        .expect("trill path");
+    let tonehead = svg
+        .lines()
+        .find(|line| line.contains("id=\"tonehead\""))
+        .expect("attached Tonehead path");
+    let (trill_x, trill_y) = path_translation_f64(trill);
+    let (tonehead_x, tonehead_y) = path_translation_f64(tonehead);
+    assert_eq!(trill_x + 10.0, tonehead_x + 6.0, "{trill}\n{tonehead}");
+    assert!(trill_y + 10.0 < tonehead_y, "{trill}\n{tonehead}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn renders_fermata_marks_on_rests_and_barlines() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
@@ -112,6 +216,16 @@ fn renders_fermata_marks_on_rests_and_barlines() {
     );
     let svg = fs::read_to_string(directory.join("rest-barline-fermata.svg")).expect("read SVG");
     assert_eq!(svg.matches("class=\"fermata-mark\"").count(), 2, "{svg}");
+    let angled_fermata = svg
+        .lines()
+        .find(|line| {
+            line.contains("id=\"fermata-barline-") && line.contains("class=\"fermata-mark\"")
+        })
+        .expect("angled barline fermata");
+    assert!(
+        angled_fermata.contains("M1.73 10C1.79 10"),
+        "{angled_fermata}"
+    );
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }

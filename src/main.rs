@@ -7178,27 +7178,45 @@ fn ornament_layouts(event: &Event, x: i32, stems_up: bool) -> Vec<OrnamentLayout
         .iter()
         .enumerate()
         .map(|(mark_index, mark)| {
-            let placement = mark.placement.unwrap_or(default_placement);
+            let is_trill = mark.kind == OrnamentKind::Trill;
+            let placement = if is_trill {
+                MarkPlacement::Above
+            } else {
+                mark.placement.unwrap_or(default_placement)
+            };
             let stack = &mut stack_counts[usize::from(placement == MarkPlacement::Below)];
             let scale = event.glyph_scale * mark.scale;
-            let top = match placement {
-                MarkPlacement::Above => {
-                    topmost_y as f64 - 13.0 * scale - *stack as f64 * 12.0 * scale
+            let top = if is_trill {
+                let default_top = 16.5 - 5.0 * scale;
+                let attached_tone_top = f64::from(lane_y(event.tones[top_tone_index].tone.octave));
+                if default_top + 10.0 * scale > attached_tone_top {
+                    attached_tone_top - 11.5 * scale
+                } else {
+                    default_top
                 }
-                MarkPlacement::Below => {
-                    bottommost_y as f64 + 3.0 * scale + *stack as f64 * 12.0 * scale
+            } else {
+                match placement {
+                    MarkPlacement::Above => {
+                        topmost_y as f64 - 13.0 * scale - *stack as f64 * 12.0 * scale
+                    }
+                    MarkPlacement::Below => {
+                        bottommost_y as f64 + 3.0 * scale + *stack as f64 * 12.0 * scale
+                    }
                 }
             };
-            *stack += 1;
+            if !is_trill {
+                *stack += 1;
+            }
             OrnamentLayout {
                 mark_index,
                 placement,
                 left: f64::from(
-                    tone_xs[match placement {
-                        MarkPlacement::Above => top_tone_index,
-                        MarkPlacement::Below => bottom_tone_index,
+                    tone_xs[if is_trill || placement == MarkPlacement::Above {
+                        top_tone_index
+                    } else {
+                        bottom_tone_index
                     }] + 6,
-                ) - 9.0 * scale,
+                ) - if is_trill { 10.0 } else { 9.0 } * scale,
                 top,
             }
         })
@@ -7219,7 +7237,7 @@ fn ornament_glyph(kind: OrnamentKind, placement: MarkPlacement) -> &'static str 
 fn fermata_glyph(shape: FermataShape) -> &'static str {
     match shape {
         FermataShape::Normal => "M8.94 3.27C15.31 3.27 16.59 7.99 16.89 9.13C16.92 9.22 16.92 9.31 16.95 9.34C17.16 9.75 17.28 9.96 17.58 9.96C17.85 9.96 18 9.84 18 9.54C18 9.46 18 9.37 17.97 9.25C16.12 0.1 9.87 0.04 9 0.04C8.04 0.04 1.85 0.1 0.03 9.25C0 9.37 0 9.49 0 9.57C0 9.87 0.15 9.96 0.39 9.96C0.66 9.96 0.81 9.75 0.99 9.34C1.02 9.31 1.05 9.19 1.08 9.07C1.44 7.84 2.78 3.27 8.94 3.27ZM10.61 8.32C10.61 7.45 9.87 6.7 8.97 6.7C8.1 6.7 7.36 7.45 7.36 8.32C7.36 9.22 8.1 9.96 8.97 9.96C9.87 9.96 10.61 9.22 10.61 8.32Z",
-        FermataShape::Angled => "M1.08 9.08C1.42 7.88 2.74 3.25 8.96 3.25C15.33 3.25 16.63 8.02 16.92 9.13C16.95 9.22 16.95 9.3 16.97 9.32C16.97 9.64 17.31 9.96 17.61 9.96C17.88 9.96 18 9.86 18 9.57C18 9.49 18 9.37 17.98 9.25C16.14 0.11 9.94 0.04 9.04 0.04C3.8 0.04 0.96 4.62 0.02 9.25C0 9.37 0 9.47 0 9.54C0 9.86 0.15 9.96 0.39 9.96C0.69 9.96 0.83 9.76 1 9.32ZM7.64 8.32C7.64 7.44 6.91 6.7 6 6.7C5.12 6.7 4.38 7.44 4.38 8.32C4.38 9.22 5.12 9.96 6 9.96C6.91 9.96 7.64 9.22 7.64 8.32ZM13.62 8.32C13.62 7.44 12.88 6.7 11.98 6.7C11.09 6.7 10.36 7.44 10.36 8.32C10.36 9.22 11.09 9.96 11.98 9.96C12.88 9.96 13.62 9.22 13.62 8.32Z",
+        FermataShape::Angled => "M1.73 10C1.79 10 1.82 9.94 1.93 9.88C2.87 9.09 8.53 3.31 9 3.31C9.47 3.31 15.25 9.21 16.1 9.94C16.16 9.97 16.3 10 16.3 10H17.77C17.77 10 17.86 9.97 17.86 9.91C17.86 9.88 17.83 9.82 17.8 9.79C16.54 8.59 9.79 0 9 0C8.24 0 1.55 8.48 0.2 9.79C0.17 9.82 0.14 9.88 0.14 9.91C0.14 9.97 0.23 10 0.23 10ZM10.58 8.09C10.58 7.24 9.85 6.51 8.97 6.51C8.09 6.51 7.36 7.24 7.36 8.09C7.36 9 8.09 9.74 8.97 9.74C9.85 9.74 10.58 9 10.58 8.09Z",
         FermataShape::Square => "M13.02 0.27C12.98 0.07 12.83 0 12.73 0C11.79 0 5.52 0.05 3.67 9.28C3.64 9.38 3.64 9.48 3.64 9.56C3.64 9.88 3.79 10 4.04 10C4.36 10 4.48 9.8 4.68 9.36C4.7 9.33 4.7 9.23 4.73 9.14C5.02 8 6.28 3.23 12.7 3.23C12.85 3.23 13.02 3.11 13.02 2.84ZM14.36 8.35C14.36 7.46 13.62 6.72 12.73 6.72C11.81 6.72 11.07 7.46 11.07 8.35C11.07 9.26 11.81 10 12.73 10C13.62 10 14.36 9.26 14.36 8.35Z",
         FermataShape::DoubleAngled => "M8.82 0C7.09 0 5.97 1.12 5.97 2.53C5.97 3.9 6.89 4.78 8.22 4.78C9.22 4.78 9.34 5.62 9.34 5.62C9.38 5.78 9.42 5.9 9.42 6.06C9.42 6.63 9.14 7.15 8.78 7.63C8.1 8.51 7.05 9.12 6.97 9.2C6.81 9.28 6.65 9.36 6.65 9.56C6.65 9.6 6.69 9.64 6.69 9.68C6.73 9.92 6.85 10 6.97 10C8.3 10 10.35 8.23 10.99 7.23C11.79 5.98 12.03 4.58 12.03 3.41V3.13C12.03 1.97 11.55 1.16 10.91 0.68C10.31 0.24 9.54 0 8.82 0Z",
         FermataShape::DoubleSquare => "M9.02 10C9.18 10 9.32 9.88 9.36 9.72L11.51 0.43V0.34C11.51 0.18 11.41 0.04 11.23 0H11.15C10.98 0 10.84 0.1 10.8 0.26L9 8.06L7.22 0.26C7.16 0.1 7.02 0 6.85 0H6.77C6.61 0.04 6.49 0.18 6.49 0.32C6.49 0.36 6.49 0.38 6.51 0.43L8.64 9.72C8.68 9.88 8.82 10 9.02 10Z",
