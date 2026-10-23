@@ -140,12 +140,19 @@ fn renders_articulation_ornament_fermata_example() {
     );
     let svg = fs::read_to_string(directory.join("articulation-ornament-fermata.svg"))
         .expect("read example SVG");
-    for id in ["articulation-4-0", "ornament-6-0", "fermata-11-0"] {
+    for id in ["articulation-4-0"] {
         let path = svg
             .lines()
             .find(|line| line.contains(&format!("id=\"{id}\"")))
             .unwrap_or_else(|| panic!("missing {id} path in {svg}"));
         assert!(path.contains("fill=\"none\""), "{path}");
+    }
+    for id in ["ornament-6-0", "fermata-11-0"] {
+        let path = svg
+            .lines()
+            .find(|line| line.contains(&format!("id=\"{id}\"")))
+            .unwrap_or_else(|| panic!("missing {id} path in {svg}"));
+        assert!(path.contains("fill-rule=\"nonzero\""), "{path}");
     }
     let staccato_line = svg
         .lines()
@@ -162,11 +169,44 @@ fn renders_articulation_ornament_fermata_example() {
         tonehead_x + 6,
         "{staccato_line}\n{tonehead_line}"
     );
-    let fermata_dot = svg
+    let fermata_line = svg
         .lines()
-        .find(|line| line.contains("id=\"fermata-11-0-dot\""))
-        .expect("filled Fermata dot path");
-    assert!(fermata_dot.contains("fill=\"#00aa00\""), "{fermata_dot}");
+        .find(|line| line.contains("id=\"fermata-11-0\""))
+        .expect("Bravura fermata path");
+    let trill_line = svg
+        .lines()
+        .find(|line| line.contains("class=\"ornament-mark\"") && line.contains("M10.14 0C10.04 0"))
+        .expect("Bravura trill path");
+    let mordent_line = svg
+        .lines()
+        .find(|line| {
+            line.contains("class=\"ornament-mark\"") && line.contains("M8.22 5.18 5.77 2.14")
+        })
+        .expect("Bravura mordent path");
+    let turn_line = svg
+        .lines()
+        .find(|line| line.contains("M16.13 0C14.78 0") && line.contains("class=\"ornament-mark\""))
+        .expect("Bravura ordinary turn path");
+    let inverted_turn_line = svg
+        .lines()
+        .find(|line| {
+            line.contains("id=\"ornament-")
+                && line.contains("-bar\"")
+                && line.contains("M10 0V9.48")
+        })
+        .expect("inverted turn path with centered bar");
+    assert!(turn_line.contains("fill=\"#cc0000\""), "{turn_line}");
+    assert!(
+        inverted_turn_line.contains("stroke-width=\"1.5\""),
+        "{inverted_turn_line}"
+    );
+    assert!(staccato_line.contains("A1 1"), "{staccato_line}");
+    assert!(fermata_line.contains("fill=\"#00aa00\""), "{fermata_line}");
+    assert!(trill_line.contains("fill-rule=\"nonzero\""), "{trill_line}");
+    assert!(
+        mordent_line.contains("fill-rule=\"nonzero\""),
+        "{mordent_line}"
+    );
     assert_eq!(
         svg.matches("class=\"articulation-mark\"").count(),
         6,
@@ -174,9 +214,9 @@ fn renders_articulation_ornament_fermata_example() {
     );
     assert_eq!(svg.matches("class=\"ornament-mark\"").count(), 5, "{svg}");
     assert_eq!(svg.matches("class=\"fermata-mark\"").count(), 7, "{svg}");
-    assert_eq!(svg.matches("class=\"fermata-dot\"").count(), 7, "{svg}");
-    assert!(svg.contains("stroke=\"#cc0000\""), "{svg}");
-    assert!(svg.contains("stroke=\"#00aa00\""), "{svg}");
+    assert_eq!(svg.matches("class=\"fermata-dot\"").count(), 0, "{svg}");
+    assert!(svg.contains("fill=\"#cc0000\""), "{svg}");
+    assert!(svg.contains("fill=\"#00aa00\""), "{svg}");
     let mut marked_events = Vec::new();
     for line in svg.lines().filter(|line| {
         (line.contains("class=\"articulation-mark\"")
