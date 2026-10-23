@@ -199,10 +199,15 @@ fn renders_fermata_marks_on_rests_and_barlines() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
     let input = directory.join("rest-barline-fermata.musicxml");
-    let fixture = include_str!("fixtures/minimal.musicxml").replace(
-        "</part>",
-        "<measure number=\"2\"><note><rest/><duration>1</duration><voice>1</voice><type>quarter</type><notations><fermata type=\"inverted\">double-square</fermata></notations></note><barline><fermata type=\"upright\">angled</fermata><fermata type=\"upright\">square</fermata></barline></measure></part>",
-    );
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace(
+            "</type>",
+            "</type><notations><fermata type=\"upright\">double-angled</fermata></notations>",
+        )
+        .replace(
+            "</part>",
+            "<measure number=\"2\"><note><rest/><duration>1</duration><voice>1</voice><type>quarter</type><notations><fermata type=\"inverted\">double-square</fermata></notations></note><barline><fermata type=\"upright\">angled</fermata><fermata type=\"upright\">square</fermata></barline></measure></part>",
+        );
     fs::write(&input, fixture).expect("write Rest and barline score");
 
     let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
@@ -215,7 +220,7 @@ fn renders_fermata_marks_on_rests_and_barlines() {
         String::from_utf8_lossy(&output.stderr)
     );
     let svg = fs::read_to_string(directory.join("rest-barline-fermata.svg")).expect("read SVG");
-    assert_eq!(svg.matches("class=\"fermata-mark\"").count(), 3, "{svg}");
+    assert_eq!(svg.matches("class=\"fermata-mark\"").count(), 4, "{svg}");
     let angled_fermata = svg
         .lines()
         .find(|line| {
@@ -231,6 +236,26 @@ fn renders_fermata_marks_on_rests_and_barlines() {
         .find(|line| line.contains("class=\"fermata-mark\"") && line.contains("M1.5 0C0.66 0"))
         .expect("square fermata with Bravura U-shaped contour");
     assert!(square_fermata.contains("ZM10.66 8.35"), "{square_fermata}");
+    let double_angled_fermata = svg
+        .lines()
+        .find(|line| line.contains("class=\"fermata-mark\"") && line.contains("M1.63 10C1.69 10"))
+        .expect("double-angled fermata with nested chevrons");
+    assert!(
+        double_angled_fermata.contains("ZM4.59 10"),
+        "{double_angled_fermata}"
+    );
+    let double_square_fermata = svg
+        .lines()
+        .find(|line| line.contains("class=\"fermata-mark\"") && line.contains("M1.54 0C0.83 0"))
+        .expect("double-square fermata with nested frames");
+    assert!(
+        double_square_fermata.contains("ZM3.89 3.38"),
+        "{double_square_fermata}"
+    );
+    assert!(
+        double_square_fermata.contains("ZM10.56 8.58"),
+        "{double_square_fermata}"
+    );
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
