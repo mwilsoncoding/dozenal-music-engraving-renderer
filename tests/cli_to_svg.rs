@@ -201,7 +201,7 @@ fn renders_fermata_marks_on_rests_and_barlines() {
     let input = directory.join("rest-barline-fermata.musicxml");
     let fixture = include_str!("fixtures/minimal.musicxml").replace(
         "</part>",
-        "<measure number=\"2\"><note><rest/><duration>1</duration><voice>1</voice><type>quarter</type><notations><fermata type=\"inverted\">double-square</fermata></notations></note><barline><fermata type=\"upright\">angled</fermata></barline></measure></part>",
+        "<measure number=\"2\"><note><rest/><duration>1</duration><voice>1</voice><type>quarter</type><notations><fermata type=\"inverted\">double-square</fermata></notations></note><barline><fermata type=\"upright\">angled</fermata><fermata type=\"upright\">square</fermata></barline></measure></part>",
     );
     fs::write(&input, fixture).expect("write Rest and barline score");
 
@@ -215,7 +215,7 @@ fn renders_fermata_marks_on_rests_and_barlines() {
         String::from_utf8_lossy(&output.stderr)
     );
     let svg = fs::read_to_string(directory.join("rest-barline-fermata.svg")).expect("read SVG");
-    assert_eq!(svg.matches("class=\"fermata-mark\"").count(), 2, "{svg}");
+    assert_eq!(svg.matches("class=\"fermata-mark\"").count(), 3, "{svg}");
     let angled_fermata = svg
         .lines()
         .find(|line| {
@@ -226,6 +226,11 @@ fn renders_fermata_marks_on_rests_and_barlines() {
         angled_fermata.contains("M1.73 10C1.79 10"),
         "{angled_fermata}"
     );
+    let square_fermata = svg
+        .lines()
+        .find(|line| line.contains("class=\"fermata-mark\"") && line.contains("M1.5 0C0.66 0"))
+        .expect("square fermata with Bravura U-shaped contour");
+    assert!(square_fermata.contains("ZM10.66 8.35"), "{square_fermata}");
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
