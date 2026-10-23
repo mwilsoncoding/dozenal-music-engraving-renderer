@@ -389,17 +389,22 @@ fn rejects_malformed_unpitched_notehead_styles() {
 }
 
 #[test]
-fn accepts_unpitched_instrument_reference_and_rejects_ties() {
+fn accepts_valid_unpitched_instrument_reference_silently() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
     let fixture = include_str!("fixtures/minimal.musicxml").replace(
         "<pitch><step>C</step><octave>4</octave></pitch>",
         "<unpitched/>",
     );
-    let instrument_score = fixture.replace(
-        "<duration>1</duration>",
-        "<duration>1</duration><instrument id=\"P1-I1\"/>",
-    );
+    let instrument_score = fixture
+        .replace(
+            "<part-name>Music</part-name>",
+            "<part-name>Music</part-name><part-name-display><display-text>Music</display-text></part-name-display><part-abbreviation>Drums</part-abbreviation><part-abbreviation-display><display-text>Drums</display-text></part-abbreviation-display><score-instrument id=\"P1-I1\"><instrument-name>Drum</instrument-name><instrument-abbreviation>Dr</instrument-abbreviation><instrument-sound>drum.percussion</instrument-sound></score-instrument><player><player-name>Player</player-name><player-id>1</player-id></player><midi-instrument id=\"P1-I1\"><midi-channel>10</midi-channel><midi-program>1</midi-program></midi-instrument>",
+        )
+        .replace(
+            "<duration>1</duration>",
+            "<duration>1</duration><instrument id=\"P1-I1\"/>",
+        );
     let instrument_input = directory.join("unpitched-instrument.musicxml");
     fs::write(&instrument_input, instrument_score).expect("write instrument score");
     let instrument_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
@@ -411,24 +416,67 @@ fn accepts_unpitched_instrument_reference_and_rejects_ties() {
         "valid instrument reference failed: {}",
         String::from_utf8_lossy(&instrument_output.stderr)
     );
-    assert!(!String::from_utf8_lossy(&instrument_output.stderr).contains("instrument"));
+    assert!(
+        instrument_output.stderr.is_empty(),
+        "valid instrument reference should be silent: {}",
+        String::from_utf8_lossy(&instrument_output.stderr)
+    );
 
-    let tied_input = directory.join("unpitched-tie.musicxml");
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_ties_on_unpitched_events_contextually() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<pitch><step>C</step><octave>4</octave></pitch>",
+        "<unpitched/>",
+    );
     let tied_score = fixture.replace(
         "<duration>1</duration>",
         "<duration>1</duration><tie type=\"start\"/>",
     );
-    fs::write(&tied_input, tied_score).expect("write tied unpitched score");
-    let tied_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
-        .arg(&tied_input)
+    let input = directory.join("unpitched-tie.musicxml");
+    fs::write(&input, tied_score).expect("write tied unpitched score");
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
         .output()
         .expect("run CLI");
     assert!(
-        !tied_output.status.success()
-            && String::from_utf8_lossy(&tied_output.stderr)
+        !output.status.success()
+            && String::from_utf8_lossy(&output.stderr)
                 .contains("ties are unsupported on unpitched events"),
         "unpitched tie should be rejected contextually: {}",
-        String::from_utf8_lossy(&tied_output.stderr)
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_unpitched_instrument_reference_without_declaration() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<pitch><step>C</step><octave>4</octave></pitch>",
+        "<unpitched/>",
+    );
+    let score = fixture.replace(
+        "<duration>1</duration>",
+        "<duration>1</duration><instrument id=\"P1-I1\"/>",
+    );
+    let input = directory.join("unpitched-undeclared-instrument.musicxml");
+    fs::write(&input, score).expect("write undeclared instrument score");
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        !output.status.success()
+            && String::from_utf8_lossy(&output.stderr).contains("has no matching score-instrument"),
+        "undeclared instrument ID should fail: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 
     fs::remove_dir_all(directory).expect("remove test directory");

@@ -335,6 +335,12 @@ struct Part {
     measures: Vec<Measure>,
 }
 
+struct ScorePart {
+    id: String,
+    name: String,
+    instrument_ids: Vec<String>,
+}
+
 struct SvgViewBox {
     left: i32,
     top: i32,
@@ -868,7 +874,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
     let part_list = root_children[part_list_index];
     require_no_attributes(&elements[part_list])?;
     require_container_text(&elements[part_list])?;
-    let mut score_parts = Vec::new();
+    let mut score_parts: Vec<ScorePart> = Vec::new();
     for score_part in &elements[part_list].children {
         let score_part_element = &elements[*score_part];
         if score_part_element.name != "score-part" {
@@ -878,17 +884,24 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
             ));
         }
         let id = required_attribute(score_part_element, "id")?.to_owned();
-        if score_parts
-            .iter()
-            .any(|(existing_id, _): &(String, String)| existing_id == &id)
-        {
+        if score_parts.iter().any(|score_part| score_part.id == id) {
             return Err(element_diagnostic(
                 score_part_element,
                 format!("duplicate score-part id {id:?}"),
             ));
         }
         require_container_text(score_part_element)?;
-        let [part_name] = exact_children(&elements, *score_part, &["part-name"])?;
+        let children = &score_part_element.children;
+        let Some(part_name) = children
+            .first()
+            .filter(|child| elements[**child].name == "part-name")
+            .copied()
+        else {
+            return Err(element_diagnostic(
+                score_part_element,
+                "unsupported shape: <score-part> must begin with <part-name>".to_owned(),
+            ));
+        };
         let name = leaf_text(&elements[part_name])?.to_owned();
         if let Some(character) = name
             .chars()
@@ -899,7 +912,94 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                 format!("Part name contains unsupported character {character:?}"),
             ));
         }
-        score_parts.push((id, name));
+        let mut instrument_ids = Vec::new();
+        let mut previous_child_order = 0;
+        for declaration in children.iter().skip(1) {
+            let element = &elements[*declaration];
+            let child_order = match element.name.as_str() {
+                "part-name-display" => 1,
+                "part-abbreviation" => 2,
+                "part-abbreviation-display" => 3,
+                "group" => 4,
+                "score-instrument" => 5,
+                "player" => 6,
+                "midi-device" => 7,
+                "midi-instrument" => 8,
+                _ => {
+                    return Err(element_diagnostic(
+                        element,
+                        "unsupported score-part child after <part-name>".to_owned(),
+                    ));
+                }
+            };
+            let repeatable = matches!(
+                element.name.as_str(),
+                "group" | "score-instrument" | "player" | "midi-device" | "midi-instrument"
+            );
+            if child_order < previous_child_order
+                || (child_order == previous_child_order && !repeatable)
+            {
+                return Err(element_diagnostic(
+                    element,
+                    "score-part children are duplicated or out of MusicXML order".to_owned(),
+                ));
+            }
+            previous_child_order = child_order;
+            match element.name.as_str() {
+                "part-abbreviation" => {
+                    leaf_text(element)?;
+                }
+                "score-instrument" => {
+                    validate_attributes(element, &["id"])?;
+                    let instrument_id = required_attribute(element, "id")?.to_owned();
+                    if instrument_ids.contains(&instrument_id) {
+                        return Err(element_diagnostic(
+                            element,
+                            format!("duplicate score-instrument id {instrument_id:?}"),
+                        ));
+                    }
+                    let mut has_instrument_name = false;
+                    for instrument_detail in &element.children {
+                        let detail = &elements[*instrument_detail];
+                        match detail.name.as_str() {
+                            "instrument-name" => {
+                                leaf_text(detail)?;
+                                has_instrument_name = true;
+                            }
+                            "instrument-abbreviation" | "instrument-sound" => {
+                                leaf_text(detail)?;
+                            }
+                            "solo" | "ensemble" | "virtual-instrument" => {}
+                            _ => {
+                                return Err(element_diagnostic(
+                                    detail,
+                                    "unsupported score-instrument detail".to_owned(),
+                                ));
+                            }
+                        }
+                    }
+                    if !has_instrument_name {
+                        return Err(element_diagnostic(
+                            element,
+                            "score-instrument requires <instrument-name>".to_owned(),
+                        ));
+                    }
+                    instrument_ids.push(instrument_id);
+                }
+                "part-name-display"
+                | "part-abbreviation-display"
+                | "group"
+                | "player"
+                | "midi-device"
+                | "midi-instrument" => {}
+                _ => unreachable!("score-part child order validates child names"),
+            }
+        }
+        score_parts.push(ScorePart {
+            id,
+            name,
+            instrument_ids,
+        });
     }
     if score_parts.is_empty() {
         return Err(element_diagnostic(
@@ -926,7 +1026,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                 format!("duplicate Part id {id:?}"),
             ));
         }
-        if !score_parts.iter().any(|(score_id, _)| score_id == id) {
+        if !score_parts.iter().any(|score_part| score_part.id == id) {
             return Err(element_diagnostic(
                 part_element,
                 format!("Part id {id:?} has no matching score-part"),
@@ -935,19 +1035,25 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
         part_elements.push((id, *part));
     }
     if part_elements.len() != score_parts.len() {
-        let (missing_id, _) = score_parts
+        let missing_id = score_parts
             .iter()
-            .find(|(score_id, _)| !part_elements.iter().any(|(part_id, _)| part_id == score_id))
+            .find(|score_part| {
+                !part_elements
+                    .iter()
+                    .any(|(part_id, _)| part_id == &score_part.id)
+            })
             .expect("different counts imply an unmatched score-part");
         return Err(element_diagnostic(
             &elements[part_list],
-            format!("score-part id {missing_id:?} has no matching Part"),
+            format!("score-part id {:?} has no matching Part", missing_id.id),
         ));
     }
     let mut parts = Vec::new();
     let mut expected_measure_count = None;
     let mut warnings = Vec::new();
-    for (score_part_id, name) in &score_parts {
+    for score_part in &score_parts {
+        let score_part_id = &score_part.id;
+        let name = &score_part.name;
         let (_, part) = part_elements
             .iter()
             .find(|(part_id, _)| part_id == score_part_id)
@@ -1232,6 +1338,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                             divisions,
                             &active_staff_states,
                             &active_tuplets,
+                            &score_part.instrument_ids,
                             NoteParseOptions {
                                 input_staff_count,
                                 note_size_scales,
@@ -5223,6 +5330,7 @@ fn parse_note(
     divisions: u32,
     input_staff_states: &[InputStaffState],
     active_tuplets: &VoiceState<Option<ActiveTuplet>>,
+    score_instrument_ids: &[String],
     options: NoteParseOptions,
     warnings: &mut Vec<String>,
 ) -> Result<ParsedNote, String> {
@@ -5407,10 +5515,14 @@ fn parse_note(
     {
         let instrument = &elements[children[position]];
         validate_attributes(instrument, &["id"])?;
-        if required_attribute(instrument, "id")?.is_empty() {
+        let instrument_id = required_attribute(instrument, "id")?;
+        if !score_instrument_ids
+            .iter()
+            .any(|declared| declared == instrument_id)
+        {
             return Err(element_diagnostic(
                 instrument,
-                "instrument id may not be empty".to_owned(),
+                format!("instrument id {instrument_id:?} has no matching score-instrument"),
             ));
         }
         require_container_text(instrument)?;
