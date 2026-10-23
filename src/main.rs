@@ -7741,16 +7741,16 @@ fn event_geometry(
             .max()
             .expect("chord has a tone");
         primary.push(ComponentBounds::stroked(
-            f64::from(leftmost_tone_x - 9),
+            f64::from(leftmost_tone_x - 8),
             f64::from(top),
-            f64::from(leftmost_tone_x - 3),
+            f64::from(leftmost_tone_x - 2),
             f64::from(bottom),
             1.5,
         ));
         primary.push(ComponentBounds::stroked(
-            f64::from(rightmost_tone_x + 13),
+            f64::from(rightmost_tone_x + 14),
             f64::from(top),
-            f64::from(rightmost_tone_x + 19),
+            f64::from(rightmost_tone_x + 20),
             f64::from(bottom),
             1.5,
         ));
@@ -9474,12 +9474,12 @@ fn render_part_svg(
                         None,
                         format!(
                             "M{} {top}C{} {} {} {} {} {bottom}",
-                            leftmost_tone_x - 3,
-                            leftmost_tone_x - 9,
+                            leftmost_tone_x - 2,
+                            leftmost_tone_x - 8,
                             top + 3,
-                            leftmost_tone_x - 9,
+                            leftmost_tone_x - 8,
                             bottom - 3,
-                            leftmost_tone_x - 3
+                            leftmost_tone_x - 2
                         ),
                         PathStyle::MediumOutline,
                     ),
@@ -9493,17 +9493,17 @@ fn render_part_svg(
                         None,
                         format!(
                             "M{} {top}C{} {} {} {} {} {bottom}",
-                            rightmost_tone_x + 13,
-                            rightmost_tone_x + 19,
+                            rightmost_tone_x + 14,
+                            rightmost_tone_x + 20,
                             top + 3,
-                            rightmost_tone_x + 19,
+                            rightmost_tone_x + 20,
                             bottom - 3,
-                            rightmost_tone_x + 13
+                            rightmost_tone_x + 14
                         ),
                         PathStyle::MediumOutline,
                     ),
                 );
-                right = right.max(rightmost_tone_x + 22);
+                right = right.max(rightmost_tone_x + 23);
             }
             for (tone_index, tone_event) in event.tones.iter().enumerate() {
                 let tone = tone_event.tone;

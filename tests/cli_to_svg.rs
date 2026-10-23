@@ -4973,6 +4973,71 @@ fn aligns_chord_stem_with_horizontal_midpoint_of_toneheads() {
 }
 
 #[test]
+fn centers_chord_parentheticals_on_tonehead_group_midpoint() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("chord-parenthetical-midpoint.musicxml");
+    let notes = ["C", "D", "E"]
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            let chord_marker = if index == 0 { "" } else { "<chord/>" };
+            format!(
+                "<note>{chord_marker}<pitch><step>{step}</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>"
+            )
+        })
+        .collect::<String>();
+    let first_note = "<note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(first_note, &notes);
+    fs::write(&input, fixture).expect("write chord score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "chord render failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg =
+        fs::read_to_string(directory.join("chord-parenthetical-midpoint.svg")).expect("read SVG");
+    let tonehead_xs = svg
+        .lines()
+        .filter(|line| line.contains("class=\"tonehead\""))
+        .filter_map(|line| {
+            line.split("transform=\"translate(")
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .parse::<i32>()
+                .ok()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tonehead_xs.len(), 3, "{svg}");
+    let tonehead_midpoint_twice = tonehead_xs.iter().min().expect("leftmost tonehead")
+        + tonehead_xs.iter().max().expect("rightmost tonehead")
+        + 12;
+    let parenthetical_x = |side: &str| {
+        svg.lines()
+            .find(|line| line.contains(&format!("id=\"chord-bracket-{side}-0\"")))
+            .and_then(|line| line.split(" d=\"M").nth(1))
+            .and_then(|path| path.split_whitespace().next())
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap_or_else(|| panic!("{side} chord parenthetical missing: {svg}"))
+    };
+    let left_parenthetical_x = parenthetical_x("left");
+    let right_parenthetical_x = parenthetical_x("right");
+    assert_eq!(
+        left_parenthetical_x + right_parenthetical_x,
+        tonehead_midpoint_twice,
+        "parentheticals must be equidistant from the tonehead-group midpoint: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn engraves_stacked_chord_tones_as_one_event_with_shared_rhythm_geometry() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
