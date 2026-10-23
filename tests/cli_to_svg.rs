@@ -82,6 +82,359 @@ fn renders_supported_articulation_marks() {
 }
 
 #[test]
+fn centers_unpitched_mark_on_middle_staff_line_by_default() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("unpitched-center.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<pitch><step>C</step><octave>4</octave></pitch>",
+        "<unpitched/>",
+    );
+    fs::write(&input, fixture).expect("write unpitched score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "unpitched render failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("unpitched-center.svg")).expect("read SVG");
+    let mark = svg
+        .lines()
+        .find(|line| line.contains("class=\"unpitched-mark\""))
+        .expect("unpitched X mark");
+    let (_, mark_y) = path_translation_f64(mark);
+    assert_eq!(mark_y + 9.0, 68.0, "{mark}");
+    assert!(mark.contains("M2 2L10 16M10 2L2 16"), "{mark}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_unpitched_events_example() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("unpitched-events.musicxml");
+    fs::write(
+        &input,
+        include_str!("../examples/unpitched-events/unpitched-events.musicxml"),
+    )
+    .expect("write example score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "example render failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("unpitched-events.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"unpitched-mark\"").count(), 4, "{svg}");
+    let marks = svg
+        .lines()
+        .filter(|line| line.contains("class=\"unpitched-mark\""))
+        .collect::<Vec<_>>();
+    let positions = marks
+        .iter()
+        .map(|mark| path_translation_f64(mark))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        positions.iter().map(|(_, y)| *y).collect::<Vec<_>>(),
+        [59.0, 49.0, 49.0, 29.0]
+    );
+    assert_ne!(
+        positions[1].0, positions[2].0,
+        "chord X marks must not overlap"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("display-step is ignored"));
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_unpitched_chord_members_and_rejects_mixed_chords() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let fixture = include_str!("fixtures/minimal.musicxml");
+    let first_note = "<note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let chord_note = "<note><chord/><unpitched/><duration>1</duration><voice>1</voice><type>quarter</type></note>";
+
+    let unpitched_chord_input = directory.join("unpitched-chord.musicxml");
+    let unpitched_chord = fixture
+        .replace(
+            first_note,
+            "<note><unpitched/><duration>1</duration><voice>1</voice><type>quarter</type></note>",
+        )
+        .replace("</measure>", &format!("{chord_note}</measure>"));
+    fs::write(&unpitched_chord_input, unpitched_chord).expect("write unpitched chord");
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&unpitched_chord_input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "unpitched chord failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("unpitched-chord.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"unpitched-mark\"").count(), 2, "{svg}");
+
+    let mixed_chord_input = directory.join("mixed-chord.musicxml");
+    let mixed_chord = fixture.replace("</measure>", &format!("{chord_note}</measure>"));
+    fs::write(&mixed_chord_input, mixed_chord).expect("write mixed chord");
+    let mixed_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&mixed_chord_input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        !mixed_output.status.success()
+            && String::from_utf8_lossy(&mixed_output.stderr)
+                .contains("chord may not mix pitched and unpitched events"),
+        "mixed chord should be rejected: {}",
+        String::from_utf8_lossy(&mixed_output.stderr)
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn accepts_x_as_the_unpitched_notehead_without_warning() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<pitch><step>C</step><octave>4</octave></pitch>",
+        "<unpitched/>",
+    );
+    let plain_input = directory.join("unpitched-x.musicxml");
+    fs::write(
+        &plain_input,
+        fixture.replace(
+            "<type>quarter</type>",
+            "<type>quarter</type><notehead>x</notehead>",
+        ),
+    )
+    .expect("write unpitched X score");
+    let plain_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&plain_input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        plain_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&plain_output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&plain_output.stderr).contains("notehead"),
+        "plain X notehead should not warn: {}",
+        String::from_utf8_lossy(&plain_output.stderr)
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn applies_unpitched_notehead_color_and_font_size() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<pitch><step>C</step><octave>4</octave></pitch>",
+        "<unpitched/>",
+    );
+    let medium_input = directory.join("unpitched-medium.musicxml");
+    fs::write(
+        &medium_input,
+        fixture.replace(
+            "<type>quarter</type>",
+            "<type>quarter</type><notehead color=\"#ff0000\">x</notehead>",
+        ),
+    )
+    .expect("write medium X score");
+    let medium_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&medium_input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        medium_output.status.success(),
+        "medium X notehead failed: {}",
+        String::from_utf8_lossy(&medium_output.stderr)
+    );
+    let medium_svg =
+        fs::read_to_string(directory.join("unpitched-medium.svg")).expect("read medium SVG");
+
+    let styled_input = directory.join("unpitched-styled.musicxml");
+    fs::write(
+        &styled_input,
+        fixture.replace(
+            "<type>quarter</type>",
+            "<type>quarter</type><notehead color=\"#ff0000\" font-size=\"large\">x</notehead>",
+        ),
+    )
+    .expect("write styled unpitched score");
+    let styled_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&styled_input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        styled_output.status.success(),
+        "styled X notehead failed: {}",
+        String::from_utf8_lossy(&styled_output.stderr)
+    );
+    let styled_svg =
+        fs::read_to_string(directory.join("unpitched-styled.svg")).expect("read styled SVG");
+    let styled_mark = styled_svg
+        .lines()
+        .find(|line| line.contains("class=\"unpitched-mark\""))
+        .expect("styled X mark");
+    assert!(styled_mark.contains("stroke=\"#ff0000\""), "{styled_mark}");
+    assert_ne!(
+        styled_svg, medium_svg,
+        "large X should render larger than medium X"
+    );
+    assert!(
+        !String::from_utf8_lossy(&styled_output.stderr).contains("notehead"),
+        "supported X styling should not warn: {}",
+        String::from_utf8_lossy(&styled_output.stderr)
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn warns_and_falls_back_for_alternate_unpitched_notehead() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<pitch><step>C</step><octave>4</octave></pitch>",
+        "<unpitched/>",
+    );
+    let alternate_input = directory.join("unpitched-alternate.musicxml");
+    fs::write(
+        &alternate_input,
+        fixture.replace(
+            "<type>quarter</type>",
+            "<type>quarter</type><notehead>diamond</notehead>",
+        ),
+    )
+    .expect("write alternate notehead score");
+    let alternate_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&alternate_input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        alternate_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&alternate_output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&alternate_output.stderr).contains("unpitched notehead"));
+    let alternate_svg =
+        fs::read_to_string(directory.join("unpitched-alternate.svg")).expect("read alternate SVG");
+    assert!(alternate_svg.contains("M2 2L10 16M10 2L2 16"));
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_malformed_unpitched_notehead_styles() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<pitch><step>C</step><octave>4</octave></pitch>",
+        "<unpitched/>",
+    );
+    let malformed_input = directory.join("unpitched-malformed.musicxml");
+    fs::write(
+        &malformed_input,
+        fixture.replace(
+            "<type>quarter</type>",
+            "<type>quarter</type><notehead filled=\"maybe\">x</notehead>",
+        ),
+    )
+    .expect("write malformed notehead score");
+    let malformed_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&malformed_input)
+        .output()
+        .expect("run CLI");
+    assert!(!malformed_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&malformed_output.stderr).contains("filled must be 'yes' or 'no'")
+    );
+
+    let invalid_font_size_input = directory.join("unpitched-invalid-font-size.musicxml");
+    fs::write(
+        &invalid_font_size_input,
+        fixture.replace(
+            "<type>quarter</type>",
+            "<type>quarter</type><notehead font-size=\"0\">x</notehead>",
+        ),
+    )
+    .expect("write invalid font-size score");
+    let invalid_font_size_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&invalid_font_size_input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        !invalid_font_size_output.status.success()
+            && String::from_utf8_lossy(&invalid_font_size_output.stderr)
+                .contains("invalid notehead font-size"),
+        "non-positive notehead font-size should fail: {}",
+        String::from_utf8_lossy(&invalid_font_size_output.stderr)
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn accepts_unpitched_instrument_reference_and_rejects_ties() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<pitch><step>C</step><octave>4</octave></pitch>",
+        "<unpitched/>",
+    );
+    let instrument_score = fixture.replace(
+        "<duration>1</duration>",
+        "<duration>1</duration><instrument id=\"P1-I1\"/>",
+    );
+    let instrument_input = directory.join("unpitched-instrument.musicxml");
+    fs::write(&instrument_input, instrument_score).expect("write instrument score");
+    let instrument_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&instrument_input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        instrument_output.status.success(),
+        "valid instrument reference failed: {}",
+        String::from_utf8_lossy(&instrument_output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&instrument_output.stderr).contains("instrument"));
+
+    let tied_input = directory.join("unpitched-tie.musicxml");
+    let tied_score = fixture.replace(
+        "<duration>1</duration>",
+        "<duration>1</duration><tie type=\"start\"/>",
+    );
+    fs::write(&tied_input, tied_score).expect("write tied unpitched score");
+    let tied_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&tied_input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        !tied_output.status.success()
+            && String::from_utf8_lossy(&tied_output.stderr)
+                .contains("ties are unsupported on unpitched events"),
+        "unpitched tie should be rejected contextually: {}",
+        String::from_utf8_lossy(&tied_output.stderr)
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn renders_ornament_and_note_fermata_marks() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
@@ -3631,12 +3984,19 @@ fn grace_and_cue_notes_follow_their_distinct_cursor_rules() {
         .output()
         .expect("run CLI for Grace Unpitched");
     assert!(
-        !grace_unpitched_output.status.success()
-            && String::from_utf8_lossy(&grace_unpitched_output.stderr)
-                .contains("Grace Notes require a pitched event"),
-        "Grace Unpitched should be rejected: {}",
+        grace_unpitched_output.status.success(),
+        "Grace Unpitched failed: {}",
         String::from_utf8_lossy(&grace_unpitched_output.stderr)
     );
+    let grace_unpitched_svg = fs::read_to_string(directory.join("grace-unpitched.svg"))
+        .expect("read Grace Unpitched SVG");
+    assert!(
+        grace_unpitched_svg.lines().any(|line| {
+            line.contains("class=\"unpitched-mark\"") && line.contains("scale(0.6)")
+        }),
+        "Grace Unpitched should use Grace scale: {grace_unpitched_svg}"
+    );
+    assert!(grace_unpitched_svg.contains("class=\"grace-slash\""));
 
     let grace_rest_input = directory.join("grace-rest.musicxml");
     let grace_rest_source = fixture.replace(

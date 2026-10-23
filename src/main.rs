@@ -53,9 +53,22 @@ struct Event {
 struct ToneEvent {
     tone: Tone,
     is_unpitched: bool,
+    display_octave: Option<u8>,
+    notehead_color: Option<String>,
+    notehead_scale: f64,
     tie_start: bool,
     tie_stop: bool,
     input_staff: u32,
+}
+
+impl ToneEvent {
+    fn glyph_top(&self) -> i32 {
+        if self.is_unpitched && self.display_octave.is_none() {
+            59
+        } else {
+            lane_y(self.tone.octave)
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1373,10 +1386,17 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                     "rest chords are unsupported".to_owned(),
                                 )
                             })?;
-                            if event
-                                .tones
-                                .iter()
-                                .any(|existing| existing.tone == tone.tone)
+                            if event.tones[0].is_unpitched != tone.is_unpitched {
+                                return Err(element_diagnostic(
+                                    &elements[chord_marker],
+                                    "chord may not mix pitched and unpitched events".to_owned(),
+                                ));
+                            }
+                            if !tone.is_unpitched
+                                && event
+                                    .tones
+                                    .iter()
+                                    .any(|existing| existing.tone == tone.tone)
                             {
                                 return Err(element_diagnostic(
                                     &elements[chord_marker],
@@ -5329,12 +5349,6 @@ fn parse_note(
             ));
         }
     }
-    if is_grace && is_unpitched {
-        return Err(element_diagnostic(
-            &elements[event_element],
-            "Grace Notes require a pitched event".to_owned(),
-        ));
-    }
     if is_grace && is_rest {
         return Err(element_diagnostic(
             &elements[event_element],
@@ -5384,6 +5398,27 @@ fn parse_note(
                     "tie type must be one unique 'start' and/or 'stop'".to_owned(),
                 ));
             }
+        }
+        position += 1;
+    }
+    while children
+        .get(position)
+        .is_some_and(|child| elements[*child].name == "instrument")
+    {
+        let instrument = &elements[children[position]];
+        validate_attributes(instrument, &["id"])?;
+        if required_attribute(instrument, "id")?.is_empty() {
+            return Err(element_diagnostic(
+                instrument,
+                "instrument id may not be empty".to_owned(),
+            ));
+        }
+        require_container_text(instrument)?;
+        if !instrument.children.is_empty() {
+            return Err(element_diagnostic(
+                instrument,
+                "<instrument/> must be empty".to_owned(),
+            ));
         }
         position += 1;
     }
@@ -5618,15 +5653,17 @@ fn parse_note(
     if let Some(stem) = stem {
         validate_explicit_stem(elements, stem, warnings)?;
     }
-    if let Some(notehead) = notehead {
+    let (notehead_color, notehead_scale) = if let Some(notehead) = notehead {
         if is_rest {
             return Err(element_diagnostic(
                 &elements[notehead],
                 "pitched notehead styles are not supported on rests".to_owned(),
             ));
         }
-        validate_pitched_notehead(elements, notehead, duration_name, warnings)?;
-    }
+        validate_notehead_style(elements, notehead, duration_name, is_unpitched, warnings)?
+    } else {
+        (None, 1.0)
+    };
     if dot_count > 2 {
         return Err(element_diagnostic(
             note_element,
@@ -5649,6 +5686,12 @@ fn parse_note(
         return Err(element_diagnostic(
             note_element,
             "ties may connect only pitched events".to_owned(),
+        ));
+    }
+    if is_unpitched && (tie_start || tie_stop) {
+        return Err(element_diagnostic(
+            &elements[event_element],
+            "ties are unsupported on unpitched events".to_owned(),
         ));
     }
     let maximum_beam_level = match duration_name {
@@ -5748,13 +5791,17 @@ fn parse_note(
     let tones = if is_rest {
         Vec::new()
     } else {
+        let (tone, display_octave) = if is_unpitched {
+            parse_unpitched(elements, event_element, warnings)?
+        } else {
+            (parse_pitch(elements, event_element, transposition)?, None)
+        };
         vec![ToneEvent {
-            tone: if is_unpitched {
-                parse_unpitched(elements, event_element, warnings)?
-            } else {
-                parse_pitch(elements, event_element, transposition)?
-            },
+            tone,
             is_unpitched,
+            display_octave,
+            notehead_color,
+            notehead_scale,
             tie_start,
             tie_stop,
             input_staff,
@@ -5813,12 +5860,13 @@ fn validate_explicit_stem(
     Ok(())
 }
 
-fn validate_pitched_notehead(
+fn validate_notehead_style(
     elements: &[Element],
     notehead: usize,
     duration_name: &str,
+    is_unpitched: bool,
     warnings: &mut Vec<String>,
-) -> Result<(), String> {
+) -> Result<(Option<String>, f64), String> {
     const NOTEHEAD_VALUES: &[&str] = &[
         "slash",
         "triangle",
@@ -5877,7 +5925,10 @@ fn validate_pitched_notehead(
         ));
     }
 
-    let mut has_unsupported_presentation = value != "normal";
+    let default_notehead = if is_unpitched { "x" } else { "normal" };
+    let mut has_unsupported_presentation = value != default_notehead;
+    let mut notehead_color = None;
+    let mut notehead_scale = 1.0;
     let default_filled = !matches!(duration_name, "whole" | "half");
     for (attribute, default) in [
         ("filled", if default_filled { "yes" } else { "no" }),
@@ -5908,13 +5959,19 @@ fn validate_pitched_notehead(
         }
     }
     if let Some(font_size) = optional_attribute(element, "font-size") {
-        if !valid_musicxml_font_size(font_size) {
+        let parsed_font_size =
+            parse_text_font_size(font_size).filter(|size| size.is_finite() && *size > 0.0);
+        if !valid_musicxml_font_size(font_size) || parsed_font_size.is_none() {
             return Err(element_diagnostic(
                 element,
                 format!("invalid notehead font-size {font_size:?}"),
             ));
         }
-        has_unsupported_presentation |= font_size != "medium";
+        if is_unpitched {
+            notehead_scale = parsed_font_size.expect("validated font size") / 16.0;
+        } else {
+            has_unsupported_presentation |= font_size != "medium";
+        }
     }
     if optional_attribute(element, "font-family").is_some_and(|family| !family.is_empty()) {
         has_unsupported_presentation = true;
@@ -5926,7 +5983,11 @@ fn validate_pitched_notehead(
                 "notehead color must be a six-digit hexadecimal color".to_owned(),
             ));
         }
-        has_unsupported_presentation |= !color.eq_ignore_ascii_case("#000000");
+        if is_unpitched {
+            notehead_color = Some(color.to_ascii_lowercase());
+        } else {
+            has_unsupported_presentation |= !color.eq_ignore_ascii_case("#000000");
+        }
     }
     if let Some(smufl) = optional_attribute(element, "smufl") {
         if !valid_smufl_glyph_name(smufl) {
@@ -5940,10 +6001,14 @@ fn validate_pitched_notehead(
     if has_unsupported_presentation {
         warnings.push(element_diagnostic(
             element,
-            "notehead presentation is not supported; numeric Tonehead is retained".to_owned(),
+            if is_unpitched {
+                "unpitched notehead style is not supported; X mark is retained".to_owned()
+            } else {
+                "notehead presentation is not supported; numeric Tonehead is retained".to_owned()
+            },
         ));
     }
-    Ok(())
+    Ok((notehead_color, notehead_scale))
 }
 
 fn validate_accidental_display(
@@ -6284,7 +6349,7 @@ fn parse_unpitched(
     elements: &[Element],
     unpitched: usize,
     warnings: &mut Vec<String>,
-) -> Result<Tone, String> {
+) -> Result<(Tone, Option<u8>), String> {
     let element = &elements[unpitched];
     require_no_attributes(element)?;
     require_container_text(element)?;
@@ -6313,10 +6378,10 @@ fn parse_unpitched(
     if let Some(display_step) = display_step {
         warnings.push(element_diagnostic(
             &elements[display_step],
-            "unpitched display-step is ignored; the X mark is centered on the staff".to_owned(),
+            "unpitched display-step is ignored".to_owned(),
         ));
     }
-    let octave = display_octave
+    let display_octave = display_octave
         .map(|display_octave| {
             let value = leaf_text(&elements[display_octave])?
                 .parse::<u8>()
@@ -6330,9 +6395,14 @@ fn parse_unpitched(
                 })?;
             Ok::<_, String>(value)
         })
-        .transpose()?
-        .unwrap_or(5);
-    Ok(Tone { octave, value: 0 })
+        .transpose()?;
+    Ok((
+        Tone {
+            octave: display_octave.unwrap_or(5),
+            value: 0,
+        },
+        display_octave,
+    ))
 }
 
 fn transpose_semitones(elements: &[Element], transpose: usize) -> Result<i32, String> {
@@ -6987,7 +7057,7 @@ fn default_mark_placement(event: &Event, stems_up: bool) -> MarkPlacement {
         let tone_center = event
             .tones
             .iter()
-            .map(|tone| f64::from(lane_y(tone.tone.octave) + 9))
+            .map(|tone| f64::from(tone.glyph_top() + 9))
             .sum::<f64>()
             / event.tones.len() as f64;
         if tone_center < 68.0 {
@@ -7025,26 +7095,26 @@ fn articulation_layouts(event: &Event, x: i32, stems_up: bool) -> Vec<Articulati
         .tones
         .iter()
         .enumerate()
-        .min_by_key(|(_, tone)| lane_y(tone.tone.octave))
+        .min_by_key(|(_, tone)| tone.glyph_top())
         .map(|(index, _)| index)
         .expect("event has tones");
     let bottom_tone_index = event
         .tones
         .iter()
         .enumerate()
-        .max_by_key(|(_, tone)| lane_y(tone.tone.octave))
+        .max_by_key(|(_, tone)| tone.glyph_top())
         .map(|(index, _)| index)
         .expect("event has tones");
     let topmost_y = event
         .tones
         .iter()
-        .map(|tone| lane_y(tone.tone.octave))
+        .map(ToneEvent::glyph_top)
         .min()
         .expect("event has tones");
     let bottommost_y = event
         .tones
         .iter()
-        .map(|tone| lane_y(tone.tone.octave) + 18)
+        .map(|tone| tone.glyph_top() + 18)
         .max()
         .expect("event has tones");
     let default_placement = default_mark_placement(event, stems_up);
@@ -7150,26 +7220,26 @@ fn ornament_layouts(event: &Event, x: i32, stems_up: bool) -> Vec<OrnamentLayout
         .tones
         .iter()
         .enumerate()
-        .min_by_key(|(_, tone)| lane_y(tone.tone.octave))
+        .min_by_key(|(_, tone)| tone.glyph_top())
         .map(|(index, _)| index)
         .expect("event has tones");
     let bottom_tone_index = event
         .tones
         .iter()
         .enumerate()
-        .max_by_key(|(_, tone)| lane_y(tone.tone.octave))
+        .max_by_key(|(_, tone)| tone.glyph_top())
         .map(|(index, _)| index)
         .expect("event has tones");
     let topmost_y = event
         .tones
         .iter()
-        .map(|tone| lane_y(tone.tone.octave))
+        .map(ToneEvent::glyph_top)
         .min()
         .expect("event has tones");
     let bottommost_y = event
         .tones
         .iter()
-        .map(|tone| lane_y(tone.tone.octave) + 18)
+        .map(|tone| tone.glyph_top() + 18)
         .max()
         .expect("event has tones");
     let default_placement = default_mark_placement(event, stems_up);
@@ -7188,7 +7258,7 @@ fn ornament_layouts(event: &Event, x: i32, stems_up: bool) -> Vec<OrnamentLayout
             let scale = event.glyph_scale * mark.scale;
             let top = if is_trill {
                 let default_top = 16.5 - 5.0 * scale;
-                let attached_tone_top = f64::from(lane_y(event.tones[top_tone_index].tone.octave));
+                let attached_tone_top = f64::from(event.tones[top_tone_index].glyph_top());
                 if default_top + 10.0 * scale > attached_tone_top {
                     attached_tone_top - 11.5 * scale
                 } else {
@@ -7416,7 +7486,7 @@ fn event_geometry(
     let rightmost_tone_x = *tone_xs.iter().max().expect("event has tones");
     for (tone_index, tone_event) in event.tones.iter().enumerate() {
         let (left, right) = (1.0, 11.0);
-        let tone_y = lane_y(tone_event.tone.octave);
+        let tone_y = tone_event.glyph_top();
         primary.push(ComponentBounds::stroked(
             f64::from(tone_xs[tone_index]) + left,
             f64::from(tone_y) + 2.0,
@@ -7427,7 +7497,7 @@ fn event_geometry(
     }
 
     let stem_tone_index = stem_tone_index(event, stems_up);
-    let stem_octave_y = lane_y(event.tones[stem_tone_index].tone.octave);
+    let stem_octave_y = event.tones[stem_tone_index].glyph_top();
     let (stem_start, stem_end) = stem_endpoints(stem_octave_y, stems_up);
     let stem_x = tone_xs[stem_tone_index] + 6;
     if event.duration_name != "whole" {
@@ -7503,14 +7573,13 @@ fn event_geometry(
         }
     }
 
-    let first_tone = &event.tones[0].tone;
     for mark in 0..event.dots {
         let (mark_x, mark_y) = duration_mark_position(
             event.duration_name,
             event.dots,
             mark,
             x,
-            lane_y(first_tone.octave),
+            event.tones[0].glyph_top(),
         );
         primary.push(ComponentBounds::filled(
             f64::from(mark_x),
@@ -7520,7 +7589,11 @@ fn event_geometry(
         ));
     }
 
-    if event.tones.iter().any(|tone| tone.tone.octave <= 1) {
+    if event
+        .tones
+        .iter()
+        .any(|tone| !tone.is_unpitched && tone.tone.octave <= 1)
+    {
         primary.push(ComponentBounds::stroked(
             f64::from(leftmost_tone_x - 8),
             148.0,
@@ -7529,7 +7602,11 @@ fn event_geometry(
             1.0,
         ));
     }
-    if event.tones.iter().any(|tone| tone.tone.octave >= 8) {
+    if event
+        .tones
+        .iter()
+        .any(|tone| !tone.is_unpitched && tone.tone.octave >= 8)
+    {
         primary.push(ComponentBounds::stroked(
             f64::from(leftmost_tone_x - 8),
             -12.0,
@@ -7542,13 +7619,13 @@ fn event_geometry(
         let top = event
             .tones
             .iter()
-            .map(|tone| lane_y(tone.tone.octave))
+            .map(ToneEvent::glyph_top)
             .min()
             .expect("chord has a tone");
         let bottom = event
             .tones
             .iter()
-            .map(|tone| lane_y(tone.tone.octave) + 18)
+            .map(|tone| tone.glyph_top() + 18)
             .max()
             .expect("chord has a tone");
         primary.push(ComponentBounds::stroked(
@@ -7609,7 +7686,7 @@ fn event_geometry(
     let mut occupied = primary.clone();
     for fermata in &event.fermatas {
         let tone_index = fermata.tone_index.unwrap_or(0).min(event.tones.len() - 1);
-        let tone_y = lane_y(event.tones[tone_index].tone.octave);
+        let tone_y = event.tones[tone_index].glyph_top();
         let (_, _, bounds) = fermata_layout(
             fermata,
             f64::from(tone_xs[tone_index] + 6),
@@ -8973,7 +9050,6 @@ fn render_part_svg(
                 index += 1;
                 continue;
             }
-            let first_tone = &event.tones[0].tone;
             let mut lane_offsets = [0i32; 10];
             let tone_xs = event
                 .tones
@@ -8992,7 +9068,7 @@ fn render_part_svg(
                 .iter()
                 .enumerate()
                 .map(|(tone_index, tone)| {
-                    let tone_y = lane_y(tone.tone.octave);
+                    let tone_y = tone.glyph_top();
                     ComponentBounds::stroked(
                         f64::from(tone_xs[tone_index] + 1),
                         f64::from(tone_y + 2),
@@ -9003,7 +9079,7 @@ fn render_part_svg(
                 })
                 .collect::<Vec<_>>();
             let stem_tone_index = stem_tone_index(event, stems_up);
-            let stem_octave_y = lane_y(event.tones[stem_tone_index].tone.octave);
+            let stem_octave_y = event.tones[stem_tone_index].glyph_top();
             let (full_stem_start, full_stem_end) = stem_endpoints(stem_octave_y, stems_up);
             let center_y = f64::from(stem_octave_y + 9);
             let stem_start = (center_y
@@ -9216,7 +9292,7 @@ fn render_part_svg(
                     event.dots,
                     mark,
                     x,
-                    lane_y(first_tone.octave),
+                    event.tones[0].glyph_top(),
                 );
                 scene.add_path(
                     DrawLayer::Event,
@@ -9230,7 +9306,11 @@ fn render_part_svg(
                     ),
                 );
             }
-            if event.tones.iter().any(|tone| tone.tone.octave <= 1) {
+            if event
+                .tones
+                .iter()
+                .any(|tone| !tone.is_unpitched && tone.tone.octave <= 1)
+            {
                 scene.add_path(
                     DrawLayer::Event,
                     format!("ledger-line-below-event-{index}"),
@@ -9243,7 +9323,11 @@ fn render_part_svg(
                     ),
                 );
             }
-            if event.tones.iter().any(|tone| tone.tone.octave >= 8) {
+            if event
+                .tones
+                .iter()
+                .any(|tone| !tone.is_unpitched && tone.tone.octave >= 8)
+            {
                 scene.add_path(
                     DrawLayer::Event,
                     format!("ledger-line-above-event-{index}"),
@@ -9260,13 +9344,13 @@ fn render_part_svg(
                 let top = event
                     .tones
                     .iter()
-                    .map(|tone| lane_y(tone.tone.octave))
+                    .map(ToneEvent::glyph_top)
                     .min()
                     .expect("chord has a tone");
                 let bottom = event
                     .tones
                     .iter()
-                    .map(|tone| lane_y(tone.tone.octave) + 18)
+                    .map(|tone| tone.glyph_top() + 18)
                     .max()
                     .expect("chord has a tone");
                 scene.add_path(
@@ -9311,7 +9395,7 @@ fn render_part_svg(
             }
             for (tone_index, tone_event) in event.tones.iter().enumerate() {
                 let tone = tone_event.tone;
-                let octave_y = lane_y(tone.octave);
+                let octave_y = tone_event.glyph_top();
                 let tone_x = tone_xs[tone_index];
                 let tonehead_id = if tone_index == 0 && index == 0 {
                     "tonehead".to_owned()
@@ -9319,6 +9403,28 @@ fn render_part_svg(
                     format!("tonehead-{index}")
                 } else {
                     format!("tonehead-{index}-{tone_index}")
+                };
+                let glyph_scale = event.glyph_scale * tone_event.notehead_scale;
+                let glyph_geometry = PathGeometry::new(
+                    Some((tone_x, octave_y)),
+                    if tone_event.is_unpitched {
+                        "M2 2L10 16M10 2L2 16".to_owned()
+                    } else {
+                        glyph_path(tone.value).to_owned()
+                    },
+                    if tone_event.is_unpitched {
+                        PathStyle::MediumStroke
+                    } else {
+                        PathStyle::FilledGlyph
+                    },
+                )
+                .offset_x(6.0 * (1.0 - glyph_scale))
+                .offset_y(9.0 * (1.0 - glyph_scale))
+                .scaled(glyph_scale);
+                let glyph_geometry = if let Some(color) = tone_event.notehead_color.as_deref() {
+                    glyph_geometry.colored(color)
+                } else {
+                    glyph_geometry
                 };
                 scene.add_path(
                     DrawLayer::Event,
@@ -9335,23 +9441,7 @@ fn render_part_svg(
                         PathMetadata::Octave(tone.octave),
                         PathMetadata::Duration(event.duration_name),
                     ],
-                    PathGeometry::new(
-                        Some((tone_x, octave_y)),
-                        if tone_event.is_unpitched {
-                            "M2 2L10 16M10 2L2 16".to_owned()
-                        } else {
-                            glyph_path(tone.value).to_owned()
-                        },
-                        if tone_event.is_unpitched {
-                            PathStyle::MediumStroke
-                        } else {
-                            PathStyle::FilledGlyph
-                        },
-                    )
-                    .offset_x(6.0 * (1.0 - event.glyph_scale))
-                    .offset_y(9.0 * (1.0 - event.glyph_scale))
-                    .scaled(event.glyph_scale)
-                    .rotated_180_if(tone.value == 10),
+                    glyph_geometry.rotated_180_if(tone.value == 10),
                 );
                 let tie_y = octave_y + 18;
                 if tone_event.tie_stop {
@@ -9462,7 +9552,7 @@ fn render_part_svg(
             }
             for (fermata_index, fermata) in event.fermatas.iter().enumerate() {
                 let tone_index = fermata.tone_index.unwrap_or(0).min(tone_xs.len() - 1);
-                let tone_y = lane_y(event.tones[tone_index].tone.octave);
+                let tone_y = event.tones[tone_index].glyph_top();
                 let bounds = draw_fermata(
                     &mut scene,
                     format!("fermata-{index}-{fermata_index}"),
@@ -10036,7 +10126,7 @@ fn lane_y(octave: u8) -> i32 {
 
 fn stem_direction_is_up<'a>(tones: impl Iterator<Item = &'a ToneEvent>) -> bool {
     let (top, bottom) = tones
-        .map(|tone| lane_y(tone.tone.octave) + 9)
+        .map(|tone| tone.glyph_top() + 9)
         .fold((i32::MAX, i32::MIN), |(top, bottom), tone_y| {
             (top.min(tone_y), bottom.max(tone_y))
         });
@@ -10096,11 +10186,11 @@ fn stem_tone_index(event: &Event, stems_up: bool) -> usize {
     let tones = event.tones.iter().enumerate();
     if stems_up {
         tones
-            .min_by_key(|(_, tone)| lane_y(tone.tone.octave))
+            .min_by_key(|(_, tone)| tone.glyph_top())
             .map(|(tone_index, _)| tone_index)
     } else {
         tones
-            .max_by_key(|(_, tone)| lane_y(tone.tone.octave))
+            .max_by_key(|(_, tone)| tone.glyph_top())
             .map(|(tone_index, _)| tone_index)
     }
     .expect("pitched event has a tone")
@@ -10131,7 +10221,6 @@ fn simultaneous_voice_stem_direction(
 
 fn simultaneous_voice_stem_collisions(event: &Event, events: &[Event], stems_up: bool) -> usize {
     let stem_tone_index = stem_tone_index(event, stems_up);
-    let stem_tone = &event.tones[stem_tone_index].tone;
     let mut event_lane_offsets = [0i32; 10];
     let mut stem_tone_x = 0;
     for (tone_index, tone) in event.tones.iter().enumerate() {
@@ -10142,7 +10231,7 @@ fn simultaneous_voice_stem_collisions(event: &Event, events: &[Event], stems_up:
         event_lane_offsets[octave] += 12;
     }
     let stem_x = stem_tone_x + 6;
-    let (stem_start, stem_end) = stem_endpoints(lane_y(stem_tone.octave), stems_up);
+    let (stem_start, stem_end) = stem_endpoints(event.tones[stem_tone_index].glyph_top(), stems_up);
     let stem_top = stem_start.min(stem_end);
     let stem_bottom = stem_start.max(stem_end);
     events
@@ -10158,7 +10247,7 @@ fn simultaneous_voice_stem_collisions(event: &Event, events: &[Event], stems_up:
                 let octave = usize::from(tone.tone.octave);
                 let tone_x = lane_offsets[octave];
                 lane_offsets[octave] += 12;
-                let tone_y = lane_y(tone.tone.octave);
+                let tone_y = tone.glyph_top();
                 let head_top = tone_y + 2;
                 let head_bottom = tone_y + 16;
                 let vertical_overlap = stem_top <= head_bottom && head_top <= stem_bottom;

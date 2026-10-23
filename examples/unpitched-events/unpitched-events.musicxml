@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list>
+    <score-part id="P1"><part-name>Percussion</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>3</beats><beat-type>4</beat-type></time>
+      </attributes>
+      <note>
+        <unpitched><display-step>F</display-step></unpitched>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+        <notehead>x</notehead>
+        <notations><articulations><accent/></articulations></notations>
+      </note>
+      <note>
+        <unpitched><display-octave>5</display-octave></unpitched>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+      </note>
+      <note>
+        <chord/><unpitched><display-octave>5</display-octave></unpitched>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+      </note>
+      <note>
+        <unpitched><display-octave>6</display-octave></unpitched>
+        <duration>1</duration><voice>1</voice><type>quarter</type>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
