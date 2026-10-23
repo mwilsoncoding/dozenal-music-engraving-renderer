@@ -104,6 +104,22 @@ fn renders_ornament_and_note_fermata_marks() {
     let svg = fs::read_to_string(directory.join("ornament-fermata.svg")).expect("read SVG");
     assert_eq!(svg.matches("class=\"ornament-mark\"").count(), 3, "{svg}");
     assert_eq!(svg.matches("class=\"fermata-mark\"").count(), 1, "{svg}");
+    let tonehead = svg
+        .lines()
+        .find(|line| line.contains("id=\"tonehead\""))
+        .expect("ornament anchor Tonehead");
+    let (tonehead_x, _) = path_translation_f64(tonehead);
+    for ornament in svg
+        .lines()
+        .filter(|line| line.contains("class=\"ornament-mark\""))
+    {
+        let (ornament_x, _) = path_translation_f64(ornament);
+        assert_eq!(
+            ornament_x + 10.0,
+            tonehead_x + 6.0,
+            "{ornament}\n{tonehead}"
+        );
+    }
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
@@ -227,6 +243,18 @@ fn renders_fermata_marks_on_rests_and_barlines() {
             line.contains("id=\"fermata-barline-") && line.contains("class=\"fermata-mark\"")
         })
         .expect("angled barline fermata");
+    let barline = svg
+        .lines()
+        .find(|line| line.contains("id=\"barline-2\""))
+        .expect("fermata anchor barline");
+    let (fermata_x, _) = path_translation_f64(angled_fermata);
+    let barline_x = barline
+        .split("d=\"M")
+        .nth(1)
+        .and_then(|path| path.split_whitespace().next())
+        .and_then(|value| value.parse::<f64>().ok())
+        .expect("barline path has an x coordinate");
+    assert_eq!(fermata_x + 9.0, barline_x, "{angled_fermata}\n{barline}");
     assert!(
         angled_fermata.contains("M1.73 10C1.79 10"),
         "{angled_fermata}"

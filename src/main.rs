@@ -7216,7 +7216,7 @@ fn ornament_layouts(event: &Event, x: i32, stems_up: bool) -> Vec<OrnamentLayout
                     } else {
                         bottom_tone_index
                     }] + 6,
-                ) - if is_trill { 10.0 } else { 9.0 } * scale,
+                ) - 10.0 * scale,
                 top,
             }
         })
