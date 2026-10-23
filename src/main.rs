@@ -7611,7 +7611,7 @@ fn event_geometry(
     let stem_tone_index = stem_tone_index(event, stems_up);
     let stem_octave_y = event.tones[stem_tone_index].glyph_top();
     let (stem_start, stem_end) = stem_endpoints(stem_octave_y, stems_up);
-    let stem_x = tone_xs[stem_tone_index] + 6;
+    let stem_x = tonehead_midpoint_x(&tone_xs);
     if event.duration_name != "whole" {
         primary.push(ComponentBounds::stroked(
             f64::from(stem_x),
@@ -9206,7 +9206,7 @@ fn render_part_svg(
                 format!("stem-{index}")
             };
             let pending_stem_id = stem_id.clone();
-            let stem_x = tone_xs[stem_tone_index] + 6;
+            let stem_x = tonehead_midpoint_x(&tone_xs);
             if event.duration_name != "whole" {
                 event_mark_bounds.push(ComponentBounds::stroked(
                     f64::from(stem_x),
@@ -10308,6 +10308,12 @@ fn stem_tone_index(event: &Event, stems_up: bool) -> usize {
     .expect("pitched event has a tone")
 }
 
+fn tonehead_midpoint_x(tone_xs: &[i32]) -> i32 {
+    let leftmost = *tone_xs.iter().min().expect("chord has a tonehead");
+    let rightmost = *tone_xs.iter().max().expect("chord has a tonehead");
+    leftmost + (rightmost - leftmost) / 2 + 6
+}
+
 fn simultaneous_voice_stem_direction(
     event_index: usize,
     events: &[Event],
@@ -10334,15 +10340,17 @@ fn simultaneous_voice_stem_direction(
 fn simultaneous_voice_stem_collisions(event: &Event, events: &[Event], stems_up: bool) -> usize {
     let stem_tone_index = stem_tone_index(event, stems_up);
     let mut event_lane_offsets = [0i32; 10];
-    let mut stem_tone_x = 0;
-    for (tone_index, tone) in event.tones.iter().enumerate() {
-        let octave = usize::from(tone.tone.octave);
-        if tone_index == stem_tone_index {
-            stem_tone_x = event_lane_offsets[octave];
-        }
-        event_lane_offsets[octave] += 12;
-    }
-    let stem_x = stem_tone_x + 6;
+    let tone_xs = event
+        .tones
+        .iter()
+        .map(|tone| {
+            let octave = usize::from(tone.tone.octave);
+            let tone_x = event_lane_offsets[octave];
+            event_lane_offsets[octave] += 12;
+            tone_x
+        })
+        .collect::<Vec<_>>();
+    let stem_x = tonehead_midpoint_x(&tone_xs);
     let (stem_start, stem_end) = stem_endpoints(event.tones[stem_tone_index].glyph_top(), stems_up);
     let stem_top = stem_start.min(stem_end);
     let stem_bottom = stem_start.max(stem_end);

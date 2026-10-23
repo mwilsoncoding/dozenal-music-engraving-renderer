@@ -4913,6 +4913,66 @@ fn chord_stem_direction_follows_the_midpoint_of_the_center_line() {
 }
 
 #[test]
+fn aligns_chord_stem_with_horizontal_midpoint_of_toneheads() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("chord-stem-midpoint.musicxml");
+    let notes = ["C", "D", "E"]
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            let chord_marker = if index == 0 { "" } else { "<chord/>" };
+            format!(
+                "<note>{chord_marker}<pitch><step>{step}</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>"
+            )
+        })
+        .collect::<String>();
+    let first_note = "<note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(first_note, &notes);
+    fs::write(&input, fixture).expect("write chord score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "chord render failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("chord-stem-midpoint.svg")).expect("read SVG");
+    let tonehead_xs = svg
+        .lines()
+        .filter(|line| line.contains("class=\"tonehead\""))
+        .filter_map(|line| {
+            line.split("transform=\"translate(")
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .parse::<i32>()
+                .ok()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tonehead_xs.len(), 3, "{svg}");
+    let leftmost_tonehead_x = *tonehead_xs.iter().min().expect("leftmost tonehead");
+    let rightmost_tonehead_x = *tonehead_xs.iter().max().expect("rightmost tonehead");
+    let expected_stem_x = (leftmost_tonehead_x + rightmost_tonehead_x) / 2 + 6;
+    let stem = svg
+        .lines()
+        .find(|line| line.contains("id=\"stem\""))
+        .expect("chord stem");
+    let stem_x = stem
+        .split(" d=\"M")
+        .nth(1)
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse::<i32>().ok())
+        .expect("stem x position");
+    assert_eq!(stem_x, expected_stem_x, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn engraves_stacked_chord_tones_as_one_event_with_shared_rhythm_geometry() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
