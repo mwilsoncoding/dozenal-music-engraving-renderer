@@ -526,6 +526,288 @@ fn renders_ornament_and_note_fermata_marks() {
 }
 
 #[test]
+fn renders_measured_single_note_tremolo() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("single-tremolo.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "</type>",
+        "</type><notations><ornaments><tremolo type=\"single\">3</tremolo></ornaments></notations>",
+    );
+    fs::write(&input, fixture).expect("write tremolo score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "single-note tremolo failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("single-tremolo.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"tremolo-mark\"").count(), 1, "{svg}");
+    let tremolo_path = svg
+        .lines()
+        .find(|line| line.contains("class=\"tremolo-mark\""))
+        .expect("tremolo path");
+    assert_eq!(tremolo_path.matches('M').count(), 3, "{tremolo_path}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn honors_above_and_below_tremolo_placement() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("tremolo-placement.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace(
+            "</type>",
+            "</type><notations><ornaments><tremolo type=\"single\" placement=\"above\">2</tremolo></ornaments></notations>",
+        )
+        .replace(
+            "</measure>",
+            "<note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><notations><ornaments><tremolo type=\"single\" placement=\"below\">2</tremolo></ornaments></notations></note></measure>",
+        );
+    fs::write(&input, fixture).expect("write tremolo placement score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "tremolo placement render failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("tremolo-placement.svg")).expect("read SVG");
+    let start_ys = svg
+        .lines()
+        .filter(|line| line.contains("class=\"tremolo-mark\""))
+        .map(|line| {
+            line.split(" d=\"")
+                .nth(1)
+                .expect("tremolo path data")
+                .split('"')
+                .next()
+                .expect("path data value")
+                .strip_prefix('M')
+                .expect("path move command")
+                .split('L')
+                .next()
+                .expect("first path point")
+                .split_whitespace()
+                .nth(1)
+                .expect("first path y coordinate")
+                .parse::<i32>()
+                .expect("integer path y coordinate")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(start_ys.len(), 2, "{svg}");
+    assert!(
+        start_ys[0] < start_ys[1],
+        "above={:?}, below={:?}",
+        start_ys[0],
+        start_ys[1]
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_unmeasured_tremolo() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("unmeasured-tremolo.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "</type>",
+        "</type><notations><ornaments><tremolo type=\"unmeasured\">3</tremolo></ornaments></notations>",
+    );
+    fs::write(&input, fixture).expect("write unmeasured tremolo score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "unmeasured tremolo failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("unmeasured-tremolo.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"tremolo-mark\"").count(), 1, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn pairs_two_note_tremolo_across_measures_without_changing_durations() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("paired-tremolo.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace(
+            "</type>",
+            "</type><notations><ornaments><tremolo type=\"start\">2</tremolo></ornaments></notations>",
+        )
+        .replace(
+            "</part>",
+            "<measure number=\"2\"><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><notations><ornaments><tremolo type=\"stop\">2</tremolo></ornaments></notations></note></measure></part>",
+        );
+    fs::write(&input, fixture).expect("write paired tremolo score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "paired tremolo failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("paired-tremolo.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"tremolo-mark\"").count(), 1, "{svg}");
+    assert_eq!(
+        svg.lines()
+            .filter(|line| line.contains("class=\"tonehead\"")
+                && line.contains("data-duration=\"quarter\""))
+            .count(),
+        2,
+        "{svg}"
+    );
+    let tremolo_path = svg
+        .lines()
+        .filter(|line| line.contains("class=\"tremolo-mark\""))
+        .next()
+        .expect("connecting tremolo path");
+    assert_eq!(tremolo_path.matches('M').count(), 2, "{tremolo_path}");
+    assert!(tremolo_path.contains('L'), "{tremolo_path}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn warns_and_ignores_tremolo_endpoints_separated_by_a_rest() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("interrupted-tremolo.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace(
+            "</type>",
+            "</type><notations><ornaments><tremolo type=\"start\">2</tremolo></ornaments></notations>",
+        )
+        .replace(
+            "</part>",
+            "<measure number=\"2\"><note><rest/><duration>1</duration><voice>1</voice><type>quarter</type></note></measure><measure number=\"3\"><note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><notations><ornaments><tremolo type=\"stop\">2</tremolo></ornaments></notations></note></measure></part>",
+        );
+    fs::write(&input, fixture).expect("write interrupted tremolo score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success()
+            && stderr.contains("two-note tremolo endpoints are separated by a Rest")
+            && stderr.contains("/note/notations/ornaments/tremolo"),
+        "interrupted tremolo should warn with source context: {stderr}"
+    );
+    let svg = fs::read_to_string(directory.join("interrupted-tremolo.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"tremolo-mark\"").count(), 0, "{svg}");
+    assert_eq!(
+        svg.lines()
+            .filter(|line| line.contains("class=\"tonehead\"")
+                && line.contains("data-duration=\"quarter\""))
+            .count(),
+        2,
+        "{svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn diagnoses_unmatched_tremolo_stop_at_the_cli_boundary() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("unmatched-tremolo.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "</type>",
+        "</type><notations><ornaments><tremolo type=\"stop\">2</tremolo></ornaments></notations>",
+    );
+    fs::write(&input, fixture).expect("write unmatched tremolo score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success() && stderr.contains("tremolo stop has no matching start"),
+        "unmatched tremolo stop should fail contextually: {stderr}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn diagnoses_unmatched_tremolo_start_at_the_cli_boundary() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("unmatched-tremolo-start.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "</type>",
+        "</type><notations><ornaments><tremolo type=\"start\">2</tremolo></ornaments></notations>",
+    );
+    fs::write(&input, fixture).expect("write unmatched tremolo score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success() && stderr.contains("has no matching stop in this Part"),
+        "unmatched tremolo start should fail contextually: {stderr}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn diagnoses_mismatched_tremolo_endpoint_mark_counts() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("mismatched-tremolo.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml")
+        .replace(
+            "</type>",
+            "</type><notations><ornaments><tremolo type=\"start\">2</tremolo></ornaments></notations>",
+        )
+        .replace(
+            "</part>",
+            "<measure number=\"2\"><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><notations><ornaments><tremolo type=\"stop\">3</tremolo></ornaments></notations></note></measure></part>",
+        );
+    fs::write(&input, fixture).expect("write mismatched tremolo score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success()
+            && stderr.contains("paired tremolo endpoints must have the same mark count")
+            && stderr.contains("/note/notations/ornaments/tremolo"),
+        "mismatched tremolo endpoints should fail contextually: {stderr}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn centers_trill_above_staff_on_its_tonehead_at_barline_fermata_height() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");

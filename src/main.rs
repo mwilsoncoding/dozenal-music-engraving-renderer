@@ -46,6 +46,7 @@ struct Event {
     is_spacer: bool,
     articulations: Vec<ArticulationMark>,
     ornaments: Vec<OrnamentMark>,
+    tremolos: Vec<TremoloMark>,
     fermatas: Vec<FermataMark>,
 }
 
@@ -154,6 +155,37 @@ struct OrnamentMark {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum TremoloType {
+    Single,
+    Start,
+    Stop,
+    Unmeasured,
+    Ignored,
+}
+
+#[derive(Clone)]
+struct TremoloMark {
+    kind: TremoloType,
+    marks: u8,
+    placement: Option<MarkPlacement>,
+    source_element: usize,
+}
+
+struct PendingTremoloEndpoint {
+    measure_index: usize,
+    event_index: usize,
+    tremolo_index: usize,
+    source_element: usize,
+    marks: u8,
+}
+
+struct TremoloStemStart {
+    x: i32,
+    y: i32,
+    marks: u8,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum FermataShape {
     Normal,
     Angled,
@@ -185,6 +217,7 @@ struct NotationMarkers {
     tuplet_boundary: Option<TupletBoundary>,
     articulations: Vec<ArticulationMark>,
     ornaments: Vec<OrnamentMark>,
+    tremolos: Vec<TremoloMark>,
     fermatas: Vec<FermataMark>,
 }
 
@@ -2027,6 +2060,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
         } else {
             expected_measure_count = Some(measures.len());
         }
+        validate_tremolo_pairs(&elements, &mut measures, &mut warnings)?;
         parts.push(Part {
             name: name.clone(),
             input_staff_count,
@@ -2035,6 +2069,136 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
     }
 
     Ok(Score { parts, warnings })
+}
+
+fn validate_tremolo_pairs(
+    elements: &[Element],
+    measures: &mut [Measure],
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    let mut pending: VoiceState<Option<PendingTremoloEndpoint>> = Vec::new();
+    let mut interrupted_pairs = Vec::new();
+    for measure_index in 0..measures.len() {
+        for event_index in 0..measures[measure_index].events.len() {
+            let voice_id = measures[measure_index].events[event_index].voice_id.clone();
+            let voice_index = voice_state_index(&mut pending, &voice_id);
+            for tremolo_index in 0..measures[measure_index].events[event_index].tremolos.len() {
+                let tremolo = &measures[measure_index].events[event_index].tremolos[tremolo_index];
+                match tremolo.kind {
+                    TremoloType::Start => {
+                        if pending[voice_index].1.is_some() {
+                            return Err(element_diagnostic(
+                                &elements[tremolo.source_element],
+                                "tremolo start has no matching stop before the next start"
+                                    .to_owned(),
+                            ));
+                        }
+                        pending[voice_index].1 = Some(PendingTremoloEndpoint {
+                            measure_index,
+                            event_index,
+                            tremolo_index,
+                            source_element: tremolo.source_element,
+                            marks: tremolo.marks,
+                        });
+                    }
+                    TremoloType::Stop => {
+                        let Some(start) = pending[voice_index].1.take() else {
+                            return Err(element_diagnostic(
+                                &elements[tremolo.source_element],
+                                "tremolo stop has no matching start in this Part and Voice"
+                                    .to_owned(),
+                            ));
+                        };
+                        if (start.measure_index, start.event_index) == (measure_index, event_index)
+                        {
+                            return Err(element_diagnostic(
+                                &elements[tremolo.source_element],
+                                "two-note tremolo endpoints must be on separate note events"
+                                    .to_owned(),
+                            ));
+                        }
+                        if start.marks != tremolo.marks {
+                            return Err(element_diagnostic(
+                                &elements[tremolo.source_element],
+                                "paired tremolo endpoints must have the same mark count".to_owned(),
+                            ));
+                        }
+                        if has_intervening_voice_rest(
+                            measures,
+                            &voice_id,
+                            (start.measure_index, start.event_index),
+                            (measure_index, event_index),
+                        ) {
+                            interrupted_pairs.push((
+                                start.measure_index,
+                                start.event_index,
+                                start.tremolo_index,
+                                measure_index,
+                                event_index,
+                                tremolo_index,
+                                tremolo.source_element,
+                            ));
+                        }
+                    }
+                    TremoloType::Single | TremoloType::Unmeasured | TremoloType::Ignored => {}
+                }
+            }
+        }
+    }
+    for (voice_id, endpoint) in pending {
+        if let Some(endpoint) = endpoint {
+            return Err(element_diagnostic(
+                &elements[endpoint.source_element],
+                format!(
+                    "tremolo start in Voice {:?} has no matching stop in this Part",
+                    voice_id.0
+                ),
+            ));
+        }
+    }
+    for (
+        start_measure,
+        start_event,
+        start_tremolo,
+        stop_measure,
+        stop_event,
+        stop_tremolo,
+        source,
+    ) in interrupted_pairs
+    {
+        measures[start_measure].events[start_event].tremolos[start_tremolo].kind =
+            TremoloType::Ignored;
+        measures[stop_measure].events[stop_event].tremolos[stop_tremolo].kind =
+            TremoloType::Ignored;
+        warnings.push(element_diagnostic(
+            &elements[source],
+            "two-note tremolo endpoints are separated by a Rest; both endpoints are ignored"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn has_intervening_voice_rest(
+    measures: &[Measure],
+    voice_id: &VoiceId,
+    start: (usize, usize),
+    stop: (usize, usize),
+) -> bool {
+    measures.iter().enumerate().any(|(measure_index, measure)| {
+        measure
+            .events
+            .iter()
+            .enumerate()
+            .any(|(event_index, event)| {
+                let position = (measure_index, event_index);
+                start < position
+                    && position < stop
+                    && &event.voice_id == voice_id
+                    && event.tones.is_empty()
+                    && !event.is_spacer
+            })
+    })
 }
 
 fn parse_repeat_barline(
@@ -4564,7 +4728,7 @@ fn parse_ornaments(
     ornaments: usize,
     is_rest: bool,
     warnings: &mut Vec<String>,
-) -> Result<Vec<OrnamentMark>, String> {
+) -> Result<(Vec<OrnamentMark>, Vec<TremoloMark>), String> {
     let container = &elements[ornaments];
     require_no_attributes(container)?;
     require_container_text(container)?;
@@ -4575,6 +4739,7 @@ fn parse_ornaments(
         ));
     }
     let mut marks: Vec<OrnamentMark> = Vec::new();
+    let mut tremolos = Vec::new();
     for child in &container.children {
         let element = &elements[*child];
         validate_attributes(
@@ -4597,11 +4762,11 @@ fn parse_ornaments(
                 "smufl",
             ],
         )?;
-        if element.name == "other-ornament" {
+        if matches!(element.name.as_str(), "other-ornament" | "tremolo") {
             if !element.children.is_empty() || element.text.trim().is_empty() {
                 return Err(element_diagnostic(
                     element,
-                    "other-ornament requires plain text".to_owned(),
+                    format!("<{}> requires plain text", element.name),
                 ));
             }
         } else {
@@ -4796,6 +4961,33 @@ fn parse_ornaments(
         }
         if kind.is_none() {
             validate_deferred_ornament(element, warnings)?;
+            if element.name == "tremolo" {
+                if is_rest {
+                    return Err(element_diagnostic(
+                        element,
+                        "tremolo may only be attached to notes, not rests".to_owned(),
+                    ));
+                }
+                let kind = match optional_attribute(element, "type")
+                    .expect("tremolo type was validated")
+                {
+                    "single" => TremoloType::Single,
+                    "start" => TremoloType::Start,
+                    "stop" => TremoloType::Stop,
+                    "unmeasured" => TremoloType::Unmeasured,
+                    _ => unreachable!("tremolo type was validated"),
+                };
+                tremolos.push(TremoloMark {
+                    kind,
+                    marks: element
+                        .text
+                        .trim()
+                        .parse()
+                        .expect("tremolo marks validated"),
+                    placement,
+                    source_element: *child,
+                });
+            }
             continue;
         }
         if is_rest {
@@ -4821,7 +5013,7 @@ fn parse_ornaments(
             marks.push(mark);
         }
     }
-    Ok(marks)
+    Ok((marks, tremolos))
 }
 
 fn validate_deferred_ornament(element: &Element, warnings: &mut Vec<String>) -> Result<(), String> {
@@ -4858,8 +5050,11 @@ fn validate_deferred_ornament(element: &Element, warnings: &mut Vec<String>) -> 
             }
         }
         "tremolo" => {
-            match required_attribute(element, "type")? {
-                "single" | "start" | "stop" => {}
+            let tremolo_type = optional_attribute(element, "type").ok_or_else(|| {
+                element_diagnostic(element, "tremolo requires a type attribute".to_owned())
+            })?;
+            match tremolo_type {
+                "single" | "start" | "stop" | "unmeasured" => {}
                 value => {
                     return Err(element_diagnostic(
                         element,
@@ -4932,10 +5127,12 @@ fn validate_deferred_ornament(element: &Element, warnings: &mut Vec<String>) -> 
             ));
         }
     }
-    warnings.push(element_diagnostic(
-        element,
-        format!("unsupported ornament <{}>; omitted", element.name),
-    ));
+    if element.name != "tremolo" {
+        warnings.push(element_diagnostic(
+            element,
+            format!("unsupported ornament <{}>; omitted", element.name),
+        ));
+    }
     Ok(())
 }
 
@@ -5109,7 +5306,8 @@ fn parse_tuplet_notations(
             }
             "ornaments" if !saw_ornaments => {
                 saw_ornaments = true;
-                markers.ornaments = parse_ornaments(elements, *child, is_rest, warnings)?;
+                (markers.ornaments, markers.tremolos) =
+                    parse_ornaments(elements, *child, is_rest, warnings)?;
             }
             "ornaments" => {
                 return Err(element_diagnostic(
@@ -5936,6 +6134,7 @@ fn parse_note(
             is_spacer: false,
             articulations: notation_markers.articulations,
             ornaments: notation_markers.ornaments,
+            tremolos: notation_markers.tremolos,
             fermatas: notation_markers.fermatas,
         },
         chord_marker,
@@ -6992,6 +7191,7 @@ enum PathClass {
     BeatRepeat,
     ArticulationMark,
     OrnamentMark,
+    TremoloMark,
     FermataMark,
 }
 
@@ -7953,6 +8153,7 @@ impl Scene {
                 PathClass::BeatRepeat => "beat-repeat",
                 PathClass::ArticulationMark => "articulation-mark",
                 PathClass::OrnamentMark => "ornament-mark",
+                PathClass::TremoloMark => "tremolo-mark",
                 PathClass::FermataMark => "fermata-mark",
             };
             write!(svg, " class=\"{class}\"").expect("writing to a String cannot fail");
@@ -8912,6 +9113,7 @@ fn render_part_svg(
     let mut active_meter = None;
     let mut meter_index = 0;
     let mut pending_tie_paths: VoiceTiePaths = Vec::new();
+    let mut pending_tremolo_stems: VoiceState<Option<TremoloStemStart>> = Vec::new();
     let mut active_beams: VoiceBeamStates = Vec::new();
     let mut pending_beamed_stems: VoiceBeamedStems = Vec::new();
     let mut final_barline_x = 0;
@@ -9592,6 +9794,81 @@ fn render_part_svg(
                 }
                 view_top = view_top.min(octave_y - 20);
                 view_bottom = view_bottom.max(octave_y + 37);
+            }
+            for (tremolo_index, tremolo) in event.tremolos.iter().enumerate() {
+                if tremolo.kind == TremoloType::Ignored {
+                    continue;
+                }
+                let center_y = match tremolo.placement {
+                    Some(MarkPlacement::Above) => stem_start.min(stem_end) + 3,
+                    Some(MarkPlacement::Below) => stem_start.max(stem_end) - 3,
+                    None => (stem_start + stem_end) / 2,
+                };
+                let tremolo_state_index =
+                    voice_state_index(&mut pending_tremolo_stems, &event.voice_id);
+                if tremolo.kind == TremoloType::Start {
+                    pending_tremolo_stems[tremolo_state_index].1 = Some(TremoloStemStart {
+                        x: stem_x,
+                        y: center_y,
+                        marks: tremolo.marks,
+                    });
+                    continue;
+                }
+                let (path, tremolo_left, tremolo_right, top, bottom) = if tremolo.kind
+                    == TremoloType::Stop
+                {
+                    let start = pending_tremolo_stems[tremolo_state_index]
+                        .1
+                        .take()
+                        .expect("tremolo endpoint pairing was validated");
+                    let mut path = String::new();
+                    for mark_index in 0..start.marks {
+                        let offset = i32::from(mark_index) * 3;
+                        path.push_str(&format!(
+                            "M{} {}L{} {}",
+                            start.x - 4,
+                            start.y + offset + 2,
+                            stem_x + 4,
+                            center_y + offset - 2
+                        ));
+                    }
+                    let top = start.y.min(center_y) - 2;
+                    let bottom =
+                        start.y.max(center_y) + i32::from(start.marks.saturating_sub(1)) * 3 + 2;
+                    (path, start.x - 4, stem_x + 4, top, bottom)
+                } else {
+                    let mut path = String::new();
+                    for mark_index in 0..tremolo.marks {
+                        let y = center_y + i32::from(mark_index) * 3;
+                        path.push_str(&format!(
+                            "M{} {}L{} {}",
+                            stem_x - 4,
+                            y + 2,
+                            stem_x + 4,
+                            y - 2
+                        ));
+                    }
+                    let top = center_y - 2;
+                    let bottom = center_y + i32::from(tremolo.marks.saturating_sub(1)) * 3 + 2;
+                    (path, stem_x - 4, stem_x + 4, top, bottom)
+                };
+                scene.add_path(
+                    DrawLayer::Event,
+                    format!("tremolo-{index}-{tremolo_index}"),
+                    Some(PathClass::TremoloMark),
+                    Vec::new(),
+                    PathGeometry::new(None, path, PathStyle::MediumStroke),
+                );
+                event_mark_bounds.push(ComponentBounds::stroked(
+                    f64::from(tremolo_left),
+                    f64::from(top),
+                    f64::from(tremolo_right),
+                    f64::from(bottom),
+                    1.5,
+                ));
+                view_top = view_top.min(top);
+                view_bottom = view_bottom.max(bottom);
+                right = right.max(tremolo_right);
             }
             for layout in articulation_layouts(event, x, stems_up) {
                 let mark = &event.articulations[layout.mark_index];
