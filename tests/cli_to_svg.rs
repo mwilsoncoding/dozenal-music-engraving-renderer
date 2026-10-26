@@ -2379,6 +2379,380 @@ fn renders_path_backed_symbol_directions() {
 }
 
 #[test]
+fn renders_metronome_rate_in_dozenal() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("dozenal-tempo.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml").replace(
+        "<rehearsal>A</rehearsal>",
+        "<metronome><beat-unit>quarter</beat-unit><per-minute>120</per-minute></metronome>",
+    );
+    fs::write(&input, fixture).expect("write tempo score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "tempo direction failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("<metronome> direction is not supported"),
+        "supported tempo direction should not warn: {stderr}"
+    );
+    let svg = fs::read_to_string(directory.join("dozenal-tempo.svg")).expect("read SVG");
+    assert!(
+        svg.contains("data-value=\"↊0\""),
+        "decimal tempo 120 should be labeled with its dozenal value: {svg}"
+    );
+    let head_line = svg
+        .lines()
+        .find(|line| line.contains("id=\"metronome-0-beat-0-head\""))
+        .expect("tempo X tonehead");
+    let stem_line = svg
+        .lines()
+        .find(|line| line.contains("id=\"metronome-0-beat-0-stem\""))
+        .expect("tempo stem");
+    let numeral_line = svg
+        .lines()
+        .find(|line| line.contains("id=\"metronome-0-glyph-3\""))
+        .expect("last dozenal rate numeral");
+    let (head_x, head_y) = path_translation_f64(head_line);
+    let (stem_x, _) = path_translation_f64(stem_line);
+    let (_, numeral_y) = path_translation_f64(numeral_line);
+    assert!(
+        stem_line.contains("d=\"M0 0V29\"") && stem_line.contains("scale(0.6)"),
+        "tempo stem should use the staff's standard length scaled to cue size"
+    );
+    assert!(
+        (head_y + 16.0 * 0.6 - numeral_y).abs() < 0.01,
+        "X tonehead bottom ({}) should align with the rate numeral baseline ({numeral_y})",
+        head_y + 16.0 * 0.6
+    );
+    assert!(
+        (stem_x - (head_x + 6.0 * 0.6)).abs() < 0.01,
+        "tempo stem should be centered on the X tonehead"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn warns_and_omits_fractional_metronome_rates() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("fractional-tempo.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml").replace(
+        "<rehearsal>A</rehearsal>",
+        "<metronome><beat-unit>quarter</beat-unit><per-minute>120.5</per-minute></metronome>",
+    );
+    fs::write(&input, fixture).expect("write fractional tempo score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "fractional tempo should be nonfatal: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("fractional per-minute rate is unsupported"),
+        "fractional tempo should explain its omission"
+    );
+    let svg = fs::read_to_string(directory.join("fractional-tempo.svg")).expect("read SVG");
+    assert!(
+        !svg.contains("class=\"metronome-mark\""),
+        "unsupported fractional tempo must not be rounded or rendered: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_simple_metronome_beat_equivalence() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("tempo-equivalence.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml").replace(
+        "<rehearsal>A</rehearsal>",
+        "<metronome><beat-unit>quarter</beat-unit><beat-unit-dot/><beat-unit>half</beat-unit><beat-unit-dot/></metronome>",
+    );
+    fs::write(&input, fixture).expect("write tempo equivalence score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "tempo equivalence failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("tempo-equivalence.svg")).expect("read SVG");
+    assert!(
+        svg.contains("id=\"metronome-0-beat-0-head\"")
+            && svg.contains("id=\"metronome-0-beat-1-head\""),
+        "simple tempo equivalence should show both beat-unit symbols: {svg}"
+    );
+    assert_eq!(
+        svg.matches("d=\"M2 2L10 16M10 2L2 16\"").count(),
+        2,
+        "tempo beat units should use unpitched X toneheads"
+    );
+    assert!(
+        svg.contains("id=\"metronome-0-beat-0-mark-0\"")
+            && svg.contains("id=\"metronome-0-beat-1-mark-0\"")
+            && svg.contains("id=\"metronome-0-beat-1-mark-1\"")
+            && svg.contains("id=\"metronome-0-beat-1-mark-2\""),
+        "dotted quarter and half-note beat units should show dot and colon-plus-dot marks"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_direction_dynamics_in_source_order() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("dynamics.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml")
+        .replace(
+            "<rehearsal>A</rehearsal>",
+            "<dynamics color=\"#006699\" font-size=\"large\"><p/><mf/></dynamics>",
+        )
+        .replacen("<direction placement=\"above\">", "<direction>", 1);
+    fs::write(&input, fixture).expect("write dynamics score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "dynamics direction failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("<dynamics> direction is not supported"),
+        "named Dynamics should not warn: {stderr}"
+    );
+    let svg = fs::read_to_string(directory.join("dynamics.svg")).expect("read SVG");
+    assert!(
+        svg.contains("id=\"dynamic-0-glyph-0\"")
+            && svg.contains("id=\"dynamic-0-glyph-1\"")
+            && svg.contains("id=\"dynamic-0-glyph-2\""),
+        "p followed by mf should render three source-ordered glyphs: {svg}"
+    );
+    assert_eq!(svg.matches("class=\"dynamic-mark\"").count(), 3, "{svg}");
+    assert!(
+        svg.contains("fill=\"#006699\"") && svg.contains("scale(0.018)"),
+        "Dynamics should honor color and font-size: {svg}"
+    );
+    assert!(
+        text_path_y(&svg, "dynamic-0-glyph-0") > 68.0,
+        "a direction-level Dynamic Mark without explicit placement defaults below the Staff"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn warns_and_omits_custom_dynamics_while_rendering_named_siblings() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("custom-dynamics.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml").replace(
+        "<rehearsal>A</rehearsal>",
+        "<dynamics><other-dynamics>subito</other-dynamics><mf/></dynamics>",
+    );
+    fs::write(&input, fixture).expect("write custom dynamics score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "unsupported custom Dynamics should be nonfatal: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("custom Dynamics are unsupported"),
+        "unsupported custom Dynamics should warn"
+    );
+    let svg = fs::read_to_string(directory.join("custom-dynamics.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"dynamic-mark\"").count(), 2, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_malformed_tempo_and_dynamic_values_without_svg() {
+    let cases = [
+        (
+            "malformed-tempo",
+            "<metronome><beat-unit>quarter</beat-unit><per-minute>0</per-minute></metronome>",
+            "per-minute must be a positive integer or fractional number",
+        ),
+        (
+            "malformed-dynamics",
+            "<dynamics><forte/></dynamics>",
+            "unsupported dynamics child <forte>",
+        ),
+    ];
+    for (name, item, expected_error) in cases {
+        let directory = scratch_dir();
+        fs::create_dir_all(&directory).expect("create test directory");
+        let input = directory.join(format!("{name}.musicxml"));
+        let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml")
+            .replace("<rehearsal>A</rehearsal>", item);
+        fs::write(&input, fixture).expect("write malformed score");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(!output.status.success(), "{name} unexpectedly succeeded");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected_error),
+            "{name} should report {expected_error:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !directory.join(format!("{name}.svg")).exists(),
+            "{name} must not write partial SVG"
+        );
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+}
+
+#[test]
+fn renders_note_attached_dynamics() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("note-dynamics.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml").replacen(
+        "<type>quarter</type></note>",
+        "<type>quarter</type><notations><dynamics><f/></dynamics></notations></note>",
+        1,
+    );
+    fs::write(&input, fixture).expect("write note dynamics score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "note-attached dynamics failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("note-dynamics.svg")).expect("read SVG");
+    assert!(
+        svg.contains("class=\"dynamic-mark\"")
+            && !svg.contains("<dynamics> direction is not supported"),
+        "note-attached forte should render as a path-backed Dynamic Mark: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_tempo_and_dynamic_marks_example() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("tempo-dynamic-marks.musicxml");
+    fs::copy(
+        "examples/tempo-dynamic-marks/tempo-dynamic-marks.musicxml",
+        &input,
+    )
+    .expect("copy tempo and dynamics example");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "tempo and dynamics example failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("tempo-dynamic-marks.svg")).expect("read SVG");
+    assert!(
+        svg.contains("class=\"metronome-mark\"")
+            && svg.contains("class=\"dynamic-mark\"")
+            && svg.contains("data-value=\"↊0\""),
+        "example should render tempo and Dynamics using dozenal rate labels: {svg}"
+    );
+    let tempo_head = svg
+        .lines()
+        .find(|line| line.contains("id=\"metronome-5-beat-0-head\""))
+        .expect("measure 3 tempo beat indicator");
+    let tempo_stem = svg
+        .lines()
+        .find(|line| line.contains("id=\"metronome-5-beat-0-stem\""))
+        .expect("measure 3 tempo stem");
+    let sfz = svg
+        .lines()
+        .find(|line| line.contains("id=\"dynamic-6-glyph-0\""))
+        .expect("measure 3 sfz Dynamic Mark");
+    assert!(
+        tempo_head.contains("scale(0.6)") && tempo_stem.contains("scale(0.6)"),
+        "beat-unit indicators should be cue-sized"
+    );
+    let (_, head_y) = path_translation_f64(tempo_head);
+    let (_, sfz_y) = path_translation_f64(sfz);
+    assert!(
+        head_y + 16.0 * 0.6 + 2.0 < sfz_y,
+        "measure 3 tempo stem should clear and sit above the sfz Dynamic Mark"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn explicit_tempo_coordinates_override_dynamic_collision_placement() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("explicit-tempo-position.musicxml");
+    let fixture = include_str!("../examples/tempo-dynamic-marks/tempo-dynamic-marks.musicxml").replace(
+        "<metronome><beat-unit>half</beat-unit><beat-unit>quarter</beat-unit></metronome>",
+        "<metronome default-x=\"0\" default-y=\"20\"><beat-unit>half</beat-unit><beat-unit>quarter</beat-unit></metronome>",
+    );
+    fs::write(&input, fixture).expect("write explicitly positioned tempo score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "explicit tempo positioning failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("explicit-tempo-position.svg"))
+        .expect("read explicitly positioned tempo SVG");
+    let tempo_head = svg
+        .lines()
+        .find(|line| line.contains("id=\"metronome-5-beat-0-head\""))
+        .expect("explicitly positioned measure 3 tempo beat");
+    let (_, head_y) = path_translation_f64(tempo_head);
+    assert!(
+        (head_y - 18.4).abs() < 0.01,
+        "explicit default-y should override collision placement: {head_y}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn renders_segno_and_coda_marks_in_source_order() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");

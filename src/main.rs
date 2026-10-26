@@ -86,6 +86,7 @@ struct NoteParseOptions {
 }
 
 struct NoteParseContext<'a> {
+    event_index: usize,
     divisions: u32,
     input_staff_states: &'a [InputStaffState],
     active_tuplets: &'a VoiceState<Option<ActiveTuplet>>,
@@ -120,6 +121,7 @@ struct ParsedNote {
     event: Event,
     chord_marker: Option<usize>,
     tuplet_boundary: Option<TupletBoundary>,
+    dynamics: Vec<PositionedText>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -223,6 +225,7 @@ struct NotationMarkers {
     tie_start: bool,
     tie_stop: bool,
     tuplet_boundary: Option<TupletBoundary>,
+    dynamics: Vec<PositionedText>,
     articulations: Vec<ArticulationMark>,
     ornaments: Vec<OrnamentMark>,
     tremolos: Vec<TremoloMark>,
@@ -413,6 +416,21 @@ struct PositionedText {
     path_id_prefix: &'static str,
     path_scale: f64,
     path_y_offset: f64,
+    data_value: Option<String>,
+    metronome: Option<MetronomeDisplay>,
+}
+
+#[derive(Clone)]
+struct MetronomeDisplay {
+    first_beat: BeatUnit,
+    second_beat: Option<BeatUnit>,
+    rate: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct BeatUnit {
+    duration: &'static str,
+    dots: u8,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1377,6 +1395,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                             &elements,
                             *child,
                             NoteParseContext {
+                                event_index: events.len(),
                                 divisions,
                                 input_staff_states: &active_staff_states,
                                 active_tuplets: &active_tuplets,
@@ -1498,6 +1517,10 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                 ));
                             };
                             let event: &mut Event = &mut events[target];
+                            for mut dynamic in std::mem::take(&mut parsed.dynamics) {
+                                dynamic.event_index = target;
+                                texts.push(dynamic);
+                            }
                             parsed.event.onset_units = event.onset_units;
                             if event.voice_id != parsed.event.voice_id {
                                 return Err(element_diagnostic(
@@ -1614,6 +1637,10 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                             let duration_units = parsed.event.duration_units;
                             let voice_id = parsed.event.voice_id.clone();
                             let is_pitched = !parsed.event.tones.is_empty();
+                            for mut dynamic in std::mem::take(&mut parsed.dynamics) {
+                                dynamic.event_index = events.len();
+                                texts.push(dynamic);
+                            }
                             events.push(parsed.event);
                             event_sources.push(*child);
                             if is_pitched {
@@ -2465,7 +2492,8 @@ fn parse_direction(
     let element = &elements[direction];
     validate_attributes(element, &["placement", "directive", "system", "id"])?;
     require_container_text(element)?;
-    let placement = match optional_attribute(element, "placement").unwrap_or("above") {
+    let explicit_placement = optional_attribute(element, "placement");
+    let placement = match explicit_placement.unwrap_or("above") {
         "above" => TextPlacement::Above,
         "below" => TextPlacement::Below,
         value => {
@@ -2474,6 +2502,11 @@ fn parse_direction(
                 format!("invalid direction placement {value:?}"),
             ));
         }
+    };
+    let dynamic_placement = if explicit_placement.is_some() {
+        placement
+    } else {
+        TextPlacement::Below
     };
     for attribute in ["directive", "system"] {
         if let Some(value) = optional_attribute(element, attribute) {
@@ -2546,8 +2579,27 @@ fn parse_direction(
                                 warnings,
                             )?);
                         }
-                        "metronome" | "dynamics" | "wedge" | "bracket" | "dashes" | "pedal"
-                        | "octave-shift" | "other-direction" => {
+                        "metronome" => {
+                            if let Some(metronome) =
+                                parse_metronome(elements, *item, event_index, placement, warnings)?
+                            {
+                                text_items.push(metronome);
+                            }
+                        }
+                        "dynamics" => {
+                            if let Some(dynamic) = parse_dynamics(
+                                elements,
+                                *item,
+                                event_index,
+                                dynamic_placement,
+                                false,
+                                warnings,
+                            )? {
+                                text_items.push(dynamic);
+                            }
+                        }
+                        "wedge" | "bracket" | "dashes" | "pedal" | "octave-shift"
+                        | "other-direction" => {
                             warnings.push(element_diagnostic(
                                 text_element,
                                 format!(
@@ -2645,6 +2697,451 @@ fn parse_direction(
     Ok(text_items)
 }
 
+fn parse_metronome(
+    elements: &[Element],
+    metronome_id: usize,
+    event_index: usize,
+    placement: TextPlacement,
+    warnings: &mut Vec<String>,
+) -> Result<Option<PositionedText>, String> {
+    let element = &elements[metronome_id];
+    validate_attributes(
+        element,
+        &[
+            "print-object",
+            "font-family",
+            "font-style",
+            "font-size",
+            "font-weight",
+            "color",
+            "default-x",
+            "default-y",
+            "relative-x",
+            "relative-y",
+            "halign",
+            "valign",
+        ],
+    )?;
+    require_container_text(element)?;
+    let print_object = optional_attribute(element, "print-object").unwrap_or("yes");
+    if !matches!(print_object, "yes" | "no") {
+        return Err(element_diagnostic(
+            element,
+            format!("metronome print-object must be 'yes' or 'no', not {print_object:?}"),
+        ));
+    }
+    let mut beat_units = Vec::new();
+    let mut current_beat = None;
+    let mut rate = None;
+    let mut unsupported = false;
+    for child in &element.children {
+        let child_element = &elements[*child];
+        match child_element.name.as_str() {
+            "beat-unit" if beat_units.len() < 2 => {
+                let duration = match leaf_text(child_element)? {
+                    "maxima" => "maxima",
+                    "long" => "long",
+                    "breve" => "breve",
+                    "whole" => "whole",
+                    "half" => "half",
+                    "quarter" => "quarter",
+                    "eighth" => "eighth",
+                    "16th" => "16th",
+                    "32nd" => "32nd",
+                    "64th" => "64th",
+                    value => {
+                        return Err(element_diagnostic(
+                            child_element,
+                            format!("unsupported beat-unit {value:?}"),
+                        ));
+                    }
+                };
+                let unit = BeatUnit { duration, dots: 0 };
+                beat_units.push(unit);
+                current_beat = Some(beat_units.len() - 1);
+            }
+            "beat-unit-dot" if current_beat.is_some() => {
+                require_no_attributes(child_element)?;
+                require_container_text(child_element)?;
+                if !child_element.children.is_empty() || !child_element.text.trim().is_empty() {
+                    return Err(element_diagnostic(
+                        child_element,
+                        "<beat-unit-dot/> must be empty".to_owned(),
+                    ));
+                }
+                let unit = &mut beat_units[current_beat.expect("checked above")];
+                unit.dots += 1;
+                if unit.dots > 2 {
+                    unsupported = true;
+                }
+            }
+            "per-minute" if current_beat == Some(0) && rate.is_none() => {
+                let value = leaf_text(child_element)?;
+                let valid_decimal = value
+                    .strip_prefix(['+', '-'])
+                    .unwrap_or(value)
+                    .chars()
+                    .all(|character| character.is_ascii_digit() || character == '.')
+                    && value.chars().filter(|character| *character == '.').count() <= 1;
+                let Some(number) = value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|number| number.is_finite() && *number > 0.0 && valid_decimal)
+                else {
+                    return Err(element_diagnostic(
+                        child_element,
+                        "per-minute must be a positive integer or fractional number".to_owned(),
+                    ));
+                };
+                if number.fract() != 0.0 {
+                    warnings.push(element_diagnostic(
+                        child_element,
+                        "fractional per-minute rate is unsupported; tempo mark omitted".to_owned(),
+                    ));
+                    unsupported = true;
+                } else if number > f64::from(u32::MAX) {
+                    return Err(element_diagnostic(
+                        child_element,
+                        "per-minute exceeds the supported integer range".to_owned(),
+                    ));
+                } else {
+                    rate = Some(
+                        dozenal_ending_label(&(number as u32).to_string())
+                            .expect("positive rate has a dozenal representation"),
+                    );
+                }
+                current_beat = None;
+            }
+            "metronome-note" | "metronome-relation" | "metronome-type" => {
+                warnings.push(element_diagnostic(
+                    child_element,
+                    "complex metronome relations are unsupported; tempo mark omitted".to_owned(),
+                ));
+                unsupported = true;
+            }
+            _ => {
+                return Err(element_diagnostic(
+                    child_element,
+                    format!("malformed metronome child <{}>", child_element.name),
+                ));
+            }
+        }
+    }
+    if unsupported || print_object == "no" {
+        return Ok(None);
+    }
+    if beat_units.is_empty() || (rate.is_none() && beat_units.len() != 2) {
+        return Err(element_diagnostic(
+            element,
+            "metronome must contain one beat-unit with per-minute or a two-unit equivalence"
+                .to_owned(),
+        ));
+    }
+    if rate.is_some() && beat_units.len() != 1 {
+        return Err(element_diagnostic(
+            element,
+            "metronome rate and beat-unit equivalence cannot be combined".to_owned(),
+        ));
+    }
+    let mut font_size = 16.0;
+    if let Some(value) = optional_attribute(element, "font-size") {
+        font_size = parse_text_font_size(value).ok_or_else(|| {
+            element_diagnostic(element, format!("invalid metronome font-size {value:?}"))
+        })?;
+    }
+    let mut color = "#171717".to_owned();
+    if let Some(value) = optional_attribute(element, "color") {
+        if !valid_musicxml_color(value) {
+            return Err(element_diagnostic(
+                element,
+                "metronome color must be a six-digit hexadecimal color".to_owned(),
+            ));
+        }
+        color = value.to_ascii_lowercase();
+    }
+    if optional_attribute(element, "font-family").is_some_and(|family| family != "Noto Sans") {
+        warnings.push(element_diagnostic(
+            element,
+            "metronome font-family is not bundled; Noto Sans is used".to_owned(),
+        ));
+    }
+    for attribute in ["font-style", "font-weight", "halign", "valign"] {
+        if optional_attribute(element, attribute).is_some() {
+            warnings.push(element_diagnostic(
+                element,
+                format!("metronome {attribute} is not supported; default behavior is used"),
+            ));
+        }
+    }
+    let parse_coordinate = |attribute: &str| -> Result<Option<f64>, String> {
+        optional_attribute(element, attribute)
+            .map(|value| {
+                value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|number| number.is_finite())
+                    .ok_or_else(|| {
+                        element_diagnostic(
+                            element,
+                            format!("metronome {attribute} must be a finite number"),
+                        )
+                    })
+            })
+            .transpose()
+    };
+    let rate_value = rate.clone();
+    let text = rate
+        .as_ref()
+        .map(|rate| format!("= {rate}"))
+        .unwrap_or_else(|| "=".to_owned());
+    Ok(Some(PositionedText {
+        event_index,
+        input_staff: None,
+        offset_x: 0.0,
+        text,
+        placement,
+        font_size,
+        color,
+        enclosure: None,
+        default_x: parse_coordinate("default-x")?,
+        default_y: parse_coordinate("default-y")?,
+        relative_x: parse_coordinate("relative-x")?,
+        relative_y: parse_coordinate("relative-y")?,
+        path_glyph: None,
+        path_id_prefix: "metronome",
+        path_scale: 1.0,
+        path_y_offset: 0.0,
+        data_value: rate_value,
+        metronome: Some(MetronomeDisplay {
+            first_beat: beat_units[0],
+            second_beat: beat_units.get(1).copied(),
+            rate,
+        }),
+    }))
+}
+
+fn parse_dynamics(
+    elements: &[Element],
+    dynamics_id: usize,
+    event_index: usize,
+    placement: TextPlacement,
+    note_attached: bool,
+    warnings: &mut Vec<String>,
+) -> Result<Option<PositionedText>, String> {
+    let element = &elements[dynamics_id];
+    validate_attributes(
+        element,
+        &[
+            "id",
+            "default-x",
+            "default-y",
+            "relative-x",
+            "relative-y",
+            "font-family",
+            "font-style",
+            "font-size",
+            "font-weight",
+            "color",
+            "halign",
+            "valign",
+            "underline",
+            "overline",
+            "line-through",
+            "enclosure",
+            "placement",
+        ],
+    )?;
+    require_container_text(element)?;
+    let mut text = String::new();
+    for child in &element.children {
+        let child_element = &elements[*child];
+        if matches!(child_element.name.as_str(), "other-dynamics") {
+            validate_attributes(child_element, &["smufl"])?;
+            if !child_element.children.is_empty() {
+                return Err(element_diagnostic(
+                    child_element,
+                    "<other-dynamics> must contain plain text".to_owned(),
+                ));
+            }
+            if let Some(smufl) = optional_attribute(child_element, "smufl") {
+                if !valid_smufl_glyph_name(smufl) {
+                    return Err(element_diagnostic(
+                        child_element,
+                        format!("invalid SMuFL glyph name {smufl:?}"),
+                    ));
+                }
+            }
+            warnings.push(element_diagnostic(
+                child_element,
+                "custom Dynamics are unsupported; mark omitted".to_owned(),
+            ));
+            continue;
+        }
+        const DYNAMIC_NAMES: &[&str] = &[
+            "p", "pp", "ppp", "pppp", "ppppp", "pppppp", "f", "ff", "fff", "ffff", "fffff",
+            "ffffff", "mp", "mf", "sf", "sfp", "sfpp", "fp", "rf", "rfz", "sfz", "sffz", "fz", "n",
+            "pf", "sfzp",
+        ];
+        if !DYNAMIC_NAMES.contains(&child_element.name.as_str()) {
+            return Err(element_diagnostic(
+                child_element,
+                format!("unsupported dynamics child <{}>", child_element.name),
+            ));
+        }
+        require_no_attributes(child_element)?;
+        require_container_text(child_element)?;
+        if !child_element.children.is_empty() || !child_element.text.trim().is_empty() {
+            return Err(element_diagnostic(
+                child_element,
+                format!("<{} /> must be empty", child_element.name),
+            ));
+        }
+        text.push_str(&child_element.name);
+    }
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let placement = match optional_attribute(element, "placement") {
+        Some("above") if note_attached => TextPlacement::Above,
+        Some("below") if note_attached => TextPlacement::Below,
+        Some("above" | "below") | None => placement,
+        Some(value) => {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid dynamics placement {value:?}"),
+            ));
+        }
+    };
+    let font_size = match optional_attribute(element, "font-size") {
+        Some(value) => parse_text_font_size(value).ok_or_else(|| {
+            element_diagnostic(element, format!("invalid dynamics font-size {value:?}"))
+        })?,
+        None => 16.0,
+    };
+    let mut color = "#171717".to_owned();
+    if let Some(value) = optional_attribute(element, "color") {
+        if !valid_musicxml_color(value) {
+            return Err(element_diagnostic(
+                element,
+                "dynamics color must be a six-digit hexadecimal color".to_owned(),
+            ));
+        }
+        color = value.to_ascii_lowercase();
+    }
+    if let Some(family) = optional_attribute(element, "font-family") {
+        if family.trim().is_empty() {
+            return Err(element_diagnostic(
+                element,
+                "dynamics font-family may not be empty".to_owned(),
+            ));
+        }
+        if !family.eq_ignore_ascii_case("Noto Sans") {
+            warnings.push(element_diagnostic(
+                element,
+                format!("font-family {family:?} is not bundled; Noto Sans is used"),
+            ));
+        }
+    }
+    for (attribute, allowed) in [
+        ("font-style", &[("normal"), ("italic"), ("oblique")][..]),
+        ("font-weight", &["normal", "bold"][..]),
+        ("halign", &["left", "center", "right"][..]),
+        ("valign", &["top", "middle", "bottom", "baseline"][..]),
+    ] {
+        if let Some(value) = optional_attribute(element, attribute) {
+            if !allowed.contains(&value) {
+                return Err(element_diagnostic(
+                    element,
+                    format!("invalid dynamics {attribute} value {value:?}"),
+                ));
+            }
+            warnings.push(element_diagnostic(
+                element,
+                format!("dynamics {attribute} is not supported; default behavior is used"),
+            ));
+        }
+    }
+    for attribute in ["underline", "overline", "line-through"] {
+        if let Some(value) = optional_attribute(element, attribute) {
+            if !matches!(value, "yes" | "no") {
+                return Err(element_diagnostic(
+                    element,
+                    format!("dynamics {attribute} must be 'yes' or 'no', not {value:?}"),
+                ));
+            }
+            if value == "yes" {
+                warnings.push(element_diagnostic(
+                    element,
+                    "dynamics text-decoration is not supported; decoration is omitted".to_owned(),
+                ));
+            }
+        }
+    }
+    if let Some(enclosure) = optional_attribute(element, "enclosure") {
+        if !matches!(
+            enclosure,
+            "rectangle"
+                | "square"
+                | "oval"
+                | "circle"
+                | "bracket"
+                | "triangle"
+                | "diamond"
+                | "pentagon"
+                | "hexagon"
+                | "heptagon"
+                | "octagon"
+                | "nonagon"
+                | "decagon"
+        ) {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid dynamics enclosure {enclosure:?}"),
+            ));
+        }
+        warnings.push(element_diagnostic(
+            element,
+            "dynamics enclosure is not supported; enclosure is omitted".to_owned(),
+        ));
+    }
+    let parse_coordinate = |attribute: &str| -> Result<Option<f64>, String> {
+        optional_attribute(element, attribute)
+            .map(|value| {
+                value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|number| number.is_finite())
+                    .ok_or_else(|| {
+                        element_diagnostic(
+                            element,
+                            format!("dynamics {attribute} must be a finite number"),
+                        )
+                    })
+            })
+            .transpose()
+    };
+    Ok(Some(PositionedText {
+        event_index,
+        input_staff: None,
+        offset_x: 0.0,
+        text,
+        placement,
+        font_size,
+        color,
+        enclosure: None,
+        default_x: parse_coordinate("default-x")?,
+        default_y: parse_coordinate("default-y")?,
+        relative_x: parse_coordinate("relative-x")?,
+        relative_y: parse_coordinate("relative-y")?,
+        path_glyph: None,
+        path_id_prefix: "dynamic",
+        path_scale: 1.0,
+        path_y_offset: 0.0,
+        data_value: None,
+        metronome: None,
+    }))
+}
+
 fn parse_direction_symbol(
     elements: &[Element],
     symbol_id: usize,
@@ -2692,6 +3189,8 @@ fn parse_direction_symbol(
         path_id_prefix: "symbol",
         path_scale: 1.0,
         path_y_offset: 0.0,
+        data_value: None,
+        metronome: None,
     }))
 }
 
@@ -2944,6 +3443,8 @@ fn parse_direction_mark(
         path_id_prefix: if is_segno { "segno" } else { "coda" },
         path_scale: 0.04,
         path_y_offset: segno_center - glyph_center,
+        data_value: None,
+        metronome: None,
     })
 }
 
@@ -3179,6 +3680,8 @@ fn parse_direction_text(
         path_id_prefix: "",
         path_scale: 1.0,
         path_y_offset: 0.0,
+        data_value: None,
+        metronome: None,
     }))
 }
 
@@ -5285,6 +5788,7 @@ fn parse_tuplet_notations(
     elements: &[Element],
     notations: usize,
     ratio: Option<&TupletRatio>,
+    event_index: usize,
     is_rest: bool,
     warnings: &mut Vec<String>,
 ) -> Result<NotationMarkers, String> {
@@ -5294,7 +5798,7 @@ fn parse_tuplet_notations(
     if element.children.is_empty() {
         return Err(element_diagnostic(
             element,
-            "<notations> must contain a supported visual tie or tuplet".to_owned(),
+            "<notations> must contain a supported visual mark".to_owned(),
         ));
     }
     let mut markers = NotationMarkers::default();
@@ -5304,6 +5808,18 @@ fn parse_tuplet_notations(
     for child in &element.children {
         let child_element = &elements[*child];
         match child_element.name.as_str() {
+            "dynamics" => {
+                if let Some(dynamic) = parse_dynamics(
+                    elements,
+                    *child,
+                    event_index,
+                    TextPlacement::Below,
+                    true,
+                    warnings,
+                )? {
+                    markers.dynamics.push(dynamic);
+                }
+            }
             "articulations" if !saw_articulations => {
                 saw_articulations = true;
                 markers.articulations = parse_articulations(elements, *child, is_rest, warnings)?;
@@ -5539,6 +6055,7 @@ fn parse_note(
     warnings: &mut Vec<String>,
 ) -> Result<ParsedNote, String> {
     let NoteParseContext {
+        event_index,
         divisions,
         input_staff_states,
         active_tuplets,
@@ -5909,6 +6426,7 @@ fn parse_note(
             elements,
             notations,
             time_modification.as_ref(),
+            event_index,
             is_rest,
             warnings,
         )?
@@ -6152,6 +6670,7 @@ fn parse_note(
         },
         chord_marker,
         tuplet_boundary,
+        dynamics: notation_markers.dynamics,
     })
 }
 
@@ -7202,6 +7721,8 @@ enum PathClass {
     MultipleRest,
     MeasureRepeat,
     BeatRepeat,
+    MetronomeMark,
+    DynamicMark,
     ArticulationMark,
     OrnamentMark,
     TremoloMark,
@@ -7223,6 +7744,7 @@ enum PathMetadata {
     EndingLabel(String),
     MultipleRestCount(u32),
     MultipleRestSymbols(bool),
+    Value(String),
 }
 
 #[derive(Clone, Copy)]
@@ -8175,6 +8697,8 @@ impl Scene {
                 PathClass::MultipleRest => "multiple-rest",
                 PathClass::MeasureRepeat => "measure-repeat",
                 PathClass::BeatRepeat => "beat-repeat",
+                PathClass::MetronomeMark => "metronome-mark",
+                PathClass::DynamicMark => "dynamic-mark",
                 PathClass::ArticulationMark => "articulation-mark",
                 PathClass::OrnamentMark => "ornament-mark",
                 PathClass::TremoloMark => "tremolo-mark",
@@ -8210,6 +8734,9 @@ impl Scene {
                 }
                 PathMetadata::MultipleRestSymbols(value) => {
                     write!(svg, " data-use-symbols=\"{value}\"")
+                }
+                PathMetadata::Value(value) => {
+                    write!(svg, " data-value=\"{}\"", escape_svg_attribute(value))
                 }
             }
             .expect("writing to a String cannot fail");
@@ -8286,9 +8813,12 @@ impl Scene {
             PathStyle::DashedStroke => {
                 svg.push_str(" stroke=\"#171717\" stroke-width=\"1.5\" stroke-dasharray=\"5 3\"")
             }
-            PathStyle::MediumOutline => {
-                svg.push_str(" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"")
-            }
+            PathStyle::MediumOutline => write!(
+                svg,
+                " fill=\"none\" stroke=\"{}\" stroke-width=\"1.5\"",
+                command.geometry.color.as_deref().unwrap_or("#171717")
+            )
+            .expect("writing to a String cannot fail"),
             PathStyle::FilledGlyph => write!(
                 svg,
                 " fill=\"{}\" fill-rule=\"evenodd\"",
@@ -8441,6 +8971,18 @@ fn add_text_item(
     measure_start_x: f64,
     layout: &mut TextLayoutContext<'_>,
 ) {
+    if let Some(metronome) = &item.metronome {
+        add_metronome_item(
+            scene,
+            item,
+            metronome,
+            index,
+            anchor_x,
+            measure_start_x,
+            layout,
+        );
+        return;
+    }
     if let Some(glyph) = item.path_glyph {
         add_direction_glyph(scene, item, glyph, index, anchor_x, measure_start_x, layout);
         return;
@@ -8510,7 +9052,10 @@ fn add_text_item(
     let text_right = text_x + ink_right.max(max_line_width);
     let padding = if item.enclosure.is_some() { 3.0 } else { 0.0 };
     let step = (ink_bottom - ink_top + padding * 2.0 + 4.0).max(item.font_size + 4.0);
-    let mut shift = 0.0;
+    let fixed_metronome_position = item.path_id_prefix == "metronome"
+        && (item.default_x.is_some() || item.relative_x.is_some())
+        && (item.default_y.is_some() || item.relative_y.is_some());
+    let mut shift: f64 = 0.0;
     let (box_left, box_top, box_right, box_bottom) = loop {
         let candidate = enclosure_bounds(
             item.enclosure.as_deref(),
@@ -8519,18 +9064,20 @@ fn add_text_item(
             text_right + padding,
             base_y + ink_bottom + shift + padding,
         );
-        let overlaps_text = layout.occupied.iter().any(|previous| {
-            candidate.0 < previous.right + 2.0
-                && candidate.2 + 2.0 > previous.left
-                && candidate.1 < previous.bottom + 2.0
-                && candidate.3 + 2.0 > previous.top
-        });
-        let overlaps_notation = layout.notation_bounds.iter().any(|previous| {
-            candidate.0 < previous.right + 2.0
-                && candidate.2 + 2.0 > previous.left
-                && candidate.1 < previous.bottom + 2.0
-                && candidate.3 + 2.0 > previous.top
-        });
+        let overlaps_text = !fixed_metronome_position
+            && layout.occupied.iter().any(|previous| {
+                candidate.0 < previous.right + 2.0
+                    && candidate.2 + 2.0 > previous.left
+                    && candidate.1 < previous.bottom + 2.0
+                    && candidate.3 + 2.0 > previous.top
+            });
+        let overlaps_notation = !fixed_metronome_position
+            && layout.notation_bounds.iter().any(|previous| {
+                candidate.0 < previous.right + 2.0
+                    && candidate.2 + 2.0 > previous.left
+                    && candidate.1 < previous.bottom + 2.0
+                    && candidate.3 + 2.0 > previous.top
+            });
         if !overlaps_text && !overlaps_notation {
             break candidate;
         }
@@ -8574,11 +9121,28 @@ fn add_text_item(
         let y = base_y + shift + glyph_y;
         let x_integer = x.floor() as i32;
         let y_integer = y.floor() as i32;
+        let (id, class) = match item.path_id_prefix {
+            "dynamic" => (
+                format!("dynamic-{index}-glyph-{glyph_index}"),
+                PathClass::DynamicMark,
+            ),
+            "metronome" => (
+                format!("metronome-{index}-glyph-{glyph_index}"),
+                PathClass::MetronomeMark,
+            ),
+            _ => (
+                format!("text-{index}-glyph-{glyph_index}"),
+                PathClass::TextGlyph,
+            ),
+        };
         scene.add_path(
             DrawLayer::Text,
-            format!("text-{index}-glyph-{glyph_index}"),
-            Some(PathClass::TextGlyph),
-            Vec::new(),
+            id,
+            Some(class),
+            item.data_value
+                .as_ref()
+                .map(|value| vec![PathMetadata::Value(value.clone())])
+                .unwrap_or_default(),
             PathGeometry::new(
                 Some((x_integer, y_integer)),
                 glyph.path,
@@ -8596,6 +9160,257 @@ fn add_text_item(
     *layout.view_top = (*layout.view_top).min((box_top - enclosure_stroke_padding).floor() as i32);
     *layout.view_bottom =
         (*layout.view_bottom).max((box_bottom + enclosure_stroke_padding).ceil() as i32);
+}
+
+fn add_metronome_item(
+    scene: &mut Scene,
+    item: &PositionedText,
+    metronome: &MetronomeDisplay,
+    index: usize,
+    anchor_x: f64,
+    measure_start_x: f64,
+    layout: &mut TextLayoutContext<'_>,
+) {
+    let scale = item.font_size / 16.0;
+    let x = item
+        .default_x
+        .map(|value| measure_start_x + value * 2.0)
+        .unwrap_or(anchor_x)
+        + item.relative_x.unwrap_or(0.0) * 2.0;
+    let base_y = item
+        .default_y
+        .map(|value| 68.0 - value * 2.0)
+        .unwrap_or(match item.placement {
+            TextPlacement::Above => 16.0,
+            TextPlacement::Below => 140.0,
+        })
+        - item.relative_y.unwrap_or(0.0) * 2.0;
+    let (beat_width, beat_shift) = add_metronome_beat(
+        scene,
+        &metronome.first_beat,
+        item,
+        MetronomeBeatPosition {
+            mark_index: index,
+            beat_index: 0,
+            x,
+            base_y,
+            scale,
+        },
+        layout,
+    );
+    let mut text_item = item.clone();
+    text_item.metronome = None;
+    text_item.path_id_prefix = "metronome";
+    text_item.data_value = metronome.rate.clone();
+    let text_offset = beat_width + 4.0 * scale;
+    text_item.relative_x = Some(item.relative_x.unwrap_or(0.0) + text_offset / 2.0);
+    if beat_shift != 0.0 {
+        let default_y = item.default_y.unwrap_or(match item.placement {
+            TextPlacement::Above => 26.0,
+            TextPlacement::Below => -36.0,
+        });
+        text_item.default_y = Some(default_y - beat_shift / 2.0);
+    }
+    if let Some(rate) = &metronome.rate {
+        text_item.text = format!("= {rate}");
+        add_text_item(scene, &text_item, index, anchor_x, measure_start_x, layout);
+    } else if let Some(second_beat) = metronome.second_beat {
+        text_item.text = "=".to_owned();
+        add_text_item(scene, &text_item, index, anchor_x, measure_start_x, layout);
+        let equals_width = noto_sans_glyphs::glyph('=')
+            .expect("bundled text repertoire includes equals")
+            .advance
+            * (item.font_size / noto_sans_glyphs::UNITS_PER_EM);
+        let second_x = x + text_offset + equals_width + 4.0 * scale;
+        add_metronome_beat(
+            scene,
+            &second_beat,
+            item,
+            MetronomeBeatPosition {
+                mark_index: index,
+                beat_index: 1,
+                x: second_x,
+                base_y: base_y + beat_shift,
+                scale,
+            },
+            layout,
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MetronomeBeatPosition {
+    mark_index: usize,
+    beat_index: usize,
+    x: f64,
+    base_y: f64,
+    scale: f64,
+}
+
+fn add_metronome_beat(
+    scene: &mut Scene,
+    beat: &BeatUnit,
+    item: &PositionedText,
+    position: MetronomeBeatPosition,
+    layout: &mut TextLayoutContext<'_>,
+) -> (f64, f64) {
+    let MetronomeBeatPosition {
+        mark_index,
+        beat_index,
+        x,
+        base_y,
+        scale,
+    } = position;
+    let beat_scale = scale * 0.6;
+    let duration = beat.duration;
+    let has_stem = !matches!(duration, "whole" | "breve" | "long" | "maxima");
+    let flag_count = match duration {
+        "eighth" => 1,
+        "16th" => 2,
+        "32nd" => 3,
+        "64th" => 4,
+        _ => 0,
+    };
+    let is_half = duration == "half";
+    let rightmost_mark = if beat.dots > 0 {
+        (if is_half { 21 } else { 14 }) + i32::from(beat.dots - 1) * 7 + 3
+    } else if is_half {
+        17
+    } else {
+        10
+    };
+    let width = 18.0_f64.max(f64::from(rightmost_mark));
+    let note_top = base_y - (if has_stem { 41.0 } else { 14.0 }) * beat_scale;
+    let note_bottom = base_y;
+    let mut bounds = ComponentBounds::filled(x, note_top, x + width * beat_scale, note_bottom);
+    let step = item.font_size + 4.0;
+    let direction = if base_y < 68.0 { -1.0 } else { 1.0 };
+    let mut shift: f64 = 0.0;
+    let fixed_position = (item.default_x.is_some() || item.relative_x.is_some())
+        && (item.default_y.is_some() || item.relative_y.is_some());
+    while !fixed_position
+        && (layout.occupied.iter().any(|previous| {
+            bounds.left < previous.right + 2.0
+                && bounds.right + 2.0 > previous.left
+                && bounds.top < previous.bottom + 2.0
+                && bounds.bottom + 2.0 > previous.top
+        }) || layout.notation_bounds.iter().any(|previous| {
+            bounds.left < previous.right + 2.0
+                && bounds.right + 2.0 > previous.left
+                && bounds.top < previous.bottom + 2.0
+                && bounds.bottom + 2.0 > previous.top
+        }))
+    {
+        if shift.abs() > 2000.0 {
+            layout.warnings.push(format!(
+                "metronome item {mark_index} could not be separated from nearby text or notation"
+            ));
+            break;
+        }
+        shift += direction * step;
+        bounds.top += direction * step;
+        bounds.bottom += direction * step;
+    }
+    layout.occupied.push(TextBounds {
+        left: bounds.left,
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+    });
+    let note_x = x;
+    let note_y = base_y - 16.0 * beat_scale + shift;
+    let metadata = item
+        .data_value
+        .as_ref()
+        .map(|value| vec![PathMetadata::Value(value.clone())])
+        .unwrap_or_default();
+    scene.add_path(
+        DrawLayer::Text,
+        format!("metronome-{mark_index}-beat-{beat_index}-head"),
+        Some(PathClass::MetronomeMark),
+        metadata.clone(),
+        PathGeometry::new(
+            Some((note_x.floor() as i32, note_y.floor() as i32)),
+            "M2 2L10 16M10 2L2 16",
+            PathStyle::MediumStroke,
+        )
+        .scaled(beat_scale)
+        .offset_x(note_x - f64::from(note_x.floor() as i32))
+        .offset_y(note_y - f64::from(note_y.floor() as i32))
+        .colored(&item.color),
+    );
+    if has_stem {
+        let stem_x = note_x + 6.0 * beat_scale;
+        let stem_top = note_y - 25.0 * beat_scale;
+        scene.add_path(
+            DrawLayer::Text,
+            format!("metronome-{mark_index}-beat-{beat_index}-stem"),
+            Some(PathClass::MetronomeMark),
+            metadata.clone(),
+            PathGeometry::new(
+                Some((stem_x.floor() as i32, stem_top.floor() as i32)),
+                "M0 0V29",
+                PathStyle::MediumStroke,
+            )
+            .scaled(beat_scale)
+            .offset_x(stem_x - f64::from(stem_x.floor() as i32))
+            .offset_y(stem_top - f64::from(stem_top.floor() as i32))
+            .colored(&item.color),
+        );
+        if flag_count > 0 {
+            let flag = bravura_glyphs::flag(flag_count, true);
+            scene.add_path(
+                DrawLayer::Text,
+                format!("metronome-{mark_index}-beat-{beat_index}-flag"),
+                Some(PathClass::MetronomeMark),
+                metadata,
+                PathGeometry::new(
+                    Some((stem_x.floor() as i32, stem_top.floor() as i32)),
+                    flag.path,
+                    PathStyle::BravuraGlyph,
+                )
+                .scaled(beat_scale)
+                .offset_x(stem_x - f64::from(stem_x.floor() as i32))
+                .offset_y(stem_top - f64::from(stem_top.floor() as i32))
+                .colored(&item.color),
+            );
+        }
+    }
+    let colon_marks = if is_half { 2 } else { 0 };
+    for mark in 0..colon_marks + beat.dots {
+        let (mark_x, mark_y) = if is_half && mark < colon_marks {
+            (14.0, 5.0 + f64::from(mark) * 7.0)
+        } else {
+            let dot = mark - colon_marks;
+            let start_x = if is_half { 21.0 } else { 14.0 };
+            (start_x + f64::from(dot) * 7.0, 12.0)
+        };
+        let dot_x = note_x + mark_x * beat_scale;
+        let dot_y = note_y + mark_y * beat_scale;
+        scene.add_path(
+            DrawLayer::Text,
+            format!("metronome-{mark_index}-beat-{beat_index}-mark-{mark}"),
+            Some(PathClass::MetronomeMark),
+            item.data_value
+                .as_ref()
+                .map(|value| vec![PathMetadata::Value(value.clone())])
+                .unwrap_or_default(),
+            PathGeometry::new(
+                Some((dot_x.floor() as i32, dot_y.floor() as i32)),
+                "M0 1.5A1.5 1.5 0 1 0 3 1.5A1.5 1.5 0 1 0 0 1.5Z",
+                PathStyle::FilledGlyph,
+            )
+            .scaled(beat_scale)
+            .offset_x(dot_x - f64::from(dot_x.floor() as i32))
+            .offset_y(dot_y - f64::from(dot_y.floor() as i32))
+            .colored(&item.color),
+        );
+    }
+    *layout.left = (*layout.left).min(bounds.left.floor() as i32);
+    *layout.right = (*layout.right).max(bounds.right.ceil() as i32);
+    *layout.view_top = (*layout.view_top).min(bounds.top.floor() as i32);
+    *layout.view_bottom = (*layout.view_bottom).max(bounds.bottom.ceil() as i32);
+    (width * beat_scale, shift)
 }
 
 fn add_direction_glyph(
@@ -10456,6 +11271,7 @@ fn render_part_svg(
     }
     notation_bounds.push(ComponentBounds::filled(26.0, 49.0, 38.0, 67.0));
     notation_bounds.push(ComponentBounds::filled(26.0, 69.0, 38.0, 87.0));
+    pending_texts.sort_by_key(|(text, _, _, _)| text.path_id_prefix == "metronome");
     for (text, text_item_index, anchor_x, measure_start_x) in pending_texts {
         add_text_item(
             &mut scene,
