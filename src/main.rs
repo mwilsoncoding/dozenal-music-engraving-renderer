@@ -9280,7 +9280,7 @@ fn add_metronome_beat(
         10
     };
     let width = 18.0_f64.max(f64::from(rightmost_mark));
-    let note_top = base_y - (if has_stem { 25.0 } else { 14.0 }) * beat_scale;
+    let note_top = base_y - (if has_stem { 41.0 } else { 14.0 }) * beat_scale;
     let note_bottom = base_y;
     let mut bounds = ComponentBounds::filled(x, note_top, x + width * beat_scale, note_bottom);
     let step = item.font_size + 4.0;
@@ -9341,7 +9341,7 @@ fn add_metronome_beat(
     );
     if has_stem {
         let stem_x = note_x + 6.0 * beat_scale;
-        let stem_top = note_y - 9.0 * beat_scale;
+        let stem_top = note_y - 25.0 * beat_scale;
         scene.add_path(
             DrawLayer::Text,
             format!("metronome-{mark_index}-beat-{beat_index}-stem"),
@@ -9349,7 +9349,7 @@ fn add_metronome_beat(
             metadata.clone(),
             PathGeometry::new(
                 Some((stem_x.floor() as i32, stem_top.floor() as i32)),
-                "M0 0V13",
+                "M0 0V29",
                 PathStyle::MediumStroke,
             )
             .scaled(beat_scale)

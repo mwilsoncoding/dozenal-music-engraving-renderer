@@ -2424,6 +2424,10 @@ fn renders_metronome_rate_in_dozenal() {
     let (stem_x, _) = path_translation_f64(stem_line);
     let (_, numeral_y) = path_translation_f64(numeral_line);
     assert!(
+        stem_line.contains("d=\"M0 0V29\"") && stem_line.contains("scale(0.6)"),
+        "tempo stem should use the staff's standard length scaled to cue size"
+    );
+    assert!(
         (head_y + 16.0 * 0.6 - numeral_y).abs() < 0.01,
         "X tonehead bottom ({}) should align with the rate numeral baseline ({numeral_y})",
         head_y + 16.0 * 0.6
