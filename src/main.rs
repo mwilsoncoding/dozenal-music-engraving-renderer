@@ -9052,6 +9052,9 @@ fn add_text_item(
     let text_right = text_x + ink_right.max(max_line_width);
     let padding = if item.enclosure.is_some() { 3.0 } else { 0.0 };
     let step = (ink_bottom - ink_top + padding * 2.0 + 4.0).max(item.font_size + 4.0);
+    let fixed_metronome_position = item.path_id_prefix == "metronome"
+        && (item.default_x.is_some() || item.relative_x.is_some())
+        && (item.default_y.is_some() || item.relative_y.is_some());
     let mut shift: f64 = 0.0;
     let (box_left, box_top, box_right, box_bottom) = loop {
         let candidate = enclosure_bounds(
@@ -9061,18 +9064,20 @@ fn add_text_item(
             text_right + padding,
             base_y + ink_bottom + shift + padding,
         );
-        let overlaps_text = layout.occupied.iter().any(|previous| {
-            candidate.0 < previous.right + 2.0
-                && candidate.2 + 2.0 > previous.left
-                && candidate.1 < previous.bottom + 2.0
-                && candidate.3 + 2.0 > previous.top
-        });
-        let overlaps_notation = layout.notation_bounds.iter().any(|previous| {
-            candidate.0 < previous.right + 2.0
-                && candidate.2 + 2.0 > previous.left
-                && candidate.1 < previous.bottom + 2.0
-                && candidate.3 + 2.0 > previous.top
-        });
+        let overlaps_text = !fixed_metronome_position
+            && layout.occupied.iter().any(|previous| {
+                candidate.0 < previous.right + 2.0
+                    && candidate.2 + 2.0 > previous.left
+                    && candidate.1 < previous.bottom + 2.0
+                    && candidate.3 + 2.0 > previous.top
+            });
+        let overlaps_notation = !fixed_metronome_position
+            && layout.notation_bounds.iter().any(|previous| {
+                candidate.0 < previous.right + 2.0
+                    && candidate.2 + 2.0 > previous.left
+                    && candidate.1 < previous.bottom + 2.0
+                    && candidate.3 + 2.0 > previous.top
+            });
         if !overlaps_text && !overlaps_notation {
             break candidate;
         }
@@ -9180,7 +9185,7 @@ fn add_metronome_item(
             TextPlacement::Below => 140.0,
         })
         - item.relative_y.unwrap_or(0.0) * 2.0;
-    let beat_width = add_metronome_beat(
+    let (beat_width, beat_shift) = add_metronome_beat(
         scene,
         &metronome.first_beat,
         item,
@@ -9199,6 +9204,13 @@ fn add_metronome_item(
     text_item.data_value = metronome.rate.clone();
     let text_offset = beat_width + 4.0 * scale;
     text_item.relative_x = Some(item.relative_x.unwrap_or(0.0) + text_offset / 2.0);
+    if beat_shift != 0.0 {
+        let default_y = item.default_y.unwrap_or(match item.placement {
+            TextPlacement::Above => 26.0,
+            TextPlacement::Below => -36.0,
+        });
+        text_item.default_y = Some(default_y - beat_shift / 2.0);
+    }
     if let Some(rate) = &metronome.rate {
         text_item.text = format!("= {rate}");
         add_text_item(scene, &text_item, index, anchor_x, measure_start_x, layout);
@@ -9218,7 +9230,7 @@ fn add_metronome_item(
                 mark_index: index,
                 beat_index: 1,
                 x: second_x,
-                base_y,
+                base_y: base_y + beat_shift,
                 scale,
             },
             layout,
@@ -9241,7 +9253,7 @@ fn add_metronome_beat(
     item: &PositionedText,
     position: MetronomeBeatPosition,
     layout: &mut TextLayoutContext<'_>,
-) -> f64 {
+) -> (f64, f64) {
     let MetronomeBeatPosition {
         mark_index,
         beat_index,
@@ -9249,6 +9261,7 @@ fn add_metronome_beat(
         base_y,
         scale,
     } = position;
+    let beat_scale = scale * 0.6;
     let duration = beat.duration;
     let has_stem = !matches!(duration, "whole" | "breve" | "long" | "maxima");
     let flag_count = match duration {
@@ -9258,24 +9271,36 @@ fn add_metronome_beat(
         "64th" => 4,
         _ => 0,
     };
-    let width = 18.0 + f64::from(beat.dots) * 4.0;
-    let note_top = base_y - 10.0 * scale;
-    let note_bottom = base_y + 10.0 * scale;
-    let mut bounds = ComponentBounds::filled(x, note_top, x + width * scale, note_bottom);
+    let is_half = duration == "half";
+    let rightmost_mark = if beat.dots > 0 {
+        (if is_half { 21 } else { 14 }) + i32::from(beat.dots - 1) * 7 + 3
+    } else if is_half {
+        17
+    } else {
+        10
+    };
+    let width = 18.0_f64.max(f64::from(rightmost_mark));
+    let note_top = base_y - (if has_stem { 25.0 } else { 14.0 }) * beat_scale;
+    let note_bottom = base_y;
+    let mut bounds = ComponentBounds::filled(x, note_top, x + width * beat_scale, note_bottom);
     let step = item.font_size + 4.0;
     let direction = if base_y < 68.0 { -1.0 } else { 1.0 };
     let mut shift: f64 = 0.0;
-    while layout.occupied.iter().any(|previous| {
-        bounds.left < previous.right + 2.0
-            && bounds.right + 2.0 > previous.left
-            && bounds.top < previous.bottom + 2.0
-            && bounds.bottom + 2.0 > previous.top
-    }) || layout.notation_bounds.iter().any(|previous| {
-        bounds.left < previous.right + 2.0
-            && bounds.right + 2.0 > previous.left
-            && bounds.top < previous.bottom + 2.0
-            && bounds.bottom + 2.0 > previous.top
-    }) {
+    let fixed_position = (item.default_x.is_some() || item.relative_x.is_some())
+        && (item.default_y.is_some() || item.relative_y.is_some());
+    while !fixed_position
+        && (layout.occupied.iter().any(|previous| {
+            bounds.left < previous.right + 2.0
+                && bounds.right + 2.0 > previous.left
+                && bounds.top < previous.bottom + 2.0
+                && bounds.bottom + 2.0 > previous.top
+        }) || layout.notation_bounds.iter().any(|previous| {
+            bounds.left < previous.right + 2.0
+                && bounds.right + 2.0 > previous.left
+                && bounds.top < previous.bottom + 2.0
+                && bounds.bottom + 2.0 > previous.top
+        }))
+    {
         if shift.abs() > 2000.0 {
             layout.warnings.push(format!(
                 "metronome item {mark_index} could not be separated from nearby text or notation"
@@ -9292,36 +9317,31 @@ fn add_metronome_beat(
         right: bounds.right,
         bottom: bounds.bottom,
     });
-    let note_x = x + 2.0 * scale;
-    let note_y = base_y + shift;
+    let note_x = x;
+    let note_y = base_y - 16.0 * beat_scale + shift;
     let metadata = item
         .data_value
         .as_ref()
         .map(|value| vec![PathMetadata::Value(value.clone())])
         .unwrap_or_default();
-    let head = "M0 5C0 2.2 2.7 0 6.5 0S13 2.2 13 5 10.3 10 6.5 10 0 7.8 0 5Z";
     scene.add_path(
         DrawLayer::Text,
         format!("metronome-{mark_index}-beat-{beat_index}-head"),
         Some(PathClass::MetronomeMark),
         metadata.clone(),
         PathGeometry::new(
-            Some((note_x.floor() as i32, (note_y + 4.0 * scale).floor() as i32)),
-            head,
-            if matches!(duration, "whole" | "half" | "breve" | "long" | "maxima") {
-                PathStyle::MediumOutline
-            } else {
-                PathStyle::FilledGlyph
-            },
+            Some((note_x.floor() as i32, note_y.floor() as i32)),
+            "M2 2L10 16M10 2L2 16",
+            PathStyle::MediumStroke,
         )
-        .scaled(scale)
+        .scaled(beat_scale)
         .offset_x(note_x - f64::from(note_x.floor() as i32))
-        .offset_y(note_y + 4.0 * scale - f64::from((note_y + 4.0 * scale).floor() as i32))
+        .offset_y(note_y - f64::from(note_y.floor() as i32))
         .colored(&item.color),
     );
     if has_stem {
-        let stem_x = note_x + 11.0 * scale;
-        let stem_top = note_y - 9.0 * scale;
+        let stem_x = note_x + 6.0 * beat_scale;
+        let stem_top = note_y - 9.0 * beat_scale;
         scene.add_path(
             DrawLayer::Text,
             format!("metronome-{mark_index}-beat-{beat_index}-stem"),
@@ -9332,7 +9352,7 @@ fn add_metronome_beat(
                 "M0 0V13",
                 PathStyle::MediumStroke,
             )
-            .scaled(scale)
+            .scaled(beat_scale)
             .offset_x(stem_x - f64::from(stem_x.floor() as i32))
             .offset_y(stem_top - f64::from(stem_top.floor() as i32))
             .colored(&item.color),
@@ -9349,19 +9369,27 @@ fn add_metronome_beat(
                     flag.path,
                     PathStyle::BravuraGlyph,
                 )
-                .scaled(scale)
+                .scaled(beat_scale)
                 .offset_x(stem_x - f64::from(stem_x.floor() as i32))
                 .offset_y(stem_top - f64::from(stem_top.floor() as i32))
                 .colored(&item.color),
             );
         }
     }
-    for dot in 0..beat.dots {
-        let dot_x = note_x + (16.0 + f64::from(dot) * 4.0) * scale;
-        let dot_y = note_y + 7.0 * scale;
+    let colon_marks = if is_half { 2 } else { 0 };
+    for mark in 0..colon_marks + beat.dots {
+        let (mark_x, mark_y) = if is_half && mark < colon_marks {
+            (14.0, 5.0 + f64::from(mark) * 7.0)
+        } else {
+            let dot = mark - colon_marks;
+            let start_x = if is_half { 21.0 } else { 14.0 };
+            (start_x + f64::from(dot) * 7.0, 12.0)
+        };
+        let dot_x = note_x + mark_x * beat_scale;
+        let dot_y = note_y + mark_y * beat_scale;
         scene.add_path(
             DrawLayer::Text,
-            format!("metronome-{mark_index}-beat-{beat_index}-dot-{dot}"),
+            format!("metronome-{mark_index}-beat-{beat_index}-mark-{mark}"),
             Some(PathClass::MetronomeMark),
             item.data_value
                 .as_ref()
@@ -9372,7 +9400,7 @@ fn add_metronome_beat(
                 "M0 1.5A1.5 1.5 0 1 0 3 1.5A1.5 1.5 0 1 0 0 1.5Z",
                 PathStyle::FilledGlyph,
             )
-            .scaled(scale)
+            .scaled(beat_scale)
             .offset_x(dot_x - f64::from(dot_x.floor() as i32))
             .offset_y(dot_y - f64::from(dot_y.floor() as i32))
             .colored(&item.color),
@@ -9382,7 +9410,7 @@ fn add_metronome_beat(
     *layout.right = (*layout.right).max(bounds.right.ceil() as i32);
     *layout.view_top = (*layout.view_top).min(bounds.top.floor() as i32);
     *layout.view_bottom = (*layout.view_bottom).max(bounds.bottom.ceil() as i32);
-    width * scale
+    (width * beat_scale, shift)
 }
 
 fn add_direction_glyph(
@@ -11243,6 +11271,7 @@ fn render_part_svg(
     }
     notation_bounds.push(ComponentBounds::filled(26.0, 49.0, 38.0, 67.0));
     notation_bounds.push(ComponentBounds::filled(26.0, 69.0, 38.0, 87.0));
+    pending_texts.sort_by_key(|(text, _, _, _)| text.path_id_prefix == "metronome");
     for (text, text_item_index, anchor_x, measure_start_x) in pending_texts {
         add_text_item(
             &mut scene,

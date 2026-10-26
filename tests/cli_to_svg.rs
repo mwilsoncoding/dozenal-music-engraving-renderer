@@ -2408,6 +2408,30 @@ fn renders_metronome_rate_in_dozenal() {
         svg.contains("data-value=\"↊0\""),
         "decimal tempo 120 should be labeled with its dozenal value: {svg}"
     );
+    let head_line = svg
+        .lines()
+        .find(|line| line.contains("id=\"metronome-0-beat-0-head\""))
+        .expect("tempo X tonehead");
+    let stem_line = svg
+        .lines()
+        .find(|line| line.contains("id=\"metronome-0-beat-0-stem\""))
+        .expect("tempo stem");
+    let numeral_line = svg
+        .lines()
+        .find(|line| line.contains("id=\"metronome-0-glyph-3\""))
+        .expect("last dozenal rate numeral");
+    let (head_x, head_y) = path_translation_f64(head_line);
+    let (stem_x, _) = path_translation_f64(stem_line);
+    let (_, numeral_y) = path_translation_f64(numeral_line);
+    assert!(
+        (head_y + 16.0 * 0.6 - numeral_y).abs() < 0.01,
+        "X tonehead bottom ({}) should align with the rate numeral baseline ({numeral_y})",
+        head_y + 16.0 * 0.6
+    );
+    assert!(
+        (stem_x - (head_x + 6.0 * 0.6)).abs() < 0.01,
+        "tempo stem should be centered on the X tonehead"
+    );
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
@@ -2453,7 +2477,7 @@ fn renders_simple_metronome_beat_equivalence() {
     let input = directory.join("tempo-equivalence.musicxml");
     let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml").replace(
         "<rehearsal>A</rehearsal>",
-        "<metronome><beat-unit>quarter</beat-unit><beat-unit>half</beat-unit></metronome>",
+        "<metronome><beat-unit>quarter</beat-unit><beat-unit-dot/><beat-unit>half</beat-unit><beat-unit-dot/></metronome>",
     );
     fs::write(&input, fixture).expect("write tempo equivalence score");
 
@@ -2471,6 +2495,18 @@ fn renders_simple_metronome_beat_equivalence() {
         svg.contains("id=\"metronome-0-beat-0-head\"")
             && svg.contains("id=\"metronome-0-beat-1-head\""),
         "simple tempo equivalence should show both beat-unit symbols: {svg}"
+    );
+    assert_eq!(
+        svg.matches("d=\"M2 2L10 16M10 2L2 16\"").count(),
+        2,
+        "tempo beat units should use unpitched X toneheads"
+    );
+    assert!(
+        svg.contains("id=\"metronome-0-beat-0-mark-0\"")
+            && svg.contains("id=\"metronome-0-beat-1-mark-0\"")
+            && svg.contains("id=\"metronome-0-beat-1-mark-1\"")
+            && svg.contains("id=\"metronome-0-beat-1-mark-2\""),
+        "dotted quarter and half-note beat units should show dot and colon-plus-dot marks"
     );
 
     fs::remove_dir_all(directory).expect("remove test directory");
@@ -2650,6 +2686,63 @@ fn renders_tempo_and_dynamic_marks_example() {
             && svg.contains("class=\"dynamic-mark\"")
             && svg.contains("data-value=\"↊0\""),
         "example should render tempo and Dynamics using dozenal rate labels: {svg}"
+    );
+    let tempo_head = svg
+        .lines()
+        .find(|line| line.contains("id=\"metronome-5-beat-0-head\""))
+        .expect("measure 3 tempo beat indicator");
+    let tempo_stem = svg
+        .lines()
+        .find(|line| line.contains("id=\"metronome-5-beat-0-stem\""))
+        .expect("measure 3 tempo stem");
+    let sfz = svg
+        .lines()
+        .find(|line| line.contains("id=\"dynamic-6-glyph-0\""))
+        .expect("measure 3 sfz Dynamic Mark");
+    assert!(
+        tempo_head.contains("scale(0.6)") && tempo_stem.contains("scale(0.6)"),
+        "beat-unit indicators should be cue-sized"
+    );
+    let (_, head_y) = path_translation_f64(tempo_head);
+    let (_, sfz_y) = path_translation_f64(sfz);
+    assert!(
+        head_y + 16.0 * 0.6 + 2.0 < sfz_y,
+        "measure 3 tempo stem should clear and sit above the sfz Dynamic Mark"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn explicit_tempo_coordinates_override_dynamic_collision_placement() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("explicit-tempo-position.musicxml");
+    let fixture = include_str!("../examples/tempo-dynamic-marks/tempo-dynamic-marks.musicxml").replace(
+        "<metronome><beat-unit>half</beat-unit><beat-unit>quarter</beat-unit></metronome>",
+        "<metronome default-x=\"0\" default-y=\"20\"><beat-unit>half</beat-unit><beat-unit>quarter</beat-unit></metronome>",
+    );
+    fs::write(&input, fixture).expect("write explicitly positioned tempo score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "explicit tempo positioning failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("explicit-tempo-position.svg"))
+        .expect("read explicitly positioned tempo SVG");
+    let tempo_head = svg
+        .lines()
+        .find(|line| line.contains("id=\"metronome-5-beat-0-head\""))
+        .expect("explicitly positioned measure 3 tempo beat");
+    let (_, head_y) = path_translation_f64(tempo_head);
+    assert!(
+        (head_y - 18.4).abs() < 0.01,
+        "explicit default-y should override collision placement: {head_y}"
     );
 
     fs::remove_dir_all(directory).expect("remove test directory");
