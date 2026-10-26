@@ -398,6 +398,17 @@ struct RenderedPart {
     barline_positions: Vec<i32>,
 }
 
+const SYSTEM_MAX_WIDTH: i32 = 680;
+const SYSTEM_ROW_HEIGHT: i32 = 160;
+
+struct SystemLayout {
+    starts: Vec<usize>,
+    measure_systems: Vec<usize>,
+    local_barline_positions: Vec<i32>,
+    x_offsets: Vec<i32>,
+    gap_expansions: Vec<i32>,
+}
+
 #[derive(Clone)]
 struct PositionedText {
     event_index: usize,
@@ -531,12 +542,21 @@ struct CliOptions {
     input_path: PathBuf,
     output_path: Option<PathBuf>,
     input_staff_mode: InputStaffMode,
+    system_alignment: SystemAlignment,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InputStaffMode {
     Combine,
     Separate,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SystemAlignment {
+    Justified,
+    Left,
+    Right,
+    Centered,
 }
 
 fn main() {
@@ -567,7 +587,7 @@ fn run() -> Result<(), String> {
 
     let rendered_outputs = match options.input_staff_mode {
         InputStaffMode::Combine => {
-            let svg = render_svg(&score, &mut warnings);
+            let svg = render_svg_with_alignment(&score, &mut warnings, options.system_alignment)?;
             vec![(output_path, svg)]
         }
         InputStaffMode::Separate => {
@@ -581,7 +601,11 @@ fn run() -> Result<(), String> {
             for staff_number in 1..=staff_count {
                 let path = separate_staff_output_path(&output_path, staff_number);
                 let staff_score = score_for_input_staff(&score, staff_number);
-                let svg = render_svg(&staff_score, &mut warnings);
+                let svg = render_svg_with_alignment(
+                    &staff_score,
+                    &mut warnings,
+                    options.system_alignment,
+                )?;
                 outputs.push((path, svg));
             }
             outputs
@@ -606,6 +630,7 @@ fn parse_args() -> Result<CliOptions, String> {
     let mut input = None;
     let mut output = None;
     let mut input_staff_mode = None;
+    let mut system_alignment = None;
 
     while let Some(argument) = args.next() {
         if argument == "--output" {
@@ -636,6 +661,30 @@ fn parse_args() -> Result<CliOptions, String> {
                     }
                 },
             );
+        } else if argument == "--system-alignment" {
+            if system_alignment.is_some() {
+                return Err("--system-alignment may only be specified once".to_owned());
+            }
+            system_alignment = Some(
+                match args
+                    .next()
+                    .ok_or_else(|| {
+                        "--system-alignment requires justified, left, right, or centered".to_owned()
+                    })?
+                    .to_string_lossy()
+                    .as_ref()
+                {
+                    "justified" => SystemAlignment::Justified,
+                    "left" => SystemAlignment::Left,
+                    "right" => SystemAlignment::Right,
+                    "centered" => SystemAlignment::Centered,
+                    value => {
+                        return Err(format!(
+                            "--system-alignment must be 'justified', 'left', 'right', or 'centered', not {value:?}"
+                        ));
+                    }
+                },
+            );
         } else if argument.to_string_lossy().starts_with('-') {
             return Err(format!("unsupported option {}", argument.to_string_lossy()));
         } else if input.replace(PathBuf::from(argument)).is_some() {
@@ -644,12 +693,13 @@ fn parse_args() -> Result<CliOptions, String> {
     }
 
     let input = input.ok_or_else(|| {
-        "usage: domunor INPUT [--output FILE.svg] [--input-staff-mode combine|separate]".to_owned()
+        "usage: domunor INPUT [--output FILE.svg] [--input-staff-mode combine|separate] [--system-alignment justified|left|right|centered]".to_owned()
     })?;
     Ok(CliOptions {
         input_path: input,
         output_path: output,
         input_staff_mode: input_staff_mode.unwrap_or(InputStaffMode::Combine),
+        system_alignment: system_alignment.unwrap_or(SystemAlignment::Justified),
     })
 }
 
@@ -8581,6 +8631,7 @@ struct Scene {
     view_top: i32,
     view_width: i32,
     view_height: i32,
+    system_y_offset: i32,
     commands: Vec<DrawCommand>,
 }
 
@@ -8609,8 +8660,13 @@ impl Scene {
             view_top,
             view_width,
             view_height,
+            system_y_offset: 0,
             commands: Vec::new(),
         }
+    }
+
+    fn set_system_y_offset(&mut self, offset: i32) {
+        self.system_y_offset = offset;
     }
 
     fn add_path(
@@ -8619,8 +8675,12 @@ impl Scene {
         id: impl Into<String>,
         class: Option<PathClass>,
         metadata: Vec<PathMetadata>,
-        geometry: PathGeometry,
+        mut geometry: PathGeometry,
     ) {
+        if self.system_y_offset != 0 {
+            let (x, y) = geometry.transform.unwrap_or((0, 0));
+            geometry.transform = Some((x, y + self.system_y_offset));
+        }
         self.commands.push(DrawCommand {
             layer,
             id: id.into(),
@@ -9610,16 +9670,148 @@ fn text_enclosure_path(shape: &str, left: f64, top: f64, right: f64, bottom: f64
     format!("M{left:.2} {top:.2}H{right:.2}V{bottom:.2}H{left:.2}Z")
 }
 
-fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
-    if score.parts.len() == 1 {
-        return render_part_svg(&score.parts[0], warnings, None).svg;
+fn plan_system_layout(
+    barline_positions: &[i32],
+    alignment: SystemAlignment,
+    max_width: i32,
+    explicit_breaks: &[usize],
+) -> Result<SystemLayout, String> {
+    if barline_positions.is_empty() {
+        return Ok(SystemLayout {
+            starts: vec![0],
+            measure_systems: Vec::new(),
+            local_barline_positions: Vec::new(),
+            x_offsets: vec![0],
+            gap_expansions: Vec::new(),
+        });
     }
+
+    let measure_start_width = |index: usize| {
+        if index == 0 {
+            barline_positions[index] + 12
+        } else {
+            128 + barline_positions[index] - barline_positions[index - 1]
+        }
+    };
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    let mut width = measure_start_width(0);
+    if width > max_width {
+        return Err(format!(
+            "measure 1 is {width} units wide and cannot fit within the maximum System width of {max_width} units"
+        ));
+    }
+    for measure in 1..barline_positions.len() {
+        let measure_width = measure_start_width(measure);
+        if measure_width > max_width {
+            return Err(format!(
+                "measure {} is {measure_width} units wide and cannot fit within the maximum System width of {max_width} units",
+                measure + 1,
+            ));
+        }
+        let next_width = width + barline_positions[measure] - barline_positions[measure - 1];
+        let explicit_break = explicit_breaks.contains(&measure);
+        if explicit_break || next_width > max_width {
+            ranges.push((start, measure, width, !explicit_break));
+            start = measure;
+            width = measure_width;
+        } else {
+            width = next_width;
+        }
+    }
+    ranges.push((start, barline_positions.len(), width, false));
+
+    let mut starts = Vec::with_capacity(ranges.len());
+    let mut measure_systems = vec![0; barline_positions.len()];
+    let mut local_barline_positions = vec![0; barline_positions.len()];
+    let mut x_offsets = vec![0; ranges.len()];
+    let mut gap_expansions = vec![0; barline_positions.len()];
+    for (system_index, (system_start, system_end, system_width, ended_by_width)) in
+        ranges.iter().copied().enumerate()
+    {
+        starts.push(system_start);
+        for system in measure_systems
+            .iter_mut()
+            .take(system_end)
+            .skip(system_start)
+        {
+            *system = system_index;
+        }
+        let x_offset = match alignment {
+            SystemAlignment::Left | SystemAlignment::Justified => 0,
+            SystemAlignment::Right => max_width - system_width,
+            SystemAlignment::Centered => (max_width - system_width) / 2,
+        };
+        x_offsets[system_index] = x_offset;
+
+        if system_start == 0 {
+            local_barline_positions[system_start] = barline_positions[system_start] + x_offset;
+        } else {
+            local_barline_positions[system_start] =
+                92 + barline_positions[system_start] - barline_positions[system_start - 1] - 4
+                    + x_offset;
+        }
+        for measure in system_start + 1..system_end {
+            local_barline_positions[measure] = local_barline_positions[measure - 1]
+                + barline_positions[measure]
+                - barline_positions[measure - 1]
+                + x_offset
+                - x_offset;
+        }
+
+        if alignment == SystemAlignment::Justified
+            && ended_by_width
+            && system_end > system_start + 1
+        {
+            let extra_width = max_width - system_width;
+            let gap_count = system_end - system_start - 1;
+            let weights = (system_start..system_end - 1)
+                .map(|measure| (barline_positions[measure + 1] - barline_positions[measure]).max(1))
+                .collect::<Vec<_>>();
+            let total_weight = weights.iter().sum::<i32>();
+            let mut fractional_shares = Vec::with_capacity(gap_count);
+            let mut distributed = 0;
+            for (gap, weight) in weights.into_iter().enumerate() {
+                let numerator = extra_width * weight;
+                let share = numerator / total_weight;
+                distributed += share;
+                gap_expansions[system_start + gap] = share;
+                fractional_shares.push((gap, numerator % total_weight));
+            }
+            fractional_shares.sort_by_key(|share| std::cmp::Reverse(share.1));
+            for (gap, _) in fractional_shares
+                .into_iter()
+                .take((extra_width - distributed) as usize)
+            {
+                gap_expansions[system_start + gap] += 1;
+            }
+            for measure in system_start + 1..system_end {
+                local_barline_positions[measure] +=
+                    gap_expansions[system_start..measure].iter().sum::<i32>();
+            }
+        }
+    }
+
+    Ok(SystemLayout {
+        starts,
+        measure_systems,
+        local_barline_positions,
+        x_offsets,
+        gap_expansions,
+    })
+}
+
+fn render_svg_with_alignment(
+    score: &Score,
+    warnings: &mut Vec<String>,
+    alignment: SystemAlignment,
+) -> Result<String, String> {
     let provisional = score
         .parts
         .iter()
         .map(|part| {
             let mut provisional_warnings = Vec::new();
-            render_part_svg(part, &mut provisional_warnings, None)
+            render_part_svg(part, &mut provisional_warnings, None, None, 0, 1)
         })
         .collect::<Vec<_>>();
     let provisional_barline_positions = provisional
@@ -9641,14 +9833,34 @@ fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
             .max()
             .expect("a score contains at least one Part");
     }
+    let system_layout =
+        plan_system_layout(&measure_barline_positions, alignment, SYSTEM_MAX_WIDTH, &[])?;
     let rendered = score
         .parts
         .iter()
-        .map(|part| render_part_svg(part, warnings, Some(&measure_barline_positions)))
+        .enumerate()
+        .map(|(part_index, part)| {
+            render_part_svg(
+                part,
+                warnings,
+                (score.parts.len() > 1).then_some(&system_layout.local_barline_positions),
+                Some(&system_layout),
+                part_index,
+                score.parts.len(),
+            )
+        })
         .collect::<Vec<_>>();
+    if score.parts.len() == 1 {
+        return Ok(rendered.into_iter().next().expect("score has one Part").svg);
+    }
     let left = rendered
         .iter()
         .map(|part| part.view_box.left)
+        .min()
+        .unwrap_or(0);
+    let top = rendered
+        .iter()
+        .map(|part| part.view_box.top)
         .min()
         .unwrap_or(0);
     let notation_right = rendered
@@ -9676,32 +9888,38 @@ fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
         .ceil() as i32;
     let right = notation_right.max(part_name_right);
     let width = right - left;
-    let row_heights = rendered
+    let height = rendered
         .iter()
-        .map(|part| part.view_box.height + 40)
-        .collect::<Vec<_>>();
-    let height = row_heights.iter().sum::<i32>();
+        .map(|part| part.view_box.height)
+        .max()
+        .unwrap_or(0);
     let mut svg = String::new();
-    writeln!(svg, "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{left} 0 {width} {height}\" role=\"img\">")
+    writeln!(svg, "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{left} {top} {width} {height}\" role=\"img\">")
         .expect("writing to a String cannot fail");
-    writeln!(svg, "<rect id=\"background\" x=\"{left}\" y=\"0\" width=\"{width}\" height=\"{height}\" fill=\"#fff\"/>")
+    writeln!(svg, "<rect id=\"background\" x=\"{left}\" y=\"{top}\" width=\"{width}\" height=\"{height}\" fill=\"#fff\"/>")
         .expect("writing to a String cannot fail");
-    let mut row_top = 0;
     for (part_index, (part, rendered_part)) in score.parts.iter().zip(rendered).enumerate() {
-        let offset_y = row_top + 28 - rendered_part.view_box.top;
         let scale = 12.0 / noto_sans_glyphs::UNITS_PER_EM;
-        let mut name_x = 12.0;
-        for (glyph_index, character) in part.name.chars().enumerate() {
-            let glyph = noto_sans_glyphs::glyph(character)
-                .expect("Part name was checked against the bundled glyph repertoire");
-            if !glyph.path.is_empty() {
-                writeln!(svg, "<path id=\"part-name-{part_index}-glyph-{glyph_index}\" transform=\"translate({name_x:.2} {}) scale({scale:.4})\" d=\"{}\" fill=\"#171717\" fill-rule=\"evenodd\"/>", row_top + 18, glyph.path)
-                    .expect("writing to a String cannot fail");
+        for system_index in 0..system_layout.starts.len() {
+            let row_top =
+                (system_index * score.parts.len() + part_index) as i32 * SYSTEM_ROW_HEIGHT;
+            let mut name_x = 12.0;
+            for (glyph_index, character) in part.name.chars().enumerate() {
+                let glyph = noto_sans_glyphs::glyph(character)
+                    .expect("Part name was checked against the bundled glyph repertoire");
+                if !glyph.path.is_empty() {
+                    let id = if system_index == 0 {
+                        format!("part-name-{part_index}-glyph-{glyph_index}")
+                    } else {
+                        format!("part-name-system-{system_index}-{part_index}-glyph-{glyph_index}")
+                    };
+                    writeln!(svg, "<path id=\"{id}\" transform=\"translate({name_x:.2} {}) scale({scale:.4})\" d=\"{}\" fill=\"#171717\" fill-rule=\"evenodd\"/>", row_top + 18, glyph.path)
+                        .expect("writing to a String cannot fail");
+                }
+                name_x += glyph.advance * scale;
             }
-            name_x += glyph.advance * scale;
         }
-        writeln!(svg, "<g transform=\"translate(0 {offset_y})\">")
-            .expect("writing to a String cannot fail");
+        writeln!(svg, "<g>").expect("writing to a String cannot fail");
         for line in rendered_part
             .svg
             .lines()
@@ -9712,10 +9930,15 @@ fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
             svg.push('\n');
         }
         svg.push_str("</g>\n");
-        row_top += row_heights[part_index];
     }
     svg.push_str("</svg>\n");
-    svg
+    Ok(svg)
+}
+
+#[cfg(test)]
+fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
+    render_svg_with_alignment(score, warnings, SystemAlignment::Left)
+        .expect("score fits the configured System width")
 }
 
 fn measure_barline_position(
@@ -9940,6 +10163,9 @@ fn render_part_svg(
     part: &Part,
     warnings: &mut Vec<String>,
     measure_barline_positions: Option<&[i32]>,
+    system_layout: Option<&SystemLayout>,
+    part_index: usize,
+    part_count: usize,
 ) -> RenderedPart {
     let mut scene = Scene::new(0, 0, 0);
     let group_stem_directions = beamed_group_stem_directions(part);
@@ -9963,8 +10189,25 @@ fn render_part_svg(
     let mut occupied_text = Vec::new();
     let mut pending_texts = Vec::new();
     let mut notation_bounds = Vec::new();
+    let mut system_notation_bounds = Vec::new();
     let mut active_ending: Option<(i32, String)> = None;
     for (measure_index, measure) in part.measures.iter().enumerate() {
+        let system_index = system_layout
+            .map(|layout| layout.measure_systems[measure_index])
+            .unwrap_or(0);
+        let is_system_start = measure_index == 0
+            || system_layout.is_some_and(|layout| layout.starts[system_index] == measure_index);
+        if is_system_start {
+            if measure_index > 0 {
+                system_notation_bounds.push(notation_bounds.clone());
+                notation_bounds.clear();
+            }
+            x = 92 + system_layout.map_or(0, |layout| layout.x_offsets[system_index]);
+            scene.set_system_y_offset(
+                (system_index * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT,
+            );
+            active_meter = None;
+        }
         let measure_start_x = f64::from(x);
         let mut event_positions = Vec::new();
         let mut previous_event_geometry = None;
@@ -9983,7 +10226,7 @@ fn render_part_svg(
                 } else {
                     format!("meter-denominator-{meter_index}")
                 };
-                let meter_x = if measure_index == 0 { x - 34 } else { x };
+                let meter_x = if is_system_start { x - 34 } else { x };
                 scene.add_path(
                     DrawLayer::Event,
                     numerator_id,
@@ -10086,6 +10329,7 @@ fn render_part_svg(
                     text_item_index,
                     f64::from(x) + measure.texts[text_index].offset_x,
                     measure_start_x,
+                    system_index,
                 ));
                 text_index += 1;
                 text_item_index += 1;
@@ -10834,6 +11078,7 @@ fn render_part_svg(
                 text_item_index,
                 f64::from(x) + text.offset_x,
                 measure_start_x,
+                system_index,
             ));
             text_index += 1;
             text_item_index += 1;
@@ -11163,8 +11408,9 @@ fn render_part_svg(
         final_barline_x = barline_x;
         barline_positions.push(barline_x);
         right = right.max(barline_x + 12);
-        x = barline_x + 4;
+        x = barline_x + 4 + system_layout.map_or(0, |layout| layout.gap_expansions[measure_index]);
     }
+    system_notation_bounds.push(notation_bounds.clone());
     for (measure_index, measure) in part.measures.iter().enumerate() {
         let Some(multiple_rest) = &measure.multiple_rest else {
             continue;
@@ -11260,19 +11506,72 @@ fn render_part_svg(
         }
         right = right.max(span_end);
     }
-    for staff_y in [28.0, 68.0, 108.0] {
-        notation_bounds.push(ComponentBounds::stroked(
-            12.0,
-            staff_y,
-            f64::from(final_barline_x),
-            staff_y,
-            1.0,
-        ));
+    let system_count = system_layout.map_or(1, |layout| layout.starts.len());
+    let system_ends = (0..system_count)
+        .map(|system_index| {
+            system_layout
+                .and_then(|layout| layout.starts.get(system_index + 1).copied())
+                .unwrap_or(part.measures.len())
+        })
+        .collect::<Vec<_>>();
+    for (system_index, end) in system_ends.iter().copied().enumerate() {
+        let system_barline = barline_positions
+            .get(end.saturating_sub(1))
+            .copied()
+            .unwrap_or(final_barline_x);
+        let system_offset = (system_index * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT;
+        scene.set_system_y_offset(system_offset);
+        for (staff_index, staff_y) in [28.0, 68.0, 108.0].into_iter().enumerate() {
+            let id = if system_index == 0 {
+                format!("staff-line-{}", staff_index + 1)
+            } else {
+                format!("system-{system_index}-staff-line-{}", staff_index + 1)
+            };
+            scene.add_path(
+                DrawLayer::Staff,
+                id,
+                None,
+                Vec::new(),
+                PathGeometry::new(
+                    None,
+                    format!("M12 {staff_y}H{system_barline}"),
+                    PathStyle::StaffLine,
+                ),
+            );
+        }
+        for (label, y, tone) in [("octave-5", 49, 5), ("octave-4", 69, 4)] {
+            let id = if system_index == 0 {
+                label.to_owned()
+            } else {
+                format!("system-{system_index}-{label}")
+            };
+            scene.add_path(
+                DrawLayer::Staff,
+                id,
+                None,
+                Vec::new(),
+                PathGeometry::new(Some((26, y)), glyph_path(tone), PathStyle::FilledGlyph),
+            );
+        }
+        let system_bounds = &mut system_notation_bounds[system_index];
+        system_bounds.extend([28.0, 68.0, 108.0].into_iter().map(|staff_y| {
+            ComponentBounds::stroked(12.0, staff_y, f64::from(system_barline), staff_y, 1.0)
+        }));
+        system_bounds.push(ComponentBounds::filled(26.0, 49.0, 38.0, 67.0));
+        system_bounds.push(ComponentBounds::filled(26.0, 69.0, 38.0, 87.0));
     }
-    notation_bounds.push(ComponentBounds::filled(26.0, 49.0, 38.0, 67.0));
-    notation_bounds.push(ComponentBounds::filled(26.0, 69.0, 38.0, 87.0));
-    pending_texts.sort_by_key(|(text, _, _, _)| text.path_id_prefix == "metronome");
-    for (text, text_item_index, anchor_x, measure_start_x) in pending_texts {
+    pending_texts.sort_by_key(|(text, _, _, _, system_index)| {
+        (*system_index, text.path_id_prefix == "metronome")
+    });
+    let mut current_text_system = None;
+    for (text, text_item_index, anchor_x, measure_start_x, system_index) in pending_texts {
+        if current_text_system != Some(system_index) {
+            occupied_text.clear();
+            current_text_system = Some(system_index);
+        }
+        scene.set_system_y_offset(
+            (system_index * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT,
+        );
         add_text_item(
             &mut scene,
             text,
@@ -11281,7 +11580,7 @@ fn render_part_svg(
             measure_start_x,
             &mut TextLayoutContext {
                 occupied: &mut occupied_text,
-                notation_bounds: &notation_bounds,
+                notation_bounds: &system_notation_bounds[system_index],
                 warnings,
                 left: &mut left,
                 right: &mut right,
@@ -11291,43 +11590,23 @@ fn render_part_svg(
         );
     }
     let view_width = right + 12 - left;
+    let row_count = system_count * part_count;
+    let system_height = if row_count == 1 {
+        view_bottom - view_top
+    } else {
+        row_count as i32 * SYSTEM_ROW_HEIGHT
+    };
     scene.view_left = left;
     scene.view_top = view_top;
     scene.view_width = view_width;
-    scene.view_height = view_bottom - view_top;
+    scene.view_height = system_height;
     let view_box = SvgViewBox {
         left,
         top: view_top,
         width: view_width,
-        height: view_bottom - view_top,
+        height: system_height,
     };
-    for (id, path_data) in [
-        ("staff-line-1", format!("M12 28H{final_barline_x}")),
-        ("staff-line-2", format!("M12 68H{final_barline_x}")),
-        ("staff-line-3", format!("M12 108H{final_barline_x}")),
-    ] {
-        scene.add_path(
-            DrawLayer::Staff,
-            id,
-            None,
-            Vec::new(),
-            PathGeometry::new(None, path_data, PathStyle::StaffLine),
-        );
-    }
-    scene.add_path(
-        DrawLayer::Staff,
-        "octave-5",
-        None,
-        Vec::new(),
-        PathGeometry::new(Some((26, 49)), glyph_path(5), PathStyle::FilledGlyph),
-    );
-    scene.add_path(
-        DrawLayer::Staff,
-        "octave-4",
-        None,
-        Vec::new(),
-        PathGeometry::new(Some((26, 69)), glyph_path(4), PathStyle::FilledGlyph),
-    );
+    scene.set_system_y_offset(0);
     RenderedPart {
         svg: scene.to_svg(),
         view_box,
@@ -11623,7 +11902,64 @@ fn time_signature_glyph_path(value: u8) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{glyph_path, parse_score, render_svg, Meter};
+    use super::{
+        glyph_path, parse_score, plan_system_layout, render_part_svg, render_svg, Meter,
+        SystemAlignment,
+    };
+
+    #[test]
+    fn justified_systems_expand_gaps_proportionally() {
+        let layout = plan_system_layout(
+            &[150, 200, 280, 480, 530],
+            SystemAlignment::Justified,
+            340,
+            &[],
+        )
+        .expect("each measure fits");
+
+        assert_eq!(layout.starts, [0, 3, 4]);
+        assert_eq!(&layout.gap_expansions[..3], [18, 30, 0]);
+        assert_eq!(&layout.local_barline_positions[..3], [150, 218, 328]);
+    }
+
+    #[test]
+    fn short_system_alignment_offsets_the_system_without_justifying_it() {
+        for (alignment, expected_offset) in [
+            (SystemAlignment::Left, 0),
+            (SystemAlignment::Justified, 0),
+            (SystemAlignment::Centered, 44),
+            (SystemAlignment::Right, 88),
+        ] {
+            let layout =
+                plan_system_layout(&[150, 200], alignment, 300, &[]).expect("each measure fits");
+            assert_eq!(layout.x_offsets, [expected_offset]);
+            assert_eq!(layout.gap_expansions, [0, 0]);
+        }
+    }
+
+    #[test]
+    fn system_planner_rejects_an_overwide_measure() {
+        assert!(matches!(
+            plan_system_layout(&[1000], SystemAlignment::Left, 680, &[]),
+            Err(error) if error.contains("measure 1 is") && error.contains("maximum System width")
+        ));
+    }
+
+    #[test]
+    fn renders_breve_long_and_maxima_rest_glyphs() {
+        let source = "<score-partwise version=\"4.0\"><part-list><score-part id=\"P1\"><part-name>Music</part-name></score-part></part-list><part id=\"P1\"><measure number=\"1\"><attributes><divisions>1</divisions></attributes><note><rest/><duration>8</duration><voice>1</voice><type>breve</type></note><note><rest/><duration>16</duration><voice>1</voice><type>long</type></note><note><rest/><duration>32</duration><voice>1</voice><type>maxima</type></note></measure></part></score-partwise>";
+        let score = parse_score(source.as_bytes()).expect("extended rests should parse");
+        let mut warnings = score.warnings.clone();
+        let svg = render_part_svg(&score.parts[0], &mut warnings, None, None, 0, 1).svg;
+
+        assert_eq!(svg.matches("class=\"rest\"").count(), 3, "{svg}");
+        for duration in ["breve", "long", "maxima"] {
+            assert!(
+                svg.contains(&format!("data-duration=\"{duration}\"")),
+                "{svg}"
+            );
+        }
+    }
 
     #[test]
     fn tonehead_one_has_no_projecting_foot() {

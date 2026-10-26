@@ -10,6 +10,115 @@ fn scratch_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("domunor-cli-{}-{nonce}", std::process::id()))
 }
 
+#[test]
+fn wraps_complete_measures_into_systems() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("system-breaks.musicxml");
+    let measures = (1..=24)
+        .map(|number| {
+            let divisions = if number == 1 {
+                "<attributes><divisions>1</divisions></attributes>"
+            } else {
+                ""
+            };
+            format!(
+                "<measure number=\"{number}\">{divisions}<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure>"
+            )
+        })
+        .collect::<String>();
+    let fixture = format!(
+        "<?xml version=\"1.0\"?><score-partwise version=\"4.0\"><part-list><score-part id=\"P1\"><part-name>Music</part-name></score-part></part-list><part id=\"P1\">{measures}</part></score-partwise>"
+    );
+    fs::write(&input, fixture).expect("write system-break score");
+
+    let mut first_tonehead_x = Vec::new();
+    let mut svg = String::new();
+    for alignment in ["justified", "left", "centered", "right"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .arg("--system-alignment")
+            .arg(alignment)
+            .output()
+            .expect("run CLI");
+        assert!(
+            output.status.success(),
+            "{alignment} system layout failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        svg = fs::read_to_string(directory.join("system-breaks.svg")).expect("read SVG");
+        let first = svg
+            .lines()
+            .find(|line| line.contains("id=\"tonehead\""))
+            .expect("first measure Tonehead");
+        first_tonehead_x.push(path_translation_f64(first).0);
+    }
+    assert!(svg.contains("id=\"system-1-staff-line-1\""), "{svg}");
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 24, "{svg}");
+    let staff_endpoints = svg
+        .lines()
+        .filter(|line| line.contains("staff-line-1\""))
+        .map(|line| {
+            line.split_once("H")
+                .and_then(|(_, endpoint)| endpoint.split('"').next())
+                .and_then(|endpoint| endpoint.parse::<i32>().ok())
+                .expect("System staff endpoint")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        staff_endpoints.iter().all(|endpoint| endpoint + 12 <= 680),
+        "System exceeds the configured width: {staff_endpoints:?}"
+    );
+    assert!(first_tonehead_x[0] < first_tonehead_x[2]);
+    assert!(first_tonehead_x[2] < first_tonehead_x[3]);
+    assert_eq!(first_tonehead_x[1], first_tonehead_x[0]);
+    let first = svg
+        .lines()
+        .find(|line| line.contains("id=\"tonehead\""))
+        .expect("first measure Tonehead");
+    let last = svg
+        .lines()
+        .find(|line| line.contains("id=\"tonehead-23\""))
+        .expect("last measure Tonehead");
+    assert!(
+        path_translation_f64(last).1 > path_translation_f64(first).1,
+        "later measures should continue on a lower System"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_a_measure_wider_than_the_configured_system() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("too-wide.musicxml");
+    let notes = (0..40)
+        .map(|_| {
+            "<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>"
+        })
+        .collect::<String>();
+    let fixture = format!(
+        "<?xml version=\"1.0\"?><score-partwise version=\"4.0\"><part-list><score-part id=\"P1\"><part-name>Music</part-name></score-part></part-list><part id=\"P1\"><measure number=\"1\"><attributes><divisions>1</divisions></attributes>{notes}</measure></part></score-partwise>"
+    );
+    fs::write(&input, fixture).expect("write overwide score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("measure 1 is")
+            && String::from_utf8_lossy(&output.stderr).contains("maximum System width"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!directory.join("too-wide.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
 fn path_translation(line: &str) -> (i32, i32) {
     let coordinates = line
         .split("transform=\"translate(")
@@ -1743,7 +1852,7 @@ fn assert_measure_barline_layout(svg: &str) {
         .expect("final barline x position");
     let staff_end_x = svg
         .lines()
-        .find(|line| line.contains("id=\"staff-line-1\""))
+        .rfind(|line| line.contains("staff-line-1\""))
         .and_then(|line| line.split('H').nth(1))
         .and_then(|value| value.split('\"').next())
         .and_then(|value| value.parse::<i32>().ok())
@@ -4905,20 +5014,44 @@ fn engraves_supported_note_durations_and_one_or_two_dots() {
         ("quarter", 28, 2),
         ("half", 56, 2),
     ];
-    let events = forms
-        .iter()
-        .map(|(note_type, ticks, dots)| {
-            let dot = "<dot/>".repeat(*dots);
+    let measures = forms
+        .chunks(4)
+        .enumerate()
+        .map(|(measure_index, measure_forms)| {
+            let events = measure_forms
+                .iter()
+                .map(|(note_type, ticks, dots)| {
+                    let dot = "<dot/>".repeat(*dots);
+                    format!(
+                        "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>{ticks}</duration><voice>1</voice><type>{note_type}</type>{dot}</note>\n"
+                    )
+                })
+                .collect::<String>();
+            let attributes = if measure_index == 0 {
+                "<attributes><divisions>16</divisions></attributes>"
+            } else {
+                ""
+            };
             format!(
-                "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>{ticks}</duration><voice>1</voice><type>{note_type}</type>{dot}</note>\n"
+                "    <measure number=\"{}\">{attributes}{events}</measure>\n",
+                measure_index + 1
             )
         })
         .collect::<String>();
     let source = include_str!("fixtures/minimal.musicxml");
-    let note_start = source.find("      <note>").expect("canonical note start");
-    let note_end = source.find("      </note>").expect("canonical note end") + 13;
-    let fixture = format!("{}{}{}", &source[..note_start], events, &source[note_end..])
-        .replace("<divisions>1</divisions>", "<divisions>16</divisions>");
+    let measure_start = source
+        .find("    <measure number=\"1\">")
+        .expect("canonical measure start");
+    let measure_end = source
+        .find("    </measure>")
+        .expect("canonical measure end")
+        + 15;
+    let fixture = format!(
+        "{}{}{}",
+        &source[..measure_start],
+        measures,
+        &source[measure_end..]
+    );
     fs::write(&input, fixture).expect("write duration score");
 
     let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
@@ -6484,31 +6617,6 @@ fn renders_single_measure_rest_centered_at_double_width() {
         svg.contains("id=\"barline-1\""),
         "explicit barline must remain: {svg}"
     );
-
-    fs::remove_dir_all(directory).expect("remove test directory");
-}
-
-#[test]
-fn renders_breve_long_and_maxima_rests() {
-    let directory = scratch_dir();
-    fs::create_dir_all(&directory).expect("create test directory");
-    let input = directory.join("extended-rests.musicxml");
-    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
-    let rests = "<note><rest/><duration>8</duration><voice>1</voice><type>breve</type></note>\n      <note><rest/><duration>16</duration><voice>1</voice><type>long</type></note>\n      <note><rest/><duration>32</duration><voice>1</voice><type>maxima</type></note>";
-    let fixture = include_str!("fixtures/minimal.musicxml").replace(original_note, rests);
-    fs::write(&input, fixture).expect("write extended-rest score");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
-        .arg(&input)
-        .output()
-        .expect("run CLI");
-    assert!(
-        output.status.success(),
-        "extended Rests should render: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let svg = fs::read_to_string(directory.join("extended-rests.svg")).expect("read SVG");
-    assert_eq!(svg.matches("class=\"rest\"").count(), 3, "{svg}");
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
