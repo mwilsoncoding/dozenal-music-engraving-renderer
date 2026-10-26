@@ -678,8 +678,7 @@ fn pairs_two_note_tremolo_across_measures_without_changing_durations() {
     );
     let tremolo_path = svg
         .lines()
-        .filter(|line| line.contains("class=\"tremolo-mark\""))
-        .next()
+        .find(|line| line.contains("class=\"tremolo-mark\""))
         .expect("connecting tremolo path");
     assert_eq!(tremolo_path.matches('M').count(), 2, "{tremolo_path}");
     assert!(tremolo_path.contains('L'), "{tremolo_path}");
@@ -995,13 +994,12 @@ fn renders_articulation_ornament_fermata_example() {
     );
     let svg = fs::read_to_string(directory.join("articulation-ornament-fermata.svg"))
         .expect("read example SVG");
-    for id in ["articulation-4-0"] {
-        let path = svg
-            .lines()
-            .find(|line| line.contains(&format!("id=\"{id}\"")))
-            .unwrap_or_else(|| panic!("missing {id} path in {svg}"));
-        assert!(path.contains("fill=\"none\""), "{path}");
-    }
+    let id = "articulation-4-0";
+    let path = svg
+        .lines()
+        .find(|line| line.contains(&format!("id=\"{id}\"")))
+        .unwrap_or_else(|| panic!("missing {id} path in {svg}"));
+    assert!(path.contains("fill=\"none\""), "{path}");
     for id in ["ornament-6-0", "fermata-11-0"] {
         let path = svg
             .lines()

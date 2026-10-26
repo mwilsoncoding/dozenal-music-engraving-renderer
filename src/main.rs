@@ -85,6 +85,14 @@ struct NoteParseOptions {
     note_size_scales: NoteSizeScales,
 }
 
+struct NoteParseContext<'a> {
+    divisions: u32,
+    input_staff_states: &'a [InputStaffState],
+    active_tuplets: &'a VoiceState<Option<ActiveTuplet>>,
+    score_instrument_ids: &'a [String],
+    options: NoteParseOptions,
+}
+
 impl Default for NoteSizeScales {
     fn default() -> Self {
         Self {
@@ -1368,13 +1376,15 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                         let mut parsed = parse_note(
                             &elements,
                             *child,
-                            divisions,
-                            &active_staff_states,
-                            &active_tuplets,
-                            &score_part.instrument_ids,
-                            NoteParseOptions {
-                                input_staff_count,
-                                note_size_scales,
+                            NoteParseContext {
+                                divisions,
+                                input_staff_states: &active_staff_states,
+                                active_tuplets: &active_tuplets,
+                                score_instrument_ids: &score_part.instrument_ids,
+                                options: NoteParseOptions {
+                                    input_staff_count,
+                                    note_size_scales,
+                                },
                             },
                             &mut warnings,
                         )?;
@@ -5525,13 +5535,16 @@ fn parse_tuplet_notations(
 fn parse_note(
     elements: &[Element],
     note: usize,
-    divisions: u32,
-    input_staff_states: &[InputStaffState],
-    active_tuplets: &VoiceState<Option<ActiveTuplet>>,
-    score_instrument_ids: &[String],
-    options: NoteParseOptions,
+    context: NoteParseContext<'_>,
     warnings: &mut Vec<String>,
 ) -> Result<ParsedNote, String> {
+    let NoteParseContext {
+        divisions,
+        input_staff_states,
+        active_tuplets,
+        score_instrument_ids,
+        options,
+    } = context;
     let note_element = &elements[note];
     require_no_attributes(note_element)?;
     require_container_text(note_element)?;
@@ -7687,18 +7700,29 @@ fn fermata_layout(
     (left, top, bounds)
 }
 
+#[derive(Clone, Copy)]
+struct FermataAnchor {
+    x: f64,
+    top: f64,
+    bottom: f64,
+    scale: f64,
+}
+
 fn draw_fermata(
     scene: &mut Scene,
     id: String,
     mark: &FermataMark,
-    anchor_x: f64,
-    anchor_top: f64,
-    anchor_bottom: f64,
-    scale: f64,
+    anchor: FermataAnchor,
     occupied: &[ComponentBounds],
 ) -> ComponentBounds {
-    let (left, top, bounds) =
-        fermata_layout(mark, anchor_x, anchor_top, anchor_bottom, scale, occupied);
+    let (left, top, bounds) = fermata_layout(
+        mark,
+        anchor.x,
+        anchor.top,
+        anchor.bottom,
+        anchor.scale,
+        occupied,
+    );
     let left_i = left.floor() as i32;
     let top_i = top.floor() as i32;
     let path = fermata_glyph(mark.shape);
@@ -7710,7 +7734,7 @@ fn draw_fermata(
         PathGeometry::new(Some((left_i, top_i)), path, PathStyle::BravuraGlyph)
             .offset_x(left - f64::from(left_i))
             .offset_y(top - f64::from(top_i))
-            .scaled(scale)
+            .scaled(anchor.scale)
             .rotated_180_about_if(mark.orientation == FermataOrientation::Inverted, 9, 6)
             .colored(&mark.color),
     );
@@ -9348,10 +9372,12 @@ fn render_part_svg(
                         &mut scene,
                         format!("fermata-{index}-{fermata_index}"),
                         fermata,
-                        f64::from(x + 7),
-                        rest_y,
-                        rest_y + 18.0,
-                        event.glyph_scale,
+                        FermataAnchor {
+                            x: f64::from(x + 7),
+                            top: rest_y,
+                            bottom: rest_y + 18.0,
+                            scale: event.glyph_scale,
+                        },
                         &occupied,
                     );
                     occupied_fermata_bounds.push(bounds);
@@ -9946,10 +9972,12 @@ fn render_part_svg(
                     &mut scene,
                     format!("fermata-{index}-{fermata_index}"),
                     fermata,
-                    f64::from(tone_xs[tone_index] + 6),
-                    f64::from(tone_y),
-                    f64::from(tone_y + 18),
-                    event.glyph_scale,
+                    FermataAnchor {
+                        x: f64::from(tone_xs[tone_index] + 6),
+                        top: f64::from(tone_y),
+                        bottom: f64::from(tone_y + 18),
+                        scale: event.glyph_scale,
+                    },
                     &event_mark_bounds,
                 );
                 event_mark_bounds.push(bounds);
@@ -10265,10 +10293,12 @@ fn render_part_svg(
                     &mut scene,
                     format!("fermata-barline-{measure_index}-{fermata_index}"),
                     &fermata,
-                    f64::from(fermata_x),
-                    27.5,
-                    108.5,
-                    1.0,
+                    FermataAnchor {
+                        x: f64::from(fermata_x),
+                        top: 27.5,
+                        bottom: 108.5,
+                        scale: 1.0,
+                    },
                     &occupied_fermata_bounds,
                 );
                 occupied_fermata_bounds.push(bounds);
