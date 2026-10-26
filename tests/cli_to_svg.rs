@@ -1403,6 +1403,189 @@ fn renders_each_input_staff_to_its_own_svg() {
 }
 
 #[test]
+fn reconstructs_beam_groups_in_separate_input_staff_renders() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("cross-input-staff-beams-ties.musicxml");
+    fs::write(
+        &input,
+        include_str!(
+            "../examples/cross-input-staff-beams-ties/cross-input-staff-beams-ties.musicxml"
+        ),
+    )
+    .expect("write cross-Input-Staff beam score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--input-staff-mode")
+        .arg("separate")
+        .output()
+        .expect("run separate-render CLI");
+    assert!(
+        output.status.success(),
+        "separate cross-Input-Staff beam renders failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let staff_one_svg =
+        fs::read_to_string(directory.join("cross-input-staff-beams-ties-staff-1.svg"))
+            .expect("read first Input Staff SVG");
+    let staff_two_svg =
+        fs::read_to_string(directory.join("cross-input-staff-beams-ties-staff-2.svg"))
+            .expect("read second Input Staff SVG");
+    assert_eq!(
+        staff_one_svg.matches("class=\"beam\"").count(),
+        1,
+        "{staff_one_svg}"
+    );
+    assert_eq!(
+        staff_two_svg.matches("class=\"beam\"").count(),
+        0,
+        "{staff_two_svg}"
+    );
+    assert_eq!(
+        staff_two_svg.matches("class=\"beam-hook\"").count(),
+        1,
+        "{staff_two_svg}"
+    );
+    assert_eq!(
+        staff_two_svg.matches("class=\"flag\"").count(),
+        1,
+        "{staff_two_svg}"
+    );
+    assert_eq!(
+        staff_one_svg.matches("class=\"tie\"").count(),
+        1,
+        "{staff_one_svg}"
+    );
+    assert_eq!(
+        staff_two_svg.matches("class=\"tie\"").count(),
+        1,
+        "{staff_two_svg}"
+    );
+    assert!(
+        staff_one_svg.contains("id=\"tie-start-partial-"),
+        "{staff_one_svg}"
+    );
+    assert!(
+        staff_two_svg.contains("id=\"tie-stop-partial-"),
+        "{staff_two_svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn diagnoses_mismatched_numbered_tie_endpoints_in_separate_mode() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("mismatched-numbered-tie.musicxml");
+    let source = include_str!(
+        "../examples/cross-input-staff-beams-ties/cross-input-staff-beams-ties.musicxml"
+    );
+    let fixture = source.replace(
+        "<tied type=\"stop\" number=\"1\"/>",
+        "<tied type=\"stop\" number=\"2\"/>",
+    );
+    fs::write(&input, fixture).expect("write mismatched numbered tie score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--input-staff-mode")
+        .arg("separate")
+        .output()
+        .expect("run separate-render CLI");
+    assert!(
+        !output.status.success(),
+        "mismatched tie numbers were accepted"
+    );
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostic.contains("tie stop must match a preceding concert pitch"));
+    assert!(diagnostic.contains("/measure[@number='1']/note"));
+    assert!(!directory
+        .join("mismatched-numbered-tie-staff-1.svg")
+        .exists());
+
+    let combined = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run combined-render CLI");
+    assert!(
+        combined.status.success(),
+        "combined-mode tie behavior changed: {}",
+        String::from_utf8_lossy(&combined.stderr)
+    );
+    assert!(directory.join("mismatched-numbered-tie.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn diagnoses_duplicate_pitch_tie_endpoints_in_separate_mode() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("duplicate-pitch-tie.musicxml");
+    let source = include_str!(
+        "../examples/cross-input-staff-beams-ties/cross-input-staff-beams-ties.musicxml"
+    );
+    let start_note = "      <note>\n        <pitch><step>F</step><octave>5</octave></pitch>\n        <duration>4</duration><tie type=\"start\"/><voice>1</voice><type>quarter</type><staff>1</staff>\n        <notations><tied type=\"start\" number=\"1\"/></notations>\n      </note>";
+    let duplicate_chord_tone = "\n      <note>\n        <chord/>\n        <pitch><step>F</step><octave>5</octave></pitch>\n        <duration>4</duration><tie type=\"start\"/><voice>1</voice><type>quarter</type><staff>1</staff>\n        <notations><tied type=\"start\" number=\"1\"/></notations>\n      </note>";
+    let fixture = source.replace(start_note, &format!("{start_note}{duplicate_chord_tone}"));
+    fs::write(&input, fixture).expect("write ambiguous tie score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--input-staff-mode")
+        .arg("separate")
+        .output()
+        .expect("run separate-render CLI");
+    assert!(
+        !output.status.success(),
+        "ambiguous tie starts were accepted"
+    );
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostic.contains("chord contains a duplicate concert pitch"));
+    assert!(diagnostic.contains("/measure[@number='1']/note"));
+    assert!(!directory.join("duplicate-pitch-tie-staff-1.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn diagnoses_malformed_cross_input_staff_beams_in_separate_mode() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("malformed-cross-input-staff-beam.musicxml");
+    let source = include_str!(
+        "../examples/cross-input-staff-beams-ties/cross-input-staff-beams-ties.musicxml"
+    );
+    let fixture = source.replace("<beam>end</beam>", "<beam>continue</beam>");
+    fs::write(&input, fixture).expect("write malformed beam score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--input-staff-mode")
+        .arg("separate")
+        .output()
+        .expect("run separate-render CLI");
+    assert!(
+        !output.status.success(),
+        "unterminated beam group was accepted"
+    );
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostic.contains("beam level 1 group is interrupted"),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("/part[@id='P1']"));
+    assert!(!directory
+        .join("malformed-cross-input-staff-beam-staff-1.svg")
+        .exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn scopes_numbered_transposition_to_its_input_staff() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
