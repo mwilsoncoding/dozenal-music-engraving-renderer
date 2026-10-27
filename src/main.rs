@@ -57,6 +57,7 @@ struct Event {
     ornaments: Vec<OrnamentMark>,
     tremolos: Vec<TremoloMark>,
     fermatas: Vec<FermataMark>,
+    spans: Vec<NoteSpanMark>,
 }
 
 #[derive(Clone)]
@@ -233,6 +234,41 @@ struct FermataMark {
     tone_index: Option<usize>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NoteSpanKind {
+    Slur,
+    Glissando,
+    Slide,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NoteSpanEndpoint {
+    Start,
+    Stop,
+    Continue,
+}
+
+#[derive(Clone)]
+struct NoteSpanMark {
+    kind: NoteSpanKind,
+    endpoint: NoteSpanEndpoint,
+    number: u32,
+    tone_index: usize,
+    placement: Option<MarkPlacement>,
+    orientation: Option<String>,
+    line_type: String,
+    label: Option<String>,
+    source: String,
+}
+
+struct NoteSpanAnchor {
+    mark: NoteSpanMark,
+    voice_id: VoiceId,
+    system_index: usize,
+    x: i32,
+    y: i32,
+}
+
 #[derive(Default)]
 struct NotationMarkers {
     tie_start: bool,
@@ -245,6 +281,7 @@ struct NotationMarkers {
     ornaments: Vec<OrnamentMark>,
     tremolos: Vec<TremoloMark>,
     fermatas: Vec<FermataMark>,
+    spans: Vec<NoteSpanMark>,
 }
 
 #[derive(Clone)]
@@ -1779,6 +1816,10 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                             }
                             let chord_tone_index = event.tones.len();
                             event.tones.push(tone);
+                            for mut span in parsed.event.spans {
+                                span.tone_index = chord_tone_index;
+                                event.spans.push(span);
+                            }
                             let default_placement = default_mark_placement(
                                 event,
                                 stem_direction_is_up(event.tones.iter()),
@@ -2304,6 +2345,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
             expected_measure_count = Some(measures.len());
         }
         validate_tremolo_pairs(&elements, &mut measures, &mut warnings)?;
+        validate_note_spans(&measures)?;
         parts.push(Part {
             name: name.clone(),
             input_staff_count,
@@ -2417,6 +2459,56 @@ fn validate_tremolo_pairs(
             &elements[source],
             "two-note tremolo endpoints are separated by a Rest; both endpoints are ignored"
                 .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_note_spans(measures: &[Measure]) -> Result<(), String> {
+    let mut active: Vec<(VoiceId, NoteSpanMark)> = Vec::new();
+    for measure in measures {
+        for event in &measure.events {
+            for mark in &event.spans {
+                let active_position = active.iter().rposition(|(voice_id, start)| {
+                    voice_id == &event.voice_id
+                        && start.kind == mark.kind
+                        && start.number == mark.number
+                });
+                match mark.endpoint {
+                    NoteSpanEndpoint::Start => {
+                        if active_position.is_some() {
+                            return Err(format!(
+                                "overlapping note span start for number {} ({})",
+                                mark.number, mark.source
+                            ));
+                        }
+                        active.push((event.voice_id.clone(), mark.clone()));
+                    }
+                    NoteSpanEndpoint::Stop => {
+                        let Some(position) = active_position else {
+                            return Err(format!(
+                                "note span stop has no matching start for number {} ({})",
+                                mark.number, mark.source
+                            ));
+                        };
+                        active.remove(position);
+                    }
+                    NoteSpanEndpoint::Continue => {
+                        if active_position.is_none() {
+                            return Err(format!(
+                                "Slur continue has no matching start for number {} ({})",
+                                mark.number, mark.source
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some((_, start)) = active.first() {
+        return Err(format!(
+            "note span start has no matching stop for number {} ({})",
+            start.number, start.source
         ));
     }
     Ok(())
@@ -5996,6 +6088,9 @@ fn parse_tuplet_notations(
     ratio: Option<&TupletRatio>,
     event_index: usize,
     is_rest: bool,
+    is_unpitched: bool,
+    is_grace: bool,
+    is_cue: bool,
     warnings: &mut Vec<String>,
 ) -> Result<NotationMarkers, String> {
     let element = &elements[notations];
@@ -6050,6 +6145,21 @@ fn parse_tuplet_notations(
             "fermata" => markers
                 .fermatas
                 .push(parse_fermata(child_element, is_rest, warnings)?),
+            "slur" => markers.spans.push(parse_note_span(
+                child_element,
+                NoteSpanKind::Slur,
+                is_rest || is_unpitched || is_grace || is_cue,
+            )?),
+            "glissando" => markers.spans.push(parse_note_span(
+                child_element,
+                NoteSpanKind::Glissando,
+                is_rest || is_unpitched || is_grace || is_cue,
+            )?),
+            "slide" => markers.spans.push(parse_note_span(
+                child_element,
+                NoteSpanKind::Slide,
+                is_rest || is_unpitched || is_grace || is_cue,
+            )?),
             "tied" => {
                 validate_attributes(child_element, &["type", "number"])?;
                 require_container_text(child_element)?;
@@ -6102,7 +6212,7 @@ fn parse_tuplet_notations(
             _ => {
                 return Err(element_diagnostic(
                     child_element,
-                    "unsupported notation; expected <tied> or <tuplet>".to_owned(),
+                    "unsupported notation; expected <tied>, <tuplet>, <slur>, <glissando>, or <slide>".to_owned(),
                 ));
             }
         }
@@ -6261,6 +6371,129 @@ fn parse_tuplet_notations(
         }
     });
     Ok(markers)
+}
+
+fn parse_note_span(
+    element: &Element,
+    kind: NoteSpanKind,
+    is_rest: bool,
+) -> Result<NoteSpanMark, String> {
+    validate_attributes(
+        element,
+        &[
+            "type",
+            "number",
+            "placement",
+            "orientation",
+            "line-type",
+            "text",
+        ],
+    )?;
+    require_container_text(element)?;
+    if !element.children.is_empty() {
+        return Err(element_diagnostic(
+            element,
+            "note span elements must be empty".to_owned(),
+        ));
+    }
+    if is_rest {
+        return Err(element_diagnostic(
+            element,
+            "note spans may connect only pitched events".to_owned(),
+        ));
+    }
+    let endpoint = match optional_attribute(element, "type") {
+        Some("start") => NoteSpanEndpoint::Start,
+        Some("stop") => NoteSpanEndpoint::Stop,
+        Some("continue") if kind == NoteSpanKind::Slur => NoteSpanEndpoint::Continue,
+        Some(value) => {
+            return Err(element_diagnostic(
+                element,
+                format!("unsupported note span type {value:?}"),
+            ));
+        }
+        None => {
+            return Err(element_diagnostic(
+                element,
+                "note span requires a type attribute".to_owned(),
+            ));
+        }
+    };
+    let number = optional_attribute(element, "number")
+        .unwrap_or("1")
+        .parse::<u32>()
+        .ok()
+        .filter(|number| *number > 0)
+        .ok_or_else(|| {
+            element_diagnostic(
+                element,
+                "note span number must be a positive integer".to_owned(),
+            )
+        })?;
+    let placement = optional_attribute(element, "placement")
+        .map(|value| match value {
+            "above" => Ok(MarkPlacement::Above),
+            "below" => Ok(MarkPlacement::Below),
+            _ => Err(element_diagnostic(
+                element,
+                format!("unsupported note span placement {value:?}"),
+            )),
+        })
+        .transpose()?;
+    let orientation = optional_attribute(element, "orientation").map(str::to_owned);
+    if orientation
+        .as_deref()
+        .is_some_and(|value| !matches!(value, "over" | "under"))
+    {
+        return Err(element_diagnostic(
+            element,
+            "note span orientation must be 'over' or 'under'".to_owned(),
+        ));
+    }
+    let line_type = optional_attribute(element, "line-type").unwrap_or("solid");
+    if !matches!(line_type, "solid" | "dashed" | "dotted" | "wavy") {
+        return Err(element_diagnostic(
+            element,
+            format!("unsupported note span line type {line_type:?}"),
+        ));
+    }
+    let label = optional_attribute(element, "text")
+        .map(|text| {
+            let normalized = normalize_text_nfc(text).map_err(|character| {
+                element_diagnostic(
+                    element,
+                    format!(
+                        "unsupported note span label character U+{:04X}",
+                        u32::from(character)
+                    ),
+                )
+            })?;
+            if normalized
+                .chars()
+                .any(|character| noto_sans_glyphs::glyph(character).is_none())
+            {
+                return Err(element_diagnostic(
+                    element,
+                    "note span label contains an unsupported text character".to_owned(),
+                ));
+            }
+            Ok(normalized)
+        })
+        .transpose()?;
+    Ok(NoteSpanMark {
+        kind,
+        endpoint,
+        number,
+        tone_index: 0,
+        placement,
+        orientation,
+        line_type: line_type.to_owned(),
+        label,
+        source: format!(
+            "byte {}, line {}, column {}, XML path {}",
+            element.byte_offset, element.line, element.column, element.path
+        ),
+    })
 }
 
 fn parse_note(
@@ -6643,6 +6876,9 @@ fn parse_note(
             time_modification.as_ref(),
             event_index,
             is_rest,
+            is_unpitched,
+            is_grace,
+            is_cue,
             warnings,
         )?
     } else {
@@ -6888,6 +7124,7 @@ fn parse_note(
             ornaments: notation_markers.ornaments,
             tremolos: notation_markers.tremolos,
             fermatas: notation_markers.fermatas,
+            spans: notation_markers.spans,
         },
         chord_marker,
         tuplet_boundary,
@@ -7951,6 +8188,9 @@ enum PathClass {
     CodaMark,
     TextEnclosure,
     Tie,
+    Slur,
+    Glissando,
+    Slide,
     RepeatBarline,
     RepeatDot,
     MeasureRepeatDot,
@@ -8937,6 +9177,9 @@ impl Scene {
                 PathClass::CodaMark => "coda-mark",
                 PathClass::TextEnclosure => "text-enclosure",
                 PathClass::Tie => "tie",
+                PathClass::Slur => "slur",
+                PathClass::Glissando => "glissando",
+                PathClass::Slide => "slide",
                 PathClass::RepeatBarline => "repeat-barline",
                 PathClass::RepeatDot => "repeat-dot",
                 PathClass::MeasureRepeatDot => "measure-repeat-dot",
@@ -10378,6 +10621,7 @@ fn render_part_svg(
     let mut pending_texts = Vec::new();
     let mut notation_bounds = Vec::new();
     let mut system_notation_bounds = Vec::new();
+    let mut span_anchors = Vec::new();
     let mut active_ending: Option<(i32, String)> = None;
     for (measure_index, measure) in part.measures.iter().enumerate() {
         let system_index = system_layout
@@ -10648,6 +10892,31 @@ fn render_part_svg(
                     tone_x
                 })
                 .collect::<Vec<_>>();
+            for mark in &event.spans {
+                let tone_index = mark.tone_index.min(event.tones.len() - 1);
+                let tone = &event.tones[tone_index];
+                let above = mark
+                    .orientation
+                    .as_deref()
+                    .map(|orientation| orientation == "over")
+                    .or_else(|| {
+                        mark.placement
+                            .map(|placement| placement == MarkPlacement::Above)
+                    })
+                    .unwrap_or(true);
+                let y = if mark.kind == NoteSpanKind::Slur {
+                    tone.glyph_top() + if above { -8 } else { 28 }
+                } else {
+                    tone.glyph_top() + 9
+                };
+                span_anchors.push(NoteSpanAnchor {
+                    mark: mark.clone(),
+                    voice_id: event.voice_id.clone(),
+                    system_index,
+                    x: tone_xs[tone_index] + 6,
+                    y,
+                });
+            }
             let leftmost_tone_x = *tone_xs.iter().min().expect("event has tones");
             let rightmost_tone_x = *tone_xs.iter().max().expect("event has tones");
             let mut event_mark_bounds = event
@@ -11795,6 +12064,14 @@ fn render_part_svg(
             },
         );
     }
+    add_note_span_paths(
+        &mut scene,
+        span_anchors,
+        &system_ends,
+        &barline_positions,
+        part_index,
+        part_count,
+    );
     let view_width = right + 12 - left;
     let row_count = system_count * part_count;
     let system_height = if row_count == 1 {
@@ -11817,6 +12094,154 @@ fn render_part_svg(
         svg: scene.to_svg(),
         view_box,
         barline_positions,
+    }
+}
+
+fn add_note_span_paths(
+    scene: &mut Scene,
+    anchors: Vec<NoteSpanAnchor>,
+    system_ends: &[usize],
+    barline_positions: &[i32],
+    part_index: usize,
+    part_count: usize,
+) {
+    let mut active: Vec<NoteSpanAnchor> = Vec::new();
+    let mut span_index = 0;
+    for anchor in anchors {
+        if anchor.mark.endpoint == NoteSpanEndpoint::Start {
+            active.push(anchor);
+            continue;
+        }
+        let Some(position) = active.iter().rposition(|start| {
+            start.mark.kind == anchor.mark.kind
+                && start.mark.number == anchor.mark.number
+                && start.voice_id == anchor.voice_id
+        }) else {
+            continue;
+        };
+        let start = active.remove(position);
+        let system_start = start.system_index;
+        let system_end = anchor.system_index;
+        for system_index in system_start..=system_end {
+            let left_x = if system_index == system_start {
+                start.x
+            } else {
+                92
+            };
+            let right_x = if system_index == system_end {
+                anchor.x
+            } else {
+                barline_positions[system_ends[system_index] - 1]
+            };
+            let start_y = start.y;
+            let end_y = if system_index == system_end {
+                anchor.y
+            } else {
+                start.y
+            };
+            let width = right_x - left_x;
+            let path = if start.mark.kind == NoteSpanKind::Slur {
+                let curve = if start.y < 68 { -12 } else { 12 };
+                format!(
+                    "M{left_x} {start_y}C{} {} {} {} {right_x} {end_y}",
+                    left_x + width / 3,
+                    start_y + curve,
+                    right_x - width / 3,
+                    end_y + curve
+                )
+            } else if start.mark.line_type == "wavy" {
+                let segments = (width / 8).max(2);
+                let mut path = format!("M{left_x} {start_y}");
+                for segment in 1..=segments {
+                    let progress = f64::from(segment) / f64::from(segments);
+                    let x = f64::from(left_x) + f64::from(width) * progress;
+                    let y = f64::from(start_y)
+                        + f64::from(end_y - start_y) * progress
+                        + if segment == segments {
+                            0.0
+                        } else if segment % 2 == 0 {
+                            -2.0
+                        } else {
+                            2.0
+                        };
+                    path.push_str(&format!("L{:.1} {:.1}", x, y));
+                }
+                path
+            } else {
+                format!("M{left_x} {start_y}L{right_x} {end_y}")
+            };
+            let (class, prefix) = match start.mark.kind {
+                NoteSpanKind::Slur => (PathClass::Slur, "slur"),
+                NoteSpanKind::Glissando => (PathClass::Glissando, "glissando"),
+                NoteSpanKind::Slide => (PathClass::Slide, "slide"),
+            };
+            let style = match start.mark.line_type.as_str() {
+                "dashed" => PathStyle::DashedStroke,
+                "dotted" => PathStyle::DottedStroke,
+                "wavy" => PathStyle::MediumStroke,
+                _ => PathStyle::MediumOutline,
+            };
+            let system_offset = (system_index * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT;
+            scene.set_system_y_offset(system_offset);
+            scene.add_path(
+                DrawLayer::Tie,
+                format!(
+                    "{prefix}-{}-{span_index}-system-{system_index}",
+                    start.mark.number
+                ),
+                Some(class),
+                Vec::new(),
+                PathGeometry::new(None, path, style),
+            );
+        }
+        if let Some(label) = start.mark.label.as_deref() {
+            let label_x = if system_start == system_end {
+                (start.x + anchor.x) / 2
+            } else {
+                start.x + 24
+            };
+            add_note_span_label(
+                scene,
+                label,
+                label_x,
+                (start.y + anchor.y) / 2 - 5,
+                span_index,
+                (system_start * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT,
+            );
+        }
+        span_index += 1;
+        if anchor.mark.endpoint == NoteSpanEndpoint::Continue {
+            active.push(anchor);
+        }
+    }
+}
+
+fn add_note_span_label(scene: &mut Scene, label: &str, x: i32, y: i32, index: usize, offset: i32) {
+    let scale = 0.015;
+    let normalized = normalize_text_nfc(label).expect("span label was validated during parsing");
+    let width = normalized
+        .chars()
+        .filter_map(noto_sans_glyphs::glyph)
+        .map(|glyph| glyph.advance * scale)
+        .sum::<f64>();
+    let mut glyph_x = f64::from(x) - width / 2.0;
+    scene.set_system_y_offset(offset);
+    for (glyph_index, character) in normalized.chars().enumerate() {
+        let glyph = noto_sans_glyphs::glyph(character)
+            .expect("span label glyph was validated during parsing");
+        scene.add_path(
+            DrawLayer::Text,
+            format!("note-span-label-{index}-{glyph_index}"),
+            Some(PathClass::TextGlyph),
+            vec![PathMetadata::Value(label.to_owned())],
+            PathGeometry::new(
+                Some((glyph_x.round() as i32, y)),
+                glyph.path,
+                PathStyle::TextGlyph,
+            )
+            .scaled(scale),
+        );
+        glyph_x += glyph.advance * scale;
     }
 }
 
