@@ -184,34 +184,39 @@ fn renders_glissandi_and_slides_with_distinct_styles_and_labels() {
             .expect("span label glyph");
         path_translation_f64(line).1
     };
-    let path_y = |path: &str| {
-        path.split_whitespace()
-            .last()
-            .and_then(|coordinate| coordinate.parse::<f64>().ok())
-            .expect("span path endpoint y")
-    };
-    for (label, path) in [("gliss.", dotted_path), ("slide", dashed_path)] {
+    let span_line_ys = svg
+        .lines()
+        .filter(|line| line.contains("class=\"glissando\"") || line.contains("class=\"slide\""))
+        .flat_map(|line| {
+            let path = line
+                .split_once(" d=\"")
+                .and_then(|(_, data)| data.split_once('"').map(|(data, _)| data))
+                .expect("span path data");
+            path.split(['M', 'L'])
+                .filter_map(|point| {
+                    point
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|y| y.parse::<f64>().ok())
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    for label in ["gliss.", "slide"] {
         let label_y = label_y(label);
-        let line_y = path_y(path);
-        assert!((label_y - line_y).abs() <= 14.0, "{label}: {svg}");
-        if label == "gliss." {
-            assert!(
-                label_y < line_y,
-                "default label should be above its line: {svg}"
-            );
-        } else {
-            assert!(
-                label_y > line_y,
-                "label should move below to clear a staff line: {svg}"
-            );
-        }
         let text_top = label_y - 6.5;
-        let text_bottom = label_y + 0.5;
+        let text_bottom = label_y + 2.0;
         assert!(
             [28.0, 68.0, 108.0]
                 .into_iter()
-                .all(|staff_y| staff_y < text_top || staff_y > text_bottom),
+                .all(|staff_y| staff_y < text_top - 0.75 || staff_y > text_bottom + 0.75),
             "{label} overlaps a staff line: {svg}"
+        );
+        assert!(
+            span_line_ys
+                .iter()
+                .all(|span_y| text_bottom + 0.75 < *span_y || text_top - 0.75 > *span_y),
+            "{label} overlaps a span path: {svg}"
         );
     }
 
@@ -288,6 +293,19 @@ fn renders_the_note_spans_example_through_the_cli() {
     assert!(svg.contains("class=\"slur\""), "{svg}");
     assert!(svg.contains("class=\"glissando\""), "{svg}");
     assert!(svg.contains("class=\"slide\""), "{svg}");
+    let span_y = |id: &str| {
+        svg.lines()
+            .find(|line| line.contains(&format!("id=\"{id}\"")))
+            .and_then(|line| line.split_once(" d=\"M"))
+            .and_then(|(_, data)| data.split_once('L'))
+            .and_then(|(start, _)| start.split_whitespace().nth(1))
+            .and_then(|y| y.parse::<f64>().ok())
+            .expect("numbered span path")
+    };
+    assert!(
+        span_y("glissando-1-0-system-0") < span_y("slide-2-1-system-0"),
+        "number-1 dotted glissando should be above number-2 dashed slide: {svg}"
+    );
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }

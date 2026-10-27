@@ -9593,11 +9593,11 @@ fn add_text_item(
             break candidate;
         }
         if item.path_id_prefix == "note-span" {
-            const BELOW_ATTEMPTS: usize = 8;
-            let distance = if note_span_collision_attempt < BELOW_ATTEMPTS {
-                (note_span_collision_attempt + 1) as f64 * 2.0
+            const ABOVE_ATTEMPTS: usize = 8;
+            let distance = if note_span_collision_attempt < ABOVE_ATTEMPTS {
+                -((note_span_collision_attempt + 1) as f64 * 2.0)
             } else {
-                -((note_span_collision_attempt - BELOW_ATTEMPTS + 1) as f64 * 2.0)
+                (note_span_collision_attempt - ABOVE_ATTEMPTS + 1) as f64 * 2.0
             };
             shift = distance;
             note_span_collision_attempt += 1;
@@ -12069,6 +12069,7 @@ fn render_part_svg(
         span_anchors,
         &system_ends,
         &barline_positions,
+        &mut system_notation_bounds,
         part_index,
         part_count,
     );
@@ -12121,7 +12122,7 @@ fn render_part_svg(
             default_x: None,
             default_y: None,
             relative_x: None,
-            relative_y: Some((16.0 - f64::from(label.y - 1)) / 2.0),
+            relative_y: Some((16.0 - f64::from(label.y + 1)) / 2.0),
             path_glyph: None,
             path_id_prefix: "note-span",
             path_scale: 1.0,
@@ -12183,6 +12184,7 @@ fn add_note_span_paths(
     anchors: Vec<NoteSpanAnchor>,
     system_ends: &[usize],
     barline_positions: &[i32],
+    system_notation_bounds: &mut [Vec<ComponentBounds>],
     part_index: usize,
     part_count: usize,
 ) -> Vec<NoteSpanLabel> {
@@ -12234,12 +12236,22 @@ fn add_note_span_paths(
             };
             let base_top = base_start_y.min(base_end_y) - curve_padding;
             let base_bottom = base_start_y.max(base_end_y) + curve_padding;
-            let y_offset = (0..=placed_segments.len())
+            let preferred_direction = if start.mark.number % 2 == 1 { -1 } else { 1 };
+            let mut candidate_offsets = (0..=placed_segments.len().saturating_add(2))
                 .map(|candidate| match candidate {
                     0 => 0,
                     value if value % 2 == 1 => -((value.div_ceil(2) * 4) as i32),
                     value => (value / 2 * 4) as i32,
                 })
+                .collect::<Vec<_>>();
+            candidate_offsets.sort_by_key(|candidate| {
+                (
+                    i32::from(candidate.signum() != preferred_direction),
+                    candidate.abs(),
+                )
+            });
+            let y_offset = candidate_offsets
+                .into_iter()
                 .find(|candidate| {
                     placed_segments.iter().all(
                         |(
@@ -12273,6 +12285,15 @@ fn add_note_span_paths(
             let start_y = base_start_y + y_offset;
             let end_y = base_end_y + y_offset;
             let width = right_x - left_x;
+            if start.mark.kind != NoteSpanKind::Slur {
+                system_notation_bounds[system_index].push(ComponentBounds::stroked(
+                    f64::from(left_edge),
+                    f64::from(base_top + y_offset),
+                    f64::from(right_edge),
+                    f64::from(base_bottom + y_offset),
+                    1.5,
+                ));
+            }
             let path = if start.mark.kind == NoteSpanKind::Slur {
                 let curve = if start.y < 68 { -12 } else { 12 };
                 format!(
