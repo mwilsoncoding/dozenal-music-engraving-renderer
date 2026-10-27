@@ -907,7 +907,21 @@ fn reconstruct_separate_staff_beams(measures: &mut [Measure]) {
 
     for (measure, reconstructed_events) in measures.iter_mut().zip(reconstructed) {
         for (event, beams) in measure.events.iter_mut().zip(reconstructed_events) {
-            event.beams = beams;
+            let retained_levels = beams
+                .iter()
+                .filter(|beam| {
+                    !matches!(beam.state, BeamState::ForwardHook | BeamState::BackwardHook)
+                })
+                .map(|beam| beam.level)
+                .collect::<Vec<_>>();
+            event.beams = beams
+                .into_iter()
+                .filter(|beam| {
+                    !matches!(beam.state, BeamState::ForwardHook | BeamState::BackwardHook)
+                        || beam.level == 1
+                        || retained_levels.contains(&(beam.level - 1))
+                })
+                .collect();
         }
     }
 }

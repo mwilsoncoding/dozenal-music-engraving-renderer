@@ -1445,7 +1445,7 @@ fn reconstructs_beam_groups_in_separate_input_staff_renders() {
     );
     assert_eq!(
         staff_two_svg.matches("class=\"beam-hook\"").count(),
-        1,
+        0,
         "{staff_two_svg}"
     );
     assert_eq!(
@@ -1469,6 +1469,48 @@ fn reconstructs_beam_groups_in_separate_input_staff_renders() {
     );
     assert!(
         staff_two_svg.contains("id=\"tie-stop-partial-"),
+        "{staff_two_svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn preserves_higher_level_hooks_with_retained_lower_beams() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("retained-lower-beam-hook.musicxml");
+    let source = include_str!(
+        "../examples/cross-input-staff-beams-ties/cross-input-staff-beams-ties.musicxml"
+    );
+    let additional_group = "      <note>\n        <pitch><step>G</step><octave>3</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>16th</type><staff>2</staff><beam>begin</beam><beam number=\"2\">forward hook</beam>\n      </note>\n      <note>\n        <pitch><step>A</step><octave>3</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>16th</type><staff>2</staff><beam>end</beam>\n      </note>\n";
+    let fixture = source.replace(
+        "    </measure>",
+        &format!("{additional_group}    </measure>"),
+    );
+    fs::write(&input, fixture).expect("write retained-beam hook score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--input-staff-mode")
+        .arg("separate")
+        .output()
+        .expect("run separate-render CLI");
+    assert!(
+        output.status.success(),
+        "retained lower-level beam failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let staff_two_svg = fs::read_to_string(directory.join("retained-lower-beam-hook-staff-2.svg"))
+        .expect("read second Input Staff SVG");
+    assert_eq!(
+        staff_two_svg.matches("class=\"beam\"").count(),
+        1,
+        "{staff_two_svg}"
+    );
+    assert_eq!(
+        staff_two_svg.matches("class=\"beam-hook\"").count(),
+        1,
         "{staff_two_svg}"
     );
 
