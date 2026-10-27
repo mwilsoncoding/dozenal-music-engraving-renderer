@@ -460,6 +460,7 @@ struct RenderedPart {
 
 const SYSTEM_MAX_WIDTH: i32 = 680;
 const SYSTEM_ROW_HEIGHT: i32 = 160;
+const NOTE_SPAN_TONEHEAD_INSET: i32 = 8;
 
 struct SystemLayout {
     starts: Vec<usize>,
@@ -12190,12 +12191,12 @@ fn add_note_span_paths(
         let system_end = anchor.system_index;
         for system_index in system_start..=system_end {
             let left_x = if system_index == system_start {
-                start.x
+                start.x + NOTE_SPAN_TONEHEAD_INSET
             } else {
                 92
             };
             let right_x = if system_index == system_end {
-                anchor.x
+                anchor.x - NOTE_SPAN_TONEHEAD_INSET
             } else {
                 barline_positions[system_ends[system_index] - 1]
             };

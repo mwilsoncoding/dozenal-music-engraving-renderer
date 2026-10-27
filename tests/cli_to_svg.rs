@@ -165,11 +165,18 @@ fn renders_glissandi_and_slides_with_distinct_styles_and_labels() {
             .and_then(|rest| rest.split_once('"').map(|(data, _)| data))
             .expect("styled span path")
     };
-    assert_ne!(
-        path_data("glissando", "1 3"),
-        path_data("slide", "5 3"),
-        "{svg}"
-    );
+    let dotted_path = path_data("glissando", "1 3");
+    let dashed_path = path_data("slide", "5 3");
+    assert_ne!(dotted_path, dashed_path, "{svg}");
+    for path in [dotted_path, dashed_path] {
+        assert!(path.starts_with("M106 "), "{path}");
+        assert_eq!(
+            path.rsplit_once('L')
+                .and_then(|(_, endpoint)| endpoint.split_whitespace().next()),
+            Some("130"),
+            "{path}"
+        );
+    }
     let label_y = |value: &str| {
         let line = svg
             .lines()
