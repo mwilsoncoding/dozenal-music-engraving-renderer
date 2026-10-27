@@ -9551,11 +9551,16 @@ fn add_text_item(
     let left = text_x + ink_left.min(0.0);
     let text_right = text_x + ink_right.max(max_line_width);
     let padding = if item.enclosure.is_some() { 3.0 } else { 0.0 };
-    let step = (ink_bottom - ink_top + padding * 2.0 + 4.0).max(item.font_size + 4.0);
+    let step = if item.path_id_prefix == "note-span" {
+        (ink_bottom - ink_top + padding * 2.0 + 5.0).max(item.font_size + 5.0)
+    } else {
+        (ink_bottom - ink_top + padding * 2.0 + 4.0).max(item.font_size + 4.0)
+    };
     let fixed_metronome_position = item.path_id_prefix == "metronome"
         && (item.default_x.is_some() || item.relative_x.is_some())
         && (item.default_y.is_some() || item.relative_y.is_some());
     let mut shift: f64 = 0.0;
+    let mut note_span_collision_attempt = 0usize;
     let (box_left, box_top, box_right, box_bottom) = loop {
         let candidate = enclosure_bounds(
             item.enclosure.as_deref(),
@@ -9587,17 +9592,28 @@ fn add_text_item(
             ));
             break candidate;
         }
-        let collision_side = if base_y < 68.0 {
-            TextPlacement::Above
-        } else if base_y > 68.0 {
-            TextPlacement::Below
+        if item.path_id_prefix == "note-span" {
+            const BELOW_ATTEMPTS: usize = 8;
+            let distance = if note_span_collision_attempt < BELOW_ATTEMPTS {
+                (note_span_collision_attempt + 1) as f64 * 2.0
+            } else {
+                -((note_span_collision_attempt - BELOW_ATTEMPTS + 1) as f64 * 2.0)
+            };
+            shift = distance;
+            note_span_collision_attempt += 1;
         } else {
-            item.placement
-        };
-        shift += match collision_side {
-            TextPlacement::Above => -step,
-            TextPlacement::Below => step,
-        };
+            let collision_side = if base_y < 68.0 {
+                TextPlacement::Above
+            } else if base_y > 68.0 {
+                TextPlacement::Below
+            } else {
+                item.placement
+            };
+            shift += match collision_side {
+                TextPlacement::Above => -step,
+                TextPlacement::Below => step,
+            };
+        }
     };
     layout.occupied.push(TextBounds {
         left: box_left,
@@ -12099,13 +12115,13 @@ fn render_part_svg(
             offset_x: 0.0,
             text: label.text.clone(),
             placement: TextPlacement::Above,
-            font_size: 12.0,
+            font_size: 7.0,
             color: "#171717".to_owned(),
             enclosure: None,
             default_x: None,
             default_y: None,
             relative_x: None,
-            relative_y: Some((16.0 - f64::from(label.y)) / 2.0),
+            relative_y: Some((16.0 - f64::from(label.y - 1)) / 2.0),
             path_glyph: None,
             path_id_prefix: "note-span",
             path_scale: 1.0,
@@ -12189,6 +12205,7 @@ fn add_note_span_paths(
         let start = active.remove(position);
         let system_start = start.system_index;
         let system_end = anchor.system_index;
+        let mut start_segment_y_offset = 0;
         for system_index in system_start..=system_end {
             let left_x = if system_index == system_start {
                 start.x + NOTE_SPAN_TONEHEAD_INSET
@@ -12250,6 +12267,9 @@ fn add_note_span_paths(
                 base_bottom,
                 y_offset,
             ));
+            if system_index == system_start {
+                start_segment_y_offset = y_offset;
+            }
             let start_y = base_start_y + y_offset;
             let end_y = base_end_y + y_offset;
             let width = right_x - left_x;
@@ -12316,7 +12336,7 @@ fn add_note_span_paths(
             labels.push(NoteSpanLabel {
                 text: label.to_owned(),
                 center_x,
-                y: (start.y + anchor.y) / 2 - 5,
+                y: (start.y + anchor.y) / 2 + start_segment_y_offset,
                 system_index: system_start,
                 index: span_index,
             });

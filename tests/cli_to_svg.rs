@@ -184,7 +184,36 @@ fn renders_glissandi_and_slides_with_distinct_styles_and_labels() {
             .expect("span label glyph");
         path_translation_f64(line).1
     };
-    assert_ne!(label_y("gliss."), label_y("slide"), "{svg}");
+    let path_y = |path: &str| {
+        path.split_whitespace()
+            .last()
+            .and_then(|coordinate| coordinate.parse::<f64>().ok())
+            .expect("span path endpoint y")
+    };
+    for (label, path) in [("gliss.", dotted_path), ("slide", dashed_path)] {
+        let label_y = label_y(label);
+        let line_y = path_y(path);
+        assert!((label_y - line_y).abs() <= 14.0, "{label}: {svg}");
+        if label == "gliss." {
+            assert!(
+                label_y < line_y,
+                "default label should be above its line: {svg}"
+            );
+        } else {
+            assert!(
+                label_y > line_y,
+                "label should move below to clear a staff line: {svg}"
+            );
+        }
+        let text_top = label_y - 6.5;
+        let text_bottom = label_y + 0.5;
+        assert!(
+            [28.0, 68.0, 108.0]
+                .into_iter()
+                .all(|staff_y| staff_y < text_top || staff_y > text_bottom),
+            "{label} overlaps a staff line: {svg}"
+        );
+    }
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
