@@ -29,6 +29,15 @@ type VoiceBeamStates = VoiceState<[Option<BeamStart>; 5]>;
 type VoiceBeamedStems = VoiceState<Vec<BeamedStem>>;
 type VoiceBeamEvents = VoiceState<Vec<BeamEventPosition>>;
 
+struct PendingTie {
+    tone: Tone,
+    number: Option<u32>,
+    input_staff: u32,
+    measure_index: usize,
+    event_index: usize,
+    tone_index: usize,
+}
+
 #[derive(Clone)]
 struct Event {
     tones: Vec<ToneEvent>,
@@ -59,6 +68,10 @@ struct ToneEvent {
     notehead_scale: f64,
     tie_start: bool,
     tie_stop: bool,
+    tie_start_number: Option<u32>,
+    tie_stop_number: Option<u32>,
+    tie_start_partial: bool,
+    tie_stop_partial: bool,
     input_staff: u32,
 }
 
@@ -224,6 +237,8 @@ struct FermataMark {
 struct NotationMarkers {
     tie_start: bool,
     tie_stop: bool,
+    tie_start_number: Option<u32>,
+    tie_stop_number: Option<u32>,
     tuplet_boundary: Option<TupletBoundary>,
     dynamics: Vec<PositionedText>,
     articulations: Vec<ArticulationMark>,
@@ -718,7 +733,7 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
         .parts
         .iter()
         .map(|part| {
-            let measures = part
+            let mut measures: Vec<Measure> = part
                 .measures
                 .iter()
                 .map(|measure| {
@@ -750,7 +765,6 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
                                 events.push(selected);
                             } else {
                                 selected.is_spacer = true;
-                                selected.beams.clear();
                                 events.push(selected);
                             }
                         } else {
@@ -761,7 +775,6 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
                                 events.push(selected);
                             } else {
                                 selected.is_spacer = true;
-                                selected.beams.clear();
                                 events.push(selected);
                             }
                         }
@@ -838,6 +851,8 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
                     }
                 })
                 .collect();
+            reconstruct_separate_staff_beams(&mut measures);
+            reconstruct_separate_staff_ties(part, &mut measures, staff_number);
             Part {
                 name: part.name.clone(),
                 input_staff_count: part.input_staff_count,
@@ -848,6 +863,142 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
     Score {
         parts,
         warnings: score.warnings.clone(),
+    }
+}
+
+fn reconstruct_separate_staff_ties(part: &Part, measures: &mut [Measure], staff_number: u32) {
+    let mut pending_ties: VoiceState<Vec<PendingTie>> = Vec::new();
+
+    for (measure_index, measure) in part.measures.iter().enumerate() {
+        for (event_index, event) in measure.events.iter().enumerate() {
+            let voice_index = voice_state_index(&mut pending_ties, &event.voice_id);
+            for (tone_index, tone) in event
+                .tones
+                .iter()
+                .enumerate()
+                .filter(|(_, tone)| tone.tie_stop)
+            {
+                let Some(position) = pending_ties[voice_index].1.iter().position(|pending_tie| {
+                    pending_tie.tone == tone.tone && pending_tie.number == tone.tie_stop_number
+                }) else {
+                    continue;
+                };
+                let start = pending_ties[voice_index].1.remove(position);
+                if start.input_staff == tone.input_staff {
+                    continue;
+                }
+                if staff_number == start.input_staff {
+                    measures[start.measure_index].events[start.event_index].tones
+                        [start.tone_index]
+                        .tie_start_partial = true;
+                }
+                if staff_number == tone.input_staff {
+                    let selected_tone_index = event.tones[..tone_index]
+                        .iter()
+                        .filter(|candidate| candidate.input_staff == staff_number)
+                        .count();
+                    measures[measure_index].events[event_index].tones[selected_tone_index]
+                        .tie_stop_partial = true;
+                }
+            }
+            for (tone_index, tone) in event
+                .tones
+                .iter()
+                .enumerate()
+                .filter(|(_, tone)| tone.tie_start)
+            {
+                let selected_tone_index = event.tones[..tone_index]
+                    .iter()
+                    .filter(|candidate| candidate.input_staff == tone.input_staff)
+                    .count();
+                pending_ties[voice_index].1.push(PendingTie {
+                    tone: tone.tone,
+                    number: tone.tie_start_number,
+                    input_staff: tone.input_staff,
+                    measure_index,
+                    event_index,
+                    tone_index: selected_tone_index,
+                });
+            }
+        }
+    }
+}
+
+fn reconstruct_separate_staff_beams(measures: &mut [Measure]) {
+    let mut reconstructed = measures
+        .iter()
+        .map(|measure| vec![Vec::new(); measure.events.len()])
+        .collect::<Vec<Vec<Vec<BeamMark>>>>();
+    let mut active_groups: VoiceState<[Vec<BeamEventPosition>; 5]> = Vec::new();
+
+    for (measure_index, measure) in measures.iter().enumerate() {
+        for (event_index, event) in measure.events.iter().enumerate() {
+            let position = (measure_index, event_index);
+            let group_index = voice_state_index(&mut active_groups, &event.voice_id);
+            for beam in &event.beams {
+                let level = usize::from(beam.level);
+                match beam.state {
+                    BeamState::ForwardHook | BeamState::BackwardHook => {
+                        if !event.is_spacer {
+                            reconstructed[measure_index][event_index].push(*beam);
+                        }
+                    }
+                    BeamState::Begin => {
+                        active_groups[group_index].1[level].clear();
+                        active_groups[group_index].1[level].push(position);
+                    }
+                    BeamState::Continue => {
+                        active_groups[group_index].1[level].push(position);
+                    }
+                    BeamState::End => {
+                        active_groups[group_index].1[level].push(position);
+                        let retained = std::mem::take(&mut active_groups[group_index].1[level])
+                            .into_iter()
+                            .filter(|(measure_index, event_index)| {
+                                !measures[*measure_index].events[*event_index].is_spacer
+                            })
+                            .collect::<Vec<_>>();
+                        if retained.len() >= 2 {
+                            for (member_index, (member_measure, member_event)) in
+                                retained.iter().copied().enumerate()
+                            {
+                                let state = if member_index == 0 {
+                                    BeamState::Begin
+                                } else if member_index + 1 == retained.len() {
+                                    BeamState::End
+                                } else {
+                                    BeamState::Continue
+                                };
+                                reconstructed[member_measure][member_event].push(BeamMark {
+                                    level: beam.level,
+                                    state,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (measure, reconstructed_events) in measures.iter_mut().zip(reconstructed) {
+        for (event, beams) in measure.events.iter_mut().zip(reconstructed_events) {
+            let retained_levels = beams
+                .iter()
+                .filter(|beam| {
+                    !matches!(beam.state, BeamState::ForwardHook | BeamState::BackwardHook)
+                })
+                .map(|beam| beam.level)
+                .collect::<Vec<_>>();
+            event.beams = beams
+                .into_iter()
+                .filter(|beam| {
+                    !matches!(beam.state, BeamState::ForwardHook | BeamState::BackwardHook)
+                        || beam.level == 1
+                        || retained_levels.contains(&(beam.level - 1))
+                })
+                .collect();
+        }
     }
 }
 
@@ -1175,7 +1326,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
         let mut divisions = None;
         let mut input_staff_count = 1;
         let mut active_staff_states = vec![InputStaffState::default()];
-        let mut pending_ties: VoiceState<Vec<Tone>> = Vec::new();
+        let mut pending_ties: VoiceState<Vec<(Tone, Option<u32>)>> = Vec::new();
         let mut active_ending: Option<String> = None;
         let mut active_beams: VoiceState<[bool; 5]> = Vec::new();
         let mut measures = Vec::new();
@@ -2044,7 +2195,12 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
             for (event, source) in events.iter().zip(event_sources) {
                 let voice_index = voice_state_index(&mut active_beams, &event.voice_id);
                 validate_beam_group(&elements[source], event, &mut active_beams[voice_index].1)?;
-                validate_event_ties(&elements[source], event, &mut pending_ties)?;
+                validate_event_ties(
+                    &elements[source],
+                    event,
+                    &mut pending_ties,
+                    input_staff_mode == InputStaffMode::Separate,
+                )?;
             }
             measures.push(Measure {
                 events,
@@ -5903,22 +6059,31 @@ fn parse_tuplet_notations(
                         "<tied> must be empty".to_owned(),
                     ));
                 }
-                if let Some(number) = optional_attribute(child_element, "number") {
-                    if number
-                        .parse::<u32>()
-                        .ok()
-                        .filter(|value| *value > 0)
-                        .is_none()
-                    {
-                        return Err(element_diagnostic(
-                            child_element,
-                            "tied number must be a positive integer".to_owned(),
-                        ));
+                let number = optional_attribute(child_element, "number")
+                    .map(|number| {
+                        number
+                            .parse::<u32>()
+                            .ok()
+                            .filter(|value| *value > 0)
+                            .ok_or_else(|| {
+                                element_diagnostic(
+                                    child_element,
+                                    "tied number must be a positive integer".to_owned(),
+                                )
+                            })
+                    })
+                    .transpose()?;
+                match optional_attribute(child_element, "type").ok_or_else(|| {
+                    element_diagnostic(child_element, "<tied> requires a type attribute".to_owned())
+                })? {
+                    "start" if !markers.tie_start => {
+                        markers.tie_start = true;
+                        markers.tie_start_number = number;
                     }
-                }
-                match required_attribute(child_element, "type")? {
-                    "start" if !markers.tie_start => markers.tie_start = true,
-                    "stop" if !markers.tie_stop => markers.tie_stop = true,
+                    "stop" if !markers.tie_stop => {
+                        markers.tie_stop = true;
+                        markers.tie_stop_number = number;
+                    }
                     _ => {
                         return Err(element_diagnostic(
                             child_element,
@@ -6485,6 +6650,8 @@ fn parse_note(
     };
     tie_start |= notation_markers.tie_start;
     tie_stop |= notation_markers.tie_stop;
+    let tie_start_number = notation_markers.tie_start_number;
+    let tie_stop_number = notation_markers.tie_stop_number;
     let tuplet_boundary = notation_markers.tuplet_boundary;
     if position != children.len() {
         return Err(element_diagnostic(
@@ -6695,6 +6862,10 @@ fn parse_note(
             notehead_scale,
             tie_start,
             tie_stop,
+            tie_start_number,
+            tie_stop_number,
+            tie_start_partial: false,
+            tie_stop_partial: false,
             input_staff,
         }]
     };
@@ -7114,12 +7285,29 @@ fn same_beams(left: &[BeamMark], right: &[BeamMark]) -> bool {
 fn validate_event_ties(
     note: &Element,
     event: &Event,
-    pending_ties: &mut VoiceState<Vec<Tone>>,
+    pending_ties: &mut VoiceState<Vec<(Tone, Option<u32>)>>,
+    match_tie_numbers: bool,
 ) -> Result<(), String> {
     let voice_index = voice_state_index(pending_ties, &event.voice_id);
     let mut unmatched = std::mem::take(&mut pending_ties[voice_index].1);
     for tone in event.tones.iter().filter(|tone| tone.tie_stop) {
-        let Some(position) = unmatched.iter().position(|expected| expected == &tone.tone) else {
+        if match_tie_numbers
+            && unmatched
+                .iter()
+                .filter(|(expected, number)| {
+                    expected == &tone.tone && number == &tone.tie_stop_number
+                })
+                .count()
+                > 1
+        {
+            return Err(element_diagnostic(
+                note,
+                "tie stop has ambiguous preceding endpoints".to_owned(),
+            ));
+        }
+        let Some(position) = unmatched.iter().position(|(expected, number)| {
+            expected == &tone.tone && (!match_tie_numbers || number == &tone.tie_stop_number)
+        }) else {
             let message = if unmatched.is_empty() {
                 "tie stop has no preceding tie start"
             } else {
@@ -7140,7 +7328,7 @@ fn validate_event_ties(
             .tones
             .iter()
             .filter(|tone| tone.tie_start)
-            .map(|tone| tone.tone),
+            .map(|tone| (tone.tone, tone.tie_start_number)),
     );
     Ok(())
 }
@@ -10844,7 +11032,16 @@ fn render_part_svg(
                 );
                 let tie_y = octave_y + 18;
                 if tone_event.tie_stop {
-                    if let Some(position) = pending_tie_paths[tie_state_index]
+                    if tone_event.tie_stop_partial {
+                        add_partial_tie_path(
+                            &mut scene,
+                            format!("tie-stop-partial-{index}-{tone_index}"),
+                            tone_x,
+                            tie_y,
+                            false,
+                        );
+                        view_bottom = view_bottom.max(tie_y + 10);
+                    } else if let Some(position) = pending_tie_paths[tie_state_index]
                         .1
                         .iter()
                         .position(|(pending_tone, _, _)| *pending_tone == tone)
@@ -10872,7 +11069,16 @@ fn render_part_svg(
                         view_bottom = view_bottom.max(start_y + 10);
                     }
                 }
-                if tone_event.tie_start {
+                if tone_event.tie_start_partial {
+                    add_partial_tie_path(
+                        &mut scene,
+                        format!("tie-start-partial-{index}-{tone_index}"),
+                        tone_x,
+                        tie_y,
+                        true,
+                    );
+                    view_bottom = view_bottom.max(tie_y + 10);
+                } else if tone_event.tie_start {
                     pending_tie_paths[tie_state_index]
                         .1
                         .push((tone, tone_x + 8, tie_y));
@@ -11612,6 +11818,29 @@ fn render_part_svg(
         view_box,
         barline_positions,
     }
+}
+
+fn add_partial_tie_path(scene: &mut Scene, id: String, tone_x: i32, tie_y: i32, is_start: bool) {
+    let (start_x, first_control_x, second_control_x, end_x) = if is_start {
+        (tone_x + 8, tone_x + 14, tone_x + 21, tone_x + 24)
+    } else {
+        (tone_x - 8, tone_x - 2, tone_x + 5, tone_x + 8)
+    };
+    scene.add_path(
+        DrawLayer::Tie,
+        id,
+        Some(PathClass::Tie),
+        Vec::new(),
+        PathGeometry::new(
+            None,
+            format!(
+                "M{start_x} {tie_y}C{first_control_x} {} {second_control_x} {} {end_x} {tie_y}",
+                tie_y + 9,
+                tie_y + 9
+            ),
+            PathStyle::MediumOutline,
+        ),
+    );
 }
 
 fn unbeamed_flag_levels(event: &Event) -> Vec<u8> {
