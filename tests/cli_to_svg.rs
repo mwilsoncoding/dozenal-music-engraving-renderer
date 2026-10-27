@@ -1435,7 +1435,7 @@ fn reconstructs_beam_groups_in_separate_input_staff_renders() {
             .expect("read second Input Staff SVG");
     assert_eq!(
         staff_one_svg.matches("class=\"beam\"").count(),
-        1,
+        2,
         "{staff_one_svg}"
     );
     assert_eq!(
@@ -1471,6 +1471,64 @@ fn reconstructs_beam_groups_in_separate_input_staff_renders() {
         staff_two_svg.contains("id=\"tie-stop-partial-"),
         "{staff_two_svg}"
     );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_cross_input_staff_beams_as_flat_segments_in_combined_mode() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("cross-input-staff-beams-ties.musicxml");
+    fs::write(
+        &input,
+        include_str!(
+            "../examples/cross-input-staff-beams-ties/cross-input-staff-beams-ties.musicxml"
+        ),
+    )
+    .expect("write cross-Input-Staff beam score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run combined-render CLI");
+    assert!(
+        output.status.success(),
+        "combined cross-Input-Staff beam render failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("cross-input-staff-beams-ties.svg"))
+        .expect("read combined SVG");
+    let beams = svg
+        .lines()
+        .filter(|line| line.contains("class=\"beam\""))
+        .collect::<Vec<_>>();
+    assert_eq!(beams.len(), 2, "{svg}");
+    assert_eq!(svg.matches("class=\"beam-hook\"").count(), 0, "{svg}");
+    for beam in beams {
+        let path = beam
+            .split(" d=\"")
+            .nth(1)
+            .and_then(|path| path.split('\"').next())
+            .expect("beam path data");
+        let points = path
+            .strip_suffix('Z')
+            .expect("closed beam path")
+            .strip_prefix('M')
+            .expect("move command")
+            .split('L')
+            .map(|point| {
+                let (x, y) = point.split_once(' ').expect("coordinate pair");
+                (
+                    x.parse::<f64>().expect("x coordinate"),
+                    y.parse::<f64>().expect("y coordinate"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(points.len(), 4, "{path}");
+        assert_eq!(points[0].1, points[1].1, "beam must be flat: {path}");
+        assert_eq!(points[2].1, points[3].1, "beam must be flat: {path}");
+    }
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }

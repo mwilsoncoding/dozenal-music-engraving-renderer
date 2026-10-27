@@ -14,15 +14,15 @@
       </attributes>
       <note>
         <pitch><step>C</step><octave>5</octave></pitch>
-        <duration>1</duration><voice>1</voice><type>16th</type><staff>1</staff><beam>begin</beam>
+        <duration>1</duration><voice>1</voice><type>16th</type><staff>1</staff><beam>begin</beam><beam number="2">begin</beam>
       </note>
       <note>
         <pitch><step>D</step><octave>3</octave></pitch>
-        <duration>1</duration><voice>1</voice><type>16th</type><staff>2</staff><beam>continue</beam><beam number="2">forward hook</beam>
+        <duration>1</duration><voice>1</voice><type>16th</type><staff>2</staff><beam>continue</beam><beam number="2">continue</beam>
       </note>
       <note>
         <pitch><step>E</step><octave>5</octave></pitch>
-        <duration>1</duration><voice>1</voice><type>16th</type><staff>1</staff><beam>end</beam>
+        <duration>1</duration><voice>1</voice><type>16th</type><staff>1</staff><beam>end</beam><beam number="2">end</beam>
       </note>
       <note>
         <pitch><step>F</step><octave>5</octave></pitch>
