@@ -269,6 +269,14 @@ struct NoteSpanAnchor {
     y: i32,
 }
 
+struct NoteSpanLabel {
+    text: String,
+    center_x: i32,
+    y: i32,
+    system_index: usize,
+    index: usize,
+}
+
 #[derive(Default)]
 struct NotationMarkers {
     tie_start: bool,
@@ -9621,6 +9629,10 @@ fn add_text_item(
                 format!("metronome-{index}-glyph-{glyph_index}"),
                 PathClass::MetronomeMark,
             ),
+            "note-span" => (
+                format!("note-span-label-{index}-glyph-{glyph_index}"),
+                PathClass::TextGlyph,
+            ),
             _ => (
                 format!("text-{index}-glyph-{glyph_index}"),
                 PathClass::TextGlyph,
@@ -12035,6 +12047,14 @@ fn render_part_svg(
         system_bounds.push(ComponentBounds::filled(26.0, 49.0, 38.0, 67.0));
         system_bounds.push(ComponentBounds::filled(26.0, 69.0, 38.0, 87.0));
     }
+    let span_labels = add_note_span_paths(
+        &mut scene,
+        span_anchors,
+        &system_ends,
+        &barline_positions,
+        part_index,
+        part_count,
+    );
     pending_texts.sort_by_key(|(text, _, _, _, system_index)| {
         (*system_index, text.path_id_prefix == "metronome")
     });
@@ -12064,14 +12084,58 @@ fn render_part_svg(
             },
         );
     }
-    add_note_span_paths(
-        &mut scene,
-        span_anchors,
-        &system_ends,
-        &barline_positions,
-        part_index,
-        part_count,
-    );
+    for label in span_labels {
+        if current_text_system != Some(label.system_index) {
+            occupied_text.clear();
+            current_text_system = Some(label.system_index);
+        }
+        scene.set_system_y_offset(
+            (label.system_index * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT,
+        );
+        let text = PositionedText {
+            event_index: 0,
+            input_staff: None,
+            offset_x: 0.0,
+            text: label.text.clone(),
+            placement: TextPlacement::Above,
+            font_size: 12.0,
+            color: "#171717".to_owned(),
+            enclosure: None,
+            default_x: None,
+            default_y: None,
+            relative_x: None,
+            relative_y: Some((16.0 - f64::from(label.y)) / 2.0),
+            path_glyph: None,
+            path_id_prefix: "note-span",
+            path_scale: 1.0,
+            path_y_offset: 0.0,
+            data_value: Some(label.text.clone()),
+            metronome: None,
+        };
+        let scale = text.font_size / noto_sans_glyphs::UNITS_PER_EM;
+        let width = text
+            .text
+            .chars()
+            .filter_map(noto_sans_glyphs::glyph)
+            .map(|glyph| glyph.advance * scale)
+            .sum::<f64>();
+        add_text_item(
+            &mut scene,
+            &text,
+            text_item_index + label.index,
+            f64::from(label.center_x) - width / 2.0,
+            0.0,
+            &mut TextLayoutContext {
+                occupied: &mut occupied_text,
+                notation_bounds: &system_notation_bounds[label.system_index],
+                warnings,
+                left: &mut left,
+                right: &mut right,
+                view_top: &mut view_top,
+                view_bottom: &mut view_bottom,
+            },
+        );
+    }
     let view_width = right + 12 - left;
     let row_count = system_count * part_count;
     let system_height = if row_count == 1 {
@@ -12104,9 +12168,10 @@ fn add_note_span_paths(
     barline_positions: &[i32],
     part_index: usize,
     part_count: usize,
-) {
+) -> Vec<NoteSpanLabel> {
     let mut active: Vec<NoteSpanAnchor> = Vec::new();
     let mut span_index = 0;
+    let mut labels = Vec::new();
     for anchor in anchors {
         if anchor.mark.endpoint == NoteSpanEndpoint::Start {
             active.push(anchor);
@@ -12195,54 +12260,25 @@ fn add_note_span_paths(
             );
         }
         if let Some(label) = start.mark.label.as_deref() {
-            let label_x = if system_start == system_end {
+            let center_x = if system_start == system_end {
                 (start.x + anchor.x) / 2
             } else {
                 start.x + 24
             };
-            add_note_span_label(
-                scene,
-                label,
-                label_x,
-                (start.y + anchor.y) / 2 - 5,
-                span_index,
-                (system_start * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT,
-            );
+            labels.push(NoteSpanLabel {
+                text: label.to_owned(),
+                center_x,
+                y: (start.y + anchor.y) / 2 - 5,
+                system_index: system_start,
+                index: span_index,
+            });
         }
         span_index += 1;
         if anchor.mark.endpoint == NoteSpanEndpoint::Continue {
             active.push(anchor);
         }
     }
-}
-
-fn add_note_span_label(scene: &mut Scene, label: &str, x: i32, y: i32, index: usize, offset: i32) {
-    let scale = 0.015;
-    let normalized = normalize_text_nfc(label).expect("span label was validated during parsing");
-    let width = normalized
-        .chars()
-        .filter_map(noto_sans_glyphs::glyph)
-        .map(|glyph| glyph.advance * scale)
-        .sum::<f64>();
-    let mut glyph_x = f64::from(x) - width / 2.0;
-    scene.set_system_y_offset(offset);
-    for (glyph_index, character) in normalized.chars().enumerate() {
-        let glyph = noto_sans_glyphs::glyph(character)
-            .expect("span label glyph was validated during parsing");
-        scene.add_path(
-            DrawLayer::Text,
-            format!("note-span-label-{index}-{glyph_index}"),
-            Some(PathClass::TextGlyph),
-            vec![PathMetadata::Value(label.to_owned())],
-            PathGeometry::new(
-                Some((glyph_x.round() as i32, y)),
-                glyph.path,
-                PathStyle::TextGlyph,
-            )
-            .scaled(scale),
-        );
-        glyph_x += glyph.advance * scale;
-    }
+    labels
 }
 
 fn add_partial_tie_path(scene: &mut Scene, id: String, tone_x: i32, tie_y: i32, is_start: bool) {

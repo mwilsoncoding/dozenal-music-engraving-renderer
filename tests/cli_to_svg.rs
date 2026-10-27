@@ -157,6 +157,14 @@ fn renders_glissandi_and_slides_with_distinct_styles_and_labels() {
     assert!(svg.contains("id=\"note-span-label-"), "{svg}");
     assert!(svg.contains("class=\"slide\" d=\"M98 78L"), "{svg}");
     assert!(svg.contains("L106.0 80.0L114.0 76.0"), "{svg}");
+    let label_y = |value: &str| {
+        let line = svg
+            .lines()
+            .find(|line| line.contains(&format!("data-value=\"{value}\"")))
+            .expect("span label glyph");
+        path_translation_f64(line).1
+    };
+    assert_ne!(label_y("gliss."), label_y("slide"), "{svg}");
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
