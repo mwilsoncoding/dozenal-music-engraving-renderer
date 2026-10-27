@@ -98,6 +98,15 @@ struct NoteParseOptions {
     note_size_scales: NoteSizeScales,
 }
 
+struct NoteParseContext<'a> {
+    event_index: usize,
+    divisions: u32,
+    input_staff_states: &'a [InputStaffState],
+    active_tuplets: &'a VoiceState<Option<ActiveTuplet>>,
+    score_instrument_ids: &'a [String],
+    options: NoteParseOptions,
+}
+
 impl Default for NoteSizeScales {
     fn default() -> Self {
         Self {
@@ -125,6 +134,7 @@ struct ParsedNote {
     event: Event,
     chord_marker: Option<usize>,
     tuplet_boundary: Option<TupletBoundary>,
+    dynamics: Vec<PositionedText>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -230,6 +240,7 @@ struct NotationMarkers {
     tie_start_number: Option<u32>,
     tie_stop_number: Option<u32>,
     tuplet_boundary: Option<TupletBoundary>,
+    dynamics: Vec<PositionedText>,
     articulations: Vec<ArticulationMark>,
     ornaments: Vec<OrnamentMark>,
     tremolos: Vec<TremoloMark>,
@@ -402,6 +413,17 @@ struct RenderedPart {
     barline_positions: Vec<i32>,
 }
 
+const SYSTEM_MAX_WIDTH: i32 = 680;
+const SYSTEM_ROW_HEIGHT: i32 = 160;
+
+struct SystemLayout {
+    starts: Vec<usize>,
+    measure_systems: Vec<usize>,
+    local_barline_positions: Vec<i32>,
+    x_offsets: Vec<i32>,
+    gap_expansions: Vec<i32>,
+}
+
 #[derive(Clone)]
 struct PositionedText {
     event_index: usize,
@@ -420,6 +442,21 @@ struct PositionedText {
     path_id_prefix: &'static str,
     path_scale: f64,
     path_y_offset: f64,
+    data_value: Option<String>,
+    metronome: Option<MetronomeDisplay>,
+}
+
+#[derive(Clone)]
+struct MetronomeDisplay {
+    first_beat: BeatUnit,
+    second_beat: Option<BeatUnit>,
+    rate: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct BeatUnit {
+    duration: &'static str,
+    dots: u8,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -520,12 +557,21 @@ struct CliOptions {
     input_path: PathBuf,
     output_path: Option<PathBuf>,
     input_staff_mode: InputStaffMode,
+    system_alignment: SystemAlignment,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InputStaffMode {
     Combine,
     Separate,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SystemAlignment {
+    Justified,
+    Left,
+    Right,
+    Centered,
 }
 
 fn main() {
@@ -556,7 +602,7 @@ fn run() -> Result<(), String> {
 
     let rendered_outputs = match options.input_staff_mode {
         InputStaffMode::Combine => {
-            let svg = render_svg(&score, &mut warnings);
+            let svg = render_svg_with_alignment(&score, &mut warnings, options.system_alignment)?;
             vec![(output_path, svg)]
         }
         InputStaffMode::Separate => {
@@ -570,7 +616,11 @@ fn run() -> Result<(), String> {
             for staff_number in 1..=staff_count {
                 let path = separate_staff_output_path(&output_path, staff_number);
                 let staff_score = score_for_input_staff(&score, staff_number);
-                let svg = render_svg(&staff_score, &mut warnings);
+                let svg = render_svg_with_alignment(
+                    &staff_score,
+                    &mut warnings,
+                    options.system_alignment,
+                )?;
                 outputs.push((path, svg));
             }
             outputs
@@ -595,6 +645,7 @@ fn parse_args() -> Result<CliOptions, String> {
     let mut input = None;
     let mut output = None;
     let mut input_staff_mode = None;
+    let mut system_alignment = None;
 
     while let Some(argument) = args.next() {
         if argument == "--output" {
@@ -625,6 +676,30 @@ fn parse_args() -> Result<CliOptions, String> {
                     }
                 },
             );
+        } else if argument == "--system-alignment" {
+            if system_alignment.is_some() {
+                return Err("--system-alignment may only be specified once".to_owned());
+            }
+            system_alignment = Some(
+                match args
+                    .next()
+                    .ok_or_else(|| {
+                        "--system-alignment requires justified, left, right, or centered".to_owned()
+                    })?
+                    .to_string_lossy()
+                    .as_ref()
+                {
+                    "justified" => SystemAlignment::Justified,
+                    "left" => SystemAlignment::Left,
+                    "right" => SystemAlignment::Right,
+                    "centered" => SystemAlignment::Centered,
+                    value => {
+                        return Err(format!(
+                            "--system-alignment must be 'justified', 'left', 'right', or 'centered', not {value:?}"
+                        ));
+                    }
+                },
+            );
         } else if argument.to_string_lossy().starts_with('-') {
             return Err(format!("unsupported option {}", argument.to_string_lossy()));
         } else if input.replace(PathBuf::from(argument)).is_some() {
@@ -633,12 +708,13 @@ fn parse_args() -> Result<CliOptions, String> {
     }
 
     let input = input.ok_or_else(|| {
-        "usage: domunor INPUT [--output FILE.svg] [--input-staff-mode combine|separate]".to_owned()
+        "usage: domunor INPUT [--output FILE.svg] [--input-staff-mode combine|separate] [--system-alignment justified|left|right|centered]".to_owned()
     })?;
     Ok(CliOptions {
         input_path: input,
         output_path: output,
         input_staff_mode: input_staff_mode.unwrap_or(InputStaffMode::Combine),
+        system_alignment: system_alignment.unwrap_or(SystemAlignment::Justified),
     })
 }
 
@@ -1519,13 +1595,16 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                         let mut parsed = parse_note(
                             &elements,
                             *child,
-                            divisions,
-                            &active_staff_states,
-                            &active_tuplets,
-                            &score_part.instrument_ids,
-                            NoteParseOptions {
-                                input_staff_count,
-                                note_size_scales,
+                            NoteParseContext {
+                                event_index: events.len(),
+                                divisions,
+                                input_staff_states: &active_staff_states,
+                                active_tuplets: &active_tuplets,
+                                score_instrument_ids: &score_part.instrument_ids,
+                                options: NoteParseOptions {
+                                    input_staff_count,
+                                    note_size_scales,
+                                },
                             },
                             &mut warnings,
                         )?;
@@ -1639,6 +1718,10 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                 ));
                             };
                             let event: &mut Event = &mut events[target];
+                            for mut dynamic in std::mem::take(&mut parsed.dynamics) {
+                                dynamic.event_index = target;
+                                texts.push(dynamic);
+                            }
                             parsed.event.onset_units = event.onset_units;
                             if event.voice_id != parsed.event.voice_id {
                                 return Err(element_diagnostic(
@@ -1755,6 +1838,10 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                             let duration_units = parsed.event.duration_units;
                             let voice_id = parsed.event.voice_id.clone();
                             let is_pitched = !parsed.event.tones.is_empty();
+                            for mut dynamic in std::mem::take(&mut parsed.dynamics) {
+                                dynamic.event_index = events.len();
+                                texts.push(dynamic);
+                            }
                             events.push(parsed.event);
                             event_sources.push(*child);
                             if is_pitched {
@@ -2611,7 +2698,8 @@ fn parse_direction(
     let element = &elements[direction];
     validate_attributes(element, &["placement", "directive", "system", "id"])?;
     require_container_text(element)?;
-    let placement = match optional_attribute(element, "placement").unwrap_or("above") {
+    let explicit_placement = optional_attribute(element, "placement");
+    let placement = match explicit_placement.unwrap_or("above") {
         "above" => TextPlacement::Above,
         "below" => TextPlacement::Below,
         value => {
@@ -2620,6 +2708,11 @@ fn parse_direction(
                 format!("invalid direction placement {value:?}"),
             ));
         }
+    };
+    let dynamic_placement = if explicit_placement.is_some() {
+        placement
+    } else {
+        TextPlacement::Below
     };
     for attribute in ["directive", "system"] {
         if let Some(value) = optional_attribute(element, attribute) {
@@ -2692,8 +2785,27 @@ fn parse_direction(
                                 warnings,
                             )?);
                         }
-                        "metronome" | "dynamics" | "wedge" | "bracket" | "dashes" | "pedal"
-                        | "octave-shift" | "other-direction" => {
+                        "metronome" => {
+                            if let Some(metronome) =
+                                parse_metronome(elements, *item, event_index, placement, warnings)?
+                            {
+                                text_items.push(metronome);
+                            }
+                        }
+                        "dynamics" => {
+                            if let Some(dynamic) = parse_dynamics(
+                                elements,
+                                *item,
+                                event_index,
+                                dynamic_placement,
+                                false,
+                                warnings,
+                            )? {
+                                text_items.push(dynamic);
+                            }
+                        }
+                        "wedge" | "bracket" | "dashes" | "pedal" | "octave-shift"
+                        | "other-direction" => {
                             warnings.push(element_diagnostic(
                                 text_element,
                                 format!(
@@ -2791,6 +2903,451 @@ fn parse_direction(
     Ok(text_items)
 }
 
+fn parse_metronome(
+    elements: &[Element],
+    metronome_id: usize,
+    event_index: usize,
+    placement: TextPlacement,
+    warnings: &mut Vec<String>,
+) -> Result<Option<PositionedText>, String> {
+    let element = &elements[metronome_id];
+    validate_attributes(
+        element,
+        &[
+            "print-object",
+            "font-family",
+            "font-style",
+            "font-size",
+            "font-weight",
+            "color",
+            "default-x",
+            "default-y",
+            "relative-x",
+            "relative-y",
+            "halign",
+            "valign",
+        ],
+    )?;
+    require_container_text(element)?;
+    let print_object = optional_attribute(element, "print-object").unwrap_or("yes");
+    if !matches!(print_object, "yes" | "no") {
+        return Err(element_diagnostic(
+            element,
+            format!("metronome print-object must be 'yes' or 'no', not {print_object:?}"),
+        ));
+    }
+    let mut beat_units = Vec::new();
+    let mut current_beat = None;
+    let mut rate = None;
+    let mut unsupported = false;
+    for child in &element.children {
+        let child_element = &elements[*child];
+        match child_element.name.as_str() {
+            "beat-unit" if beat_units.len() < 2 => {
+                let duration = match leaf_text(child_element)? {
+                    "maxima" => "maxima",
+                    "long" => "long",
+                    "breve" => "breve",
+                    "whole" => "whole",
+                    "half" => "half",
+                    "quarter" => "quarter",
+                    "eighth" => "eighth",
+                    "16th" => "16th",
+                    "32nd" => "32nd",
+                    "64th" => "64th",
+                    value => {
+                        return Err(element_diagnostic(
+                            child_element,
+                            format!("unsupported beat-unit {value:?}"),
+                        ));
+                    }
+                };
+                let unit = BeatUnit { duration, dots: 0 };
+                beat_units.push(unit);
+                current_beat = Some(beat_units.len() - 1);
+            }
+            "beat-unit-dot" if current_beat.is_some() => {
+                require_no_attributes(child_element)?;
+                require_container_text(child_element)?;
+                if !child_element.children.is_empty() || !child_element.text.trim().is_empty() {
+                    return Err(element_diagnostic(
+                        child_element,
+                        "<beat-unit-dot/> must be empty".to_owned(),
+                    ));
+                }
+                let unit = &mut beat_units[current_beat.expect("checked above")];
+                unit.dots += 1;
+                if unit.dots > 2 {
+                    unsupported = true;
+                }
+            }
+            "per-minute" if current_beat == Some(0) && rate.is_none() => {
+                let value = leaf_text(child_element)?;
+                let valid_decimal = value
+                    .strip_prefix(['+', '-'])
+                    .unwrap_or(value)
+                    .chars()
+                    .all(|character| character.is_ascii_digit() || character == '.')
+                    && value.chars().filter(|character| *character == '.').count() <= 1;
+                let Some(number) = value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|number| number.is_finite() && *number > 0.0 && valid_decimal)
+                else {
+                    return Err(element_diagnostic(
+                        child_element,
+                        "per-minute must be a positive integer or fractional number".to_owned(),
+                    ));
+                };
+                if number.fract() != 0.0 {
+                    warnings.push(element_diagnostic(
+                        child_element,
+                        "fractional per-minute rate is unsupported; tempo mark omitted".to_owned(),
+                    ));
+                    unsupported = true;
+                } else if number > f64::from(u32::MAX) {
+                    return Err(element_diagnostic(
+                        child_element,
+                        "per-minute exceeds the supported integer range".to_owned(),
+                    ));
+                } else {
+                    rate = Some(
+                        dozenal_ending_label(&(number as u32).to_string())
+                            .expect("positive rate has a dozenal representation"),
+                    );
+                }
+                current_beat = None;
+            }
+            "metronome-note" | "metronome-relation" | "metronome-type" => {
+                warnings.push(element_diagnostic(
+                    child_element,
+                    "complex metronome relations are unsupported; tempo mark omitted".to_owned(),
+                ));
+                unsupported = true;
+            }
+            _ => {
+                return Err(element_diagnostic(
+                    child_element,
+                    format!("malformed metronome child <{}>", child_element.name),
+                ));
+            }
+        }
+    }
+    if unsupported || print_object == "no" {
+        return Ok(None);
+    }
+    if beat_units.is_empty() || (rate.is_none() && beat_units.len() != 2) {
+        return Err(element_diagnostic(
+            element,
+            "metronome must contain one beat-unit with per-minute or a two-unit equivalence"
+                .to_owned(),
+        ));
+    }
+    if rate.is_some() && beat_units.len() != 1 {
+        return Err(element_diagnostic(
+            element,
+            "metronome rate and beat-unit equivalence cannot be combined".to_owned(),
+        ));
+    }
+    let mut font_size = 16.0;
+    if let Some(value) = optional_attribute(element, "font-size") {
+        font_size = parse_text_font_size(value).ok_or_else(|| {
+            element_diagnostic(element, format!("invalid metronome font-size {value:?}"))
+        })?;
+    }
+    let mut color = "#171717".to_owned();
+    if let Some(value) = optional_attribute(element, "color") {
+        if !valid_musicxml_color(value) {
+            return Err(element_diagnostic(
+                element,
+                "metronome color must be a six-digit hexadecimal color".to_owned(),
+            ));
+        }
+        color = value.to_ascii_lowercase();
+    }
+    if optional_attribute(element, "font-family").is_some_and(|family| family != "Noto Sans") {
+        warnings.push(element_diagnostic(
+            element,
+            "metronome font-family is not bundled; Noto Sans is used".to_owned(),
+        ));
+    }
+    for attribute in ["font-style", "font-weight", "halign", "valign"] {
+        if optional_attribute(element, attribute).is_some() {
+            warnings.push(element_diagnostic(
+                element,
+                format!("metronome {attribute} is not supported; default behavior is used"),
+            ));
+        }
+    }
+    let parse_coordinate = |attribute: &str| -> Result<Option<f64>, String> {
+        optional_attribute(element, attribute)
+            .map(|value| {
+                value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|number| number.is_finite())
+                    .ok_or_else(|| {
+                        element_diagnostic(
+                            element,
+                            format!("metronome {attribute} must be a finite number"),
+                        )
+                    })
+            })
+            .transpose()
+    };
+    let rate_value = rate.clone();
+    let text = rate
+        .as_ref()
+        .map(|rate| format!("= {rate}"))
+        .unwrap_or_else(|| "=".to_owned());
+    Ok(Some(PositionedText {
+        event_index,
+        input_staff: None,
+        offset_x: 0.0,
+        text,
+        placement,
+        font_size,
+        color,
+        enclosure: None,
+        default_x: parse_coordinate("default-x")?,
+        default_y: parse_coordinate("default-y")?,
+        relative_x: parse_coordinate("relative-x")?,
+        relative_y: parse_coordinate("relative-y")?,
+        path_glyph: None,
+        path_id_prefix: "metronome",
+        path_scale: 1.0,
+        path_y_offset: 0.0,
+        data_value: rate_value,
+        metronome: Some(MetronomeDisplay {
+            first_beat: beat_units[0],
+            second_beat: beat_units.get(1).copied(),
+            rate,
+        }),
+    }))
+}
+
+fn parse_dynamics(
+    elements: &[Element],
+    dynamics_id: usize,
+    event_index: usize,
+    placement: TextPlacement,
+    note_attached: bool,
+    warnings: &mut Vec<String>,
+) -> Result<Option<PositionedText>, String> {
+    let element = &elements[dynamics_id];
+    validate_attributes(
+        element,
+        &[
+            "id",
+            "default-x",
+            "default-y",
+            "relative-x",
+            "relative-y",
+            "font-family",
+            "font-style",
+            "font-size",
+            "font-weight",
+            "color",
+            "halign",
+            "valign",
+            "underline",
+            "overline",
+            "line-through",
+            "enclosure",
+            "placement",
+        ],
+    )?;
+    require_container_text(element)?;
+    let mut text = String::new();
+    for child in &element.children {
+        let child_element = &elements[*child];
+        if matches!(child_element.name.as_str(), "other-dynamics") {
+            validate_attributes(child_element, &["smufl"])?;
+            if !child_element.children.is_empty() {
+                return Err(element_diagnostic(
+                    child_element,
+                    "<other-dynamics> must contain plain text".to_owned(),
+                ));
+            }
+            if let Some(smufl) = optional_attribute(child_element, "smufl") {
+                if !valid_smufl_glyph_name(smufl) {
+                    return Err(element_diagnostic(
+                        child_element,
+                        format!("invalid SMuFL glyph name {smufl:?}"),
+                    ));
+                }
+            }
+            warnings.push(element_diagnostic(
+                child_element,
+                "custom Dynamics are unsupported; mark omitted".to_owned(),
+            ));
+            continue;
+        }
+        const DYNAMIC_NAMES: &[&str] = &[
+            "p", "pp", "ppp", "pppp", "ppppp", "pppppp", "f", "ff", "fff", "ffff", "fffff",
+            "ffffff", "mp", "mf", "sf", "sfp", "sfpp", "fp", "rf", "rfz", "sfz", "sffz", "fz", "n",
+            "pf", "sfzp",
+        ];
+        if !DYNAMIC_NAMES.contains(&child_element.name.as_str()) {
+            return Err(element_diagnostic(
+                child_element,
+                format!("unsupported dynamics child <{}>", child_element.name),
+            ));
+        }
+        require_no_attributes(child_element)?;
+        require_container_text(child_element)?;
+        if !child_element.children.is_empty() || !child_element.text.trim().is_empty() {
+            return Err(element_diagnostic(
+                child_element,
+                format!("<{} /> must be empty", child_element.name),
+            ));
+        }
+        text.push_str(&child_element.name);
+    }
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let placement = match optional_attribute(element, "placement") {
+        Some("above") if note_attached => TextPlacement::Above,
+        Some("below") if note_attached => TextPlacement::Below,
+        Some("above" | "below") | None => placement,
+        Some(value) => {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid dynamics placement {value:?}"),
+            ));
+        }
+    };
+    let font_size = match optional_attribute(element, "font-size") {
+        Some(value) => parse_text_font_size(value).ok_or_else(|| {
+            element_diagnostic(element, format!("invalid dynamics font-size {value:?}"))
+        })?,
+        None => 16.0,
+    };
+    let mut color = "#171717".to_owned();
+    if let Some(value) = optional_attribute(element, "color") {
+        if !valid_musicxml_color(value) {
+            return Err(element_diagnostic(
+                element,
+                "dynamics color must be a six-digit hexadecimal color".to_owned(),
+            ));
+        }
+        color = value.to_ascii_lowercase();
+    }
+    if let Some(family) = optional_attribute(element, "font-family") {
+        if family.trim().is_empty() {
+            return Err(element_diagnostic(
+                element,
+                "dynamics font-family may not be empty".to_owned(),
+            ));
+        }
+        if !family.eq_ignore_ascii_case("Noto Sans") {
+            warnings.push(element_diagnostic(
+                element,
+                format!("font-family {family:?} is not bundled; Noto Sans is used"),
+            ));
+        }
+    }
+    for (attribute, allowed) in [
+        ("font-style", &[("normal"), ("italic"), ("oblique")][..]),
+        ("font-weight", &["normal", "bold"][..]),
+        ("halign", &["left", "center", "right"][..]),
+        ("valign", &["top", "middle", "bottom", "baseline"][..]),
+    ] {
+        if let Some(value) = optional_attribute(element, attribute) {
+            if !allowed.contains(&value) {
+                return Err(element_diagnostic(
+                    element,
+                    format!("invalid dynamics {attribute} value {value:?}"),
+                ));
+            }
+            warnings.push(element_diagnostic(
+                element,
+                format!("dynamics {attribute} is not supported; default behavior is used"),
+            ));
+        }
+    }
+    for attribute in ["underline", "overline", "line-through"] {
+        if let Some(value) = optional_attribute(element, attribute) {
+            if !matches!(value, "yes" | "no") {
+                return Err(element_diagnostic(
+                    element,
+                    format!("dynamics {attribute} must be 'yes' or 'no', not {value:?}"),
+                ));
+            }
+            if value == "yes" {
+                warnings.push(element_diagnostic(
+                    element,
+                    "dynamics text-decoration is not supported; decoration is omitted".to_owned(),
+                ));
+            }
+        }
+    }
+    if let Some(enclosure) = optional_attribute(element, "enclosure") {
+        if !matches!(
+            enclosure,
+            "rectangle"
+                | "square"
+                | "oval"
+                | "circle"
+                | "bracket"
+                | "triangle"
+                | "diamond"
+                | "pentagon"
+                | "hexagon"
+                | "heptagon"
+                | "octagon"
+                | "nonagon"
+                | "decagon"
+        ) {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid dynamics enclosure {enclosure:?}"),
+            ));
+        }
+        warnings.push(element_diagnostic(
+            element,
+            "dynamics enclosure is not supported; enclosure is omitted".to_owned(),
+        ));
+    }
+    let parse_coordinate = |attribute: &str| -> Result<Option<f64>, String> {
+        optional_attribute(element, attribute)
+            .map(|value| {
+                value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|number| number.is_finite())
+                    .ok_or_else(|| {
+                        element_diagnostic(
+                            element,
+                            format!("dynamics {attribute} must be a finite number"),
+                        )
+                    })
+            })
+            .transpose()
+    };
+    Ok(Some(PositionedText {
+        event_index,
+        input_staff: None,
+        offset_x: 0.0,
+        text,
+        placement,
+        font_size,
+        color,
+        enclosure: None,
+        default_x: parse_coordinate("default-x")?,
+        default_y: parse_coordinate("default-y")?,
+        relative_x: parse_coordinate("relative-x")?,
+        relative_y: parse_coordinate("relative-y")?,
+        path_glyph: None,
+        path_id_prefix: "dynamic",
+        path_scale: 1.0,
+        path_y_offset: 0.0,
+        data_value: None,
+        metronome: None,
+    }))
+}
+
 fn parse_direction_symbol(
     elements: &[Element],
     symbol_id: usize,
@@ -2838,6 +3395,8 @@ fn parse_direction_symbol(
         path_id_prefix: "symbol",
         path_scale: 1.0,
         path_y_offset: 0.0,
+        data_value: None,
+        metronome: None,
     }))
 }
 
@@ -3090,6 +3649,8 @@ fn parse_direction_mark(
         path_id_prefix: if is_segno { "segno" } else { "coda" },
         path_scale: 0.04,
         path_y_offset: segno_center - glyph_center,
+        data_value: None,
+        metronome: None,
     })
 }
 
@@ -3325,6 +3886,8 @@ fn parse_direction_text(
         path_id_prefix: "",
         path_scale: 1.0,
         path_y_offset: 0.0,
+        data_value: None,
+        metronome: None,
     }))
 }
 
@@ -5431,6 +5994,7 @@ fn parse_tuplet_notations(
     elements: &[Element],
     notations: usize,
     ratio: Option<&TupletRatio>,
+    event_index: usize,
     is_rest: bool,
     warnings: &mut Vec<String>,
 ) -> Result<NotationMarkers, String> {
@@ -5440,7 +6004,7 @@ fn parse_tuplet_notations(
     if element.children.is_empty() {
         return Err(element_diagnostic(
             element,
-            "<notations> must contain a supported visual tie or tuplet".to_owned(),
+            "<notations> must contain a supported visual mark".to_owned(),
         ));
     }
     let mut markers = NotationMarkers::default();
@@ -5450,6 +6014,18 @@ fn parse_tuplet_notations(
     for child in &element.children {
         let child_element = &elements[*child];
         match child_element.name.as_str() {
+            "dynamics" => {
+                if let Some(dynamic) = parse_dynamics(
+                    elements,
+                    *child,
+                    event_index,
+                    TextPlacement::Below,
+                    true,
+                    warnings,
+                )? {
+                    markers.dynamics.push(dynamic);
+                }
+            }
             "articulations" if !saw_articulations => {
                 saw_articulations = true;
                 markers.articulations = parse_articulations(elements, *child, is_rest, warnings)?;
@@ -5690,13 +6266,17 @@ fn parse_tuplet_notations(
 fn parse_note(
     elements: &[Element],
     note: usize,
-    divisions: u32,
-    input_staff_states: &[InputStaffState],
-    active_tuplets: &VoiceState<Option<ActiveTuplet>>,
-    score_instrument_ids: &[String],
-    options: NoteParseOptions,
+    context: NoteParseContext<'_>,
     warnings: &mut Vec<String>,
 ) -> Result<ParsedNote, String> {
+    let NoteParseContext {
+        event_index,
+        divisions,
+        input_staff_states,
+        active_tuplets,
+        score_instrument_ids,
+        options,
+    } = context;
     let note_element = &elements[note];
     require_no_attributes(note_element)?;
     require_container_text(note_element)?;
@@ -6061,6 +6641,7 @@ fn parse_note(
             elements,
             notations,
             time_modification.as_ref(),
+            event_index,
             is_rest,
             warnings,
         )?
@@ -6310,6 +6891,7 @@ fn parse_note(
         },
         chord_marker,
         tuplet_boundary,
+        dynamics: notation_markers.dynamics,
     })
 }
 
@@ -7377,6 +7959,8 @@ enum PathClass {
     MultipleRest,
     MeasureRepeat,
     BeatRepeat,
+    MetronomeMark,
+    DynamicMark,
     ArticulationMark,
     OrnamentMark,
     TremoloMark,
@@ -7398,6 +7982,7 @@ enum PathMetadata {
     EndingLabel(String),
     MultipleRestCount(u32),
     MultipleRestSymbols(bool),
+    Value(String),
 }
 
 #[derive(Clone, Copy)]
@@ -7875,18 +8460,29 @@ fn fermata_layout(
     (left, top, bounds)
 }
 
+#[derive(Clone, Copy)]
+struct FermataAnchor {
+    x: f64,
+    top: f64,
+    bottom: f64,
+    scale: f64,
+}
+
 fn draw_fermata(
     scene: &mut Scene,
     id: String,
     mark: &FermataMark,
-    anchor_x: f64,
-    anchor_top: f64,
-    anchor_bottom: f64,
-    scale: f64,
+    anchor: FermataAnchor,
     occupied: &[ComponentBounds],
 ) -> ComponentBounds {
-    let (left, top, bounds) =
-        fermata_layout(mark, anchor_x, anchor_top, anchor_bottom, scale, occupied);
+    let (left, top, bounds) = fermata_layout(
+        mark,
+        anchor.x,
+        anchor.top,
+        anchor.bottom,
+        anchor.scale,
+        occupied,
+    );
     let left_i = left.floor() as i32;
     let top_i = top.floor() as i32;
     let path = fermata_glyph(mark.shape);
@@ -7898,7 +8494,7 @@ fn draw_fermata(
         PathGeometry::new(Some((left_i, top_i)), path, PathStyle::BravuraGlyph)
             .offset_x(left - f64::from(left_i))
             .offset_y(top - f64::from(top_i))
-            .scaled(scale)
+            .scaled(anchor.scale)
             .rotated_180_about_if(mark.orientation == FermataOrientation::Inverted, 9, 6)
             .colored(&mark.color),
     );
@@ -8223,6 +8819,7 @@ struct Scene {
     view_top: i32,
     view_width: i32,
     view_height: i32,
+    system_y_offset: i32,
     commands: Vec<DrawCommand>,
 }
 
@@ -8251,8 +8848,13 @@ impl Scene {
             view_top,
             view_width,
             view_height,
+            system_y_offset: 0,
             commands: Vec::new(),
         }
+    }
+
+    fn set_system_y_offset(&mut self, offset: i32) {
+        self.system_y_offset = offset;
     }
 
     fn add_path(
@@ -8261,8 +8863,12 @@ impl Scene {
         id: impl Into<String>,
         class: Option<PathClass>,
         metadata: Vec<PathMetadata>,
-        geometry: PathGeometry,
+        mut geometry: PathGeometry,
     ) {
+        if self.system_y_offset != 0 {
+            let (x, y) = geometry.transform.unwrap_or((0, 0));
+            geometry.transform = Some((x, y + self.system_y_offset));
+        }
         self.commands.push(DrawCommand {
             layer,
             id: id.into(),
@@ -8339,6 +8945,8 @@ impl Scene {
                 PathClass::MultipleRest => "multiple-rest",
                 PathClass::MeasureRepeat => "measure-repeat",
                 PathClass::BeatRepeat => "beat-repeat",
+                PathClass::MetronomeMark => "metronome-mark",
+                PathClass::DynamicMark => "dynamic-mark",
                 PathClass::ArticulationMark => "articulation-mark",
                 PathClass::OrnamentMark => "ornament-mark",
                 PathClass::TremoloMark => "tremolo-mark",
@@ -8374,6 +8982,9 @@ impl Scene {
                 }
                 PathMetadata::MultipleRestSymbols(value) => {
                     write!(svg, " data-use-symbols=\"{value}\"")
+                }
+                PathMetadata::Value(value) => {
+                    write!(svg, " data-value=\"{}\"", escape_svg_attribute(value))
                 }
             }
             .expect("writing to a String cannot fail");
@@ -8450,9 +9061,12 @@ impl Scene {
             PathStyle::DashedStroke => {
                 svg.push_str(" stroke=\"#171717\" stroke-width=\"1.5\" stroke-dasharray=\"5 3\"")
             }
-            PathStyle::MediumOutline => {
-                svg.push_str(" fill=\"none\" stroke=\"#171717\" stroke-width=\"1.5\"")
-            }
+            PathStyle::MediumOutline => write!(
+                svg,
+                " fill=\"none\" stroke=\"{}\" stroke-width=\"1.5\"",
+                command.geometry.color.as_deref().unwrap_or("#171717")
+            )
+            .expect("writing to a String cannot fail"),
             PathStyle::FilledGlyph => write!(
                 svg,
                 " fill=\"{}\" fill-rule=\"evenodd\"",
@@ -8605,6 +9219,18 @@ fn add_text_item(
     measure_start_x: f64,
     layout: &mut TextLayoutContext<'_>,
 ) {
+    if let Some(metronome) = &item.metronome {
+        add_metronome_item(
+            scene,
+            item,
+            metronome,
+            index,
+            anchor_x,
+            measure_start_x,
+            layout,
+        );
+        return;
+    }
     if let Some(glyph) = item.path_glyph {
         add_direction_glyph(scene, item, glyph, index, anchor_x, measure_start_x, layout);
         return;
@@ -8674,7 +9300,10 @@ fn add_text_item(
     let text_right = text_x + ink_right.max(max_line_width);
     let padding = if item.enclosure.is_some() { 3.0 } else { 0.0 };
     let step = (ink_bottom - ink_top + padding * 2.0 + 4.0).max(item.font_size + 4.0);
-    let mut shift = 0.0;
+    let fixed_metronome_position = item.path_id_prefix == "metronome"
+        && (item.default_x.is_some() || item.relative_x.is_some())
+        && (item.default_y.is_some() || item.relative_y.is_some());
+    let mut shift: f64 = 0.0;
     let (box_left, box_top, box_right, box_bottom) = loop {
         let candidate = enclosure_bounds(
             item.enclosure.as_deref(),
@@ -8683,18 +9312,20 @@ fn add_text_item(
             text_right + padding,
             base_y + ink_bottom + shift + padding,
         );
-        let overlaps_text = layout.occupied.iter().any(|previous| {
-            candidate.0 < previous.right + 2.0
-                && candidate.2 + 2.0 > previous.left
-                && candidate.1 < previous.bottom + 2.0
-                && candidate.3 + 2.0 > previous.top
-        });
-        let overlaps_notation = layout.notation_bounds.iter().any(|previous| {
-            candidate.0 < previous.right + 2.0
-                && candidate.2 + 2.0 > previous.left
-                && candidate.1 < previous.bottom + 2.0
-                && candidate.3 + 2.0 > previous.top
-        });
+        let overlaps_text = !fixed_metronome_position
+            && layout.occupied.iter().any(|previous| {
+                candidate.0 < previous.right + 2.0
+                    && candidate.2 + 2.0 > previous.left
+                    && candidate.1 < previous.bottom + 2.0
+                    && candidate.3 + 2.0 > previous.top
+            });
+        let overlaps_notation = !fixed_metronome_position
+            && layout.notation_bounds.iter().any(|previous| {
+                candidate.0 < previous.right + 2.0
+                    && candidate.2 + 2.0 > previous.left
+                    && candidate.1 < previous.bottom + 2.0
+                    && candidate.3 + 2.0 > previous.top
+            });
         if !overlaps_text && !overlaps_notation {
             break candidate;
         }
@@ -8738,11 +9369,28 @@ fn add_text_item(
         let y = base_y + shift + glyph_y;
         let x_integer = x.floor() as i32;
         let y_integer = y.floor() as i32;
+        let (id, class) = match item.path_id_prefix {
+            "dynamic" => (
+                format!("dynamic-{index}-glyph-{glyph_index}"),
+                PathClass::DynamicMark,
+            ),
+            "metronome" => (
+                format!("metronome-{index}-glyph-{glyph_index}"),
+                PathClass::MetronomeMark,
+            ),
+            _ => (
+                format!("text-{index}-glyph-{glyph_index}"),
+                PathClass::TextGlyph,
+            ),
+        };
         scene.add_path(
             DrawLayer::Text,
-            format!("text-{index}-glyph-{glyph_index}"),
-            Some(PathClass::TextGlyph),
-            Vec::new(),
+            id,
+            Some(class),
+            item.data_value
+                .as_ref()
+                .map(|value| vec![PathMetadata::Value(value.clone())])
+                .unwrap_or_default(),
             PathGeometry::new(
                 Some((x_integer, y_integer)),
                 glyph.path,
@@ -8760,6 +9408,257 @@ fn add_text_item(
     *layout.view_top = (*layout.view_top).min((box_top - enclosure_stroke_padding).floor() as i32);
     *layout.view_bottom =
         (*layout.view_bottom).max((box_bottom + enclosure_stroke_padding).ceil() as i32);
+}
+
+fn add_metronome_item(
+    scene: &mut Scene,
+    item: &PositionedText,
+    metronome: &MetronomeDisplay,
+    index: usize,
+    anchor_x: f64,
+    measure_start_x: f64,
+    layout: &mut TextLayoutContext<'_>,
+) {
+    let scale = item.font_size / 16.0;
+    let x = item
+        .default_x
+        .map(|value| measure_start_x + value * 2.0)
+        .unwrap_or(anchor_x)
+        + item.relative_x.unwrap_or(0.0) * 2.0;
+    let base_y = item
+        .default_y
+        .map(|value| 68.0 - value * 2.0)
+        .unwrap_or(match item.placement {
+            TextPlacement::Above => 16.0,
+            TextPlacement::Below => 140.0,
+        })
+        - item.relative_y.unwrap_or(0.0) * 2.0;
+    let (beat_width, beat_shift) = add_metronome_beat(
+        scene,
+        &metronome.first_beat,
+        item,
+        MetronomeBeatPosition {
+            mark_index: index,
+            beat_index: 0,
+            x,
+            base_y,
+            scale,
+        },
+        layout,
+    );
+    let mut text_item = item.clone();
+    text_item.metronome = None;
+    text_item.path_id_prefix = "metronome";
+    text_item.data_value = metronome.rate.clone();
+    let text_offset = beat_width + 4.0 * scale;
+    text_item.relative_x = Some(item.relative_x.unwrap_or(0.0) + text_offset / 2.0);
+    if beat_shift != 0.0 {
+        let default_y = item.default_y.unwrap_or(match item.placement {
+            TextPlacement::Above => 26.0,
+            TextPlacement::Below => -36.0,
+        });
+        text_item.default_y = Some(default_y - beat_shift / 2.0);
+    }
+    if let Some(rate) = &metronome.rate {
+        text_item.text = format!("= {rate}");
+        add_text_item(scene, &text_item, index, anchor_x, measure_start_x, layout);
+    } else if let Some(second_beat) = metronome.second_beat {
+        text_item.text = "=".to_owned();
+        add_text_item(scene, &text_item, index, anchor_x, measure_start_x, layout);
+        let equals_width = noto_sans_glyphs::glyph('=')
+            .expect("bundled text repertoire includes equals")
+            .advance
+            * (item.font_size / noto_sans_glyphs::UNITS_PER_EM);
+        let second_x = x + text_offset + equals_width + 4.0 * scale;
+        add_metronome_beat(
+            scene,
+            &second_beat,
+            item,
+            MetronomeBeatPosition {
+                mark_index: index,
+                beat_index: 1,
+                x: second_x,
+                base_y: base_y + beat_shift,
+                scale,
+            },
+            layout,
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MetronomeBeatPosition {
+    mark_index: usize,
+    beat_index: usize,
+    x: f64,
+    base_y: f64,
+    scale: f64,
+}
+
+fn add_metronome_beat(
+    scene: &mut Scene,
+    beat: &BeatUnit,
+    item: &PositionedText,
+    position: MetronomeBeatPosition,
+    layout: &mut TextLayoutContext<'_>,
+) -> (f64, f64) {
+    let MetronomeBeatPosition {
+        mark_index,
+        beat_index,
+        x,
+        base_y,
+        scale,
+    } = position;
+    let beat_scale = scale * 0.6;
+    let duration = beat.duration;
+    let has_stem = !matches!(duration, "whole" | "breve" | "long" | "maxima");
+    let flag_count = match duration {
+        "eighth" => 1,
+        "16th" => 2,
+        "32nd" => 3,
+        "64th" => 4,
+        _ => 0,
+    };
+    let is_half = duration == "half";
+    let rightmost_mark = if beat.dots > 0 {
+        (if is_half { 21 } else { 14 }) + i32::from(beat.dots - 1) * 7 + 3
+    } else if is_half {
+        17
+    } else {
+        10
+    };
+    let width = 18.0_f64.max(f64::from(rightmost_mark));
+    let note_top = base_y - (if has_stem { 41.0 } else { 14.0 }) * beat_scale;
+    let note_bottom = base_y;
+    let mut bounds = ComponentBounds::filled(x, note_top, x + width * beat_scale, note_bottom);
+    let step = item.font_size + 4.0;
+    let direction = if base_y < 68.0 { -1.0 } else { 1.0 };
+    let mut shift: f64 = 0.0;
+    let fixed_position = (item.default_x.is_some() || item.relative_x.is_some())
+        && (item.default_y.is_some() || item.relative_y.is_some());
+    while !fixed_position
+        && (layout.occupied.iter().any(|previous| {
+            bounds.left < previous.right + 2.0
+                && bounds.right + 2.0 > previous.left
+                && bounds.top < previous.bottom + 2.0
+                && bounds.bottom + 2.0 > previous.top
+        }) || layout.notation_bounds.iter().any(|previous| {
+            bounds.left < previous.right + 2.0
+                && bounds.right + 2.0 > previous.left
+                && bounds.top < previous.bottom + 2.0
+                && bounds.bottom + 2.0 > previous.top
+        }))
+    {
+        if shift.abs() > 2000.0 {
+            layout.warnings.push(format!(
+                "metronome item {mark_index} could not be separated from nearby text or notation"
+            ));
+            break;
+        }
+        shift += direction * step;
+        bounds.top += direction * step;
+        bounds.bottom += direction * step;
+    }
+    layout.occupied.push(TextBounds {
+        left: bounds.left,
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+    });
+    let note_x = x;
+    let note_y = base_y - 16.0 * beat_scale + shift;
+    let metadata = item
+        .data_value
+        .as_ref()
+        .map(|value| vec![PathMetadata::Value(value.clone())])
+        .unwrap_or_default();
+    scene.add_path(
+        DrawLayer::Text,
+        format!("metronome-{mark_index}-beat-{beat_index}-head"),
+        Some(PathClass::MetronomeMark),
+        metadata.clone(),
+        PathGeometry::new(
+            Some((note_x.floor() as i32, note_y.floor() as i32)),
+            "M2 2L10 16M10 2L2 16",
+            PathStyle::MediumStroke,
+        )
+        .scaled(beat_scale)
+        .offset_x(note_x - f64::from(note_x.floor() as i32))
+        .offset_y(note_y - f64::from(note_y.floor() as i32))
+        .colored(&item.color),
+    );
+    if has_stem {
+        let stem_x = note_x + 6.0 * beat_scale;
+        let stem_top = note_y - 25.0 * beat_scale;
+        scene.add_path(
+            DrawLayer::Text,
+            format!("metronome-{mark_index}-beat-{beat_index}-stem"),
+            Some(PathClass::MetronomeMark),
+            metadata.clone(),
+            PathGeometry::new(
+                Some((stem_x.floor() as i32, stem_top.floor() as i32)),
+                "M0 0V29",
+                PathStyle::MediumStroke,
+            )
+            .scaled(beat_scale)
+            .offset_x(stem_x - f64::from(stem_x.floor() as i32))
+            .offset_y(stem_top - f64::from(stem_top.floor() as i32))
+            .colored(&item.color),
+        );
+        if flag_count > 0 {
+            let flag = bravura_glyphs::flag(flag_count, true);
+            scene.add_path(
+                DrawLayer::Text,
+                format!("metronome-{mark_index}-beat-{beat_index}-flag"),
+                Some(PathClass::MetronomeMark),
+                metadata,
+                PathGeometry::new(
+                    Some((stem_x.floor() as i32, stem_top.floor() as i32)),
+                    flag.path,
+                    PathStyle::BravuraGlyph,
+                )
+                .scaled(beat_scale)
+                .offset_x(stem_x - f64::from(stem_x.floor() as i32))
+                .offset_y(stem_top - f64::from(stem_top.floor() as i32))
+                .colored(&item.color),
+            );
+        }
+    }
+    let colon_marks = if is_half { 2 } else { 0 };
+    for mark in 0..colon_marks + beat.dots {
+        let (mark_x, mark_y) = if is_half && mark < colon_marks {
+            (14.0, 5.0 + f64::from(mark) * 7.0)
+        } else {
+            let dot = mark - colon_marks;
+            let start_x = if is_half { 21.0 } else { 14.0 };
+            (start_x + f64::from(dot) * 7.0, 12.0)
+        };
+        let dot_x = note_x + mark_x * beat_scale;
+        let dot_y = note_y + mark_y * beat_scale;
+        scene.add_path(
+            DrawLayer::Text,
+            format!("metronome-{mark_index}-beat-{beat_index}-mark-{mark}"),
+            Some(PathClass::MetronomeMark),
+            item.data_value
+                .as_ref()
+                .map(|value| vec![PathMetadata::Value(value.clone())])
+                .unwrap_or_default(),
+            PathGeometry::new(
+                Some((dot_x.floor() as i32, dot_y.floor() as i32)),
+                "M0 1.5A1.5 1.5 0 1 0 3 1.5A1.5 1.5 0 1 0 0 1.5Z",
+                PathStyle::FilledGlyph,
+            )
+            .scaled(beat_scale)
+            .offset_x(dot_x - f64::from(dot_x.floor() as i32))
+            .offset_y(dot_y - f64::from(dot_y.floor() as i32))
+            .colored(&item.color),
+        );
+    }
+    *layout.left = (*layout.left).min(bounds.left.floor() as i32);
+    *layout.right = (*layout.right).max(bounds.right.ceil() as i32);
+    *layout.view_top = (*layout.view_top).min(bounds.top.floor() as i32);
+    *layout.view_bottom = (*layout.view_bottom).max(bounds.bottom.ceil() as i32);
+    (width * beat_scale, shift)
 }
 
 fn add_direction_glyph(
@@ -8959,16 +9858,148 @@ fn text_enclosure_path(shape: &str, left: f64, top: f64, right: f64, bottom: f64
     format!("M{left:.2} {top:.2}H{right:.2}V{bottom:.2}H{left:.2}Z")
 }
 
-fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
-    if score.parts.len() == 1 {
-        return render_part_svg(&score.parts[0], warnings, None).svg;
+fn plan_system_layout(
+    barline_positions: &[i32],
+    alignment: SystemAlignment,
+    max_width: i32,
+    explicit_breaks: &[usize],
+) -> Result<SystemLayout, String> {
+    if barline_positions.is_empty() {
+        return Ok(SystemLayout {
+            starts: vec![0],
+            measure_systems: Vec::new(),
+            local_barline_positions: Vec::new(),
+            x_offsets: vec![0],
+            gap_expansions: Vec::new(),
+        });
     }
+
+    let measure_start_width = |index: usize| {
+        if index == 0 {
+            barline_positions[index] + 12
+        } else {
+            128 + barline_positions[index] - barline_positions[index - 1]
+        }
+    };
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    let mut width = measure_start_width(0);
+    if width > max_width {
+        return Err(format!(
+            "measure 1 is {width} units wide and cannot fit within the maximum System width of {max_width} units"
+        ));
+    }
+    for measure in 1..barline_positions.len() {
+        let measure_width = measure_start_width(measure);
+        if measure_width > max_width {
+            return Err(format!(
+                "measure {} is {measure_width} units wide and cannot fit within the maximum System width of {max_width} units",
+                measure + 1,
+            ));
+        }
+        let next_width = width + barline_positions[measure] - barline_positions[measure - 1];
+        let explicit_break = explicit_breaks.contains(&measure);
+        if explicit_break || next_width > max_width {
+            ranges.push((start, measure, width, !explicit_break));
+            start = measure;
+            width = measure_width;
+        } else {
+            width = next_width;
+        }
+    }
+    ranges.push((start, barline_positions.len(), width, false));
+
+    let mut starts = Vec::with_capacity(ranges.len());
+    let mut measure_systems = vec![0; barline_positions.len()];
+    let mut local_barline_positions = vec![0; barline_positions.len()];
+    let mut x_offsets = vec![0; ranges.len()];
+    let mut gap_expansions = vec![0; barline_positions.len()];
+    for (system_index, (system_start, system_end, system_width, ended_by_width)) in
+        ranges.iter().copied().enumerate()
+    {
+        starts.push(system_start);
+        for system in measure_systems
+            .iter_mut()
+            .take(system_end)
+            .skip(system_start)
+        {
+            *system = system_index;
+        }
+        let x_offset = match alignment {
+            SystemAlignment::Left | SystemAlignment::Justified => 0,
+            SystemAlignment::Right => max_width - system_width,
+            SystemAlignment::Centered => (max_width - system_width) / 2,
+        };
+        x_offsets[system_index] = x_offset;
+
+        if system_start == 0 {
+            local_barline_positions[system_start] = barline_positions[system_start] + x_offset;
+        } else {
+            local_barline_positions[system_start] =
+                92 + barline_positions[system_start] - barline_positions[system_start - 1] - 4
+                    + x_offset;
+        }
+        for measure in system_start + 1..system_end {
+            local_barline_positions[measure] = local_barline_positions[measure - 1]
+                + barline_positions[measure]
+                - barline_positions[measure - 1]
+                + x_offset
+                - x_offset;
+        }
+
+        if alignment == SystemAlignment::Justified
+            && ended_by_width
+            && system_end > system_start + 1
+        {
+            let extra_width = max_width - system_width;
+            let gap_count = system_end - system_start - 1;
+            let weights = (system_start..system_end - 1)
+                .map(|measure| (barline_positions[measure + 1] - barline_positions[measure]).max(1))
+                .collect::<Vec<_>>();
+            let total_weight = weights.iter().sum::<i32>();
+            let mut fractional_shares = Vec::with_capacity(gap_count);
+            let mut distributed = 0;
+            for (gap, weight) in weights.into_iter().enumerate() {
+                let numerator = extra_width * weight;
+                let share = numerator / total_weight;
+                distributed += share;
+                gap_expansions[system_start + gap] = share;
+                fractional_shares.push((gap, numerator % total_weight));
+            }
+            fractional_shares.sort_by_key(|share| std::cmp::Reverse(share.1));
+            for (gap, _) in fractional_shares
+                .into_iter()
+                .take((extra_width - distributed) as usize)
+            {
+                gap_expansions[system_start + gap] += 1;
+            }
+            for measure in system_start + 1..system_end {
+                local_barline_positions[measure] +=
+                    gap_expansions[system_start..measure].iter().sum::<i32>();
+            }
+        }
+    }
+
+    Ok(SystemLayout {
+        starts,
+        measure_systems,
+        local_barline_positions,
+        x_offsets,
+        gap_expansions,
+    })
+}
+
+fn render_svg_with_alignment(
+    score: &Score,
+    warnings: &mut Vec<String>,
+    alignment: SystemAlignment,
+) -> Result<String, String> {
     let provisional = score
         .parts
         .iter()
         .map(|part| {
             let mut provisional_warnings = Vec::new();
-            render_part_svg(part, &mut provisional_warnings, None)
+            render_part_svg(part, &mut provisional_warnings, None, None, 0, 1)
         })
         .collect::<Vec<_>>();
     let provisional_barline_positions = provisional
@@ -8990,14 +10021,34 @@ fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
             .max()
             .expect("a score contains at least one Part");
     }
+    let system_layout =
+        plan_system_layout(&measure_barline_positions, alignment, SYSTEM_MAX_WIDTH, &[])?;
     let rendered = score
         .parts
         .iter()
-        .map(|part| render_part_svg(part, warnings, Some(&measure_barline_positions)))
+        .enumerate()
+        .map(|(part_index, part)| {
+            render_part_svg(
+                part,
+                warnings,
+                (score.parts.len() > 1).then_some(&system_layout.local_barline_positions),
+                Some(&system_layout),
+                part_index,
+                score.parts.len(),
+            )
+        })
         .collect::<Vec<_>>();
+    if score.parts.len() == 1 {
+        return Ok(rendered.into_iter().next().expect("score has one Part").svg);
+    }
     let left = rendered
         .iter()
         .map(|part| part.view_box.left)
+        .min()
+        .unwrap_or(0);
+    let top = rendered
+        .iter()
+        .map(|part| part.view_box.top)
         .min()
         .unwrap_or(0);
     let notation_right = rendered
@@ -9025,32 +10076,38 @@ fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
         .ceil() as i32;
     let right = notation_right.max(part_name_right);
     let width = right - left;
-    let row_heights = rendered
+    let height = rendered
         .iter()
-        .map(|part| part.view_box.height + 40)
-        .collect::<Vec<_>>();
-    let height = row_heights.iter().sum::<i32>();
+        .map(|part| part.view_box.height)
+        .max()
+        .unwrap_or(0);
     let mut svg = String::new();
-    writeln!(svg, "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{left} 0 {width} {height}\" role=\"img\">")
+    writeln!(svg, "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{left} {top} {width} {height}\" role=\"img\">")
         .expect("writing to a String cannot fail");
-    writeln!(svg, "<rect id=\"background\" x=\"{left}\" y=\"0\" width=\"{width}\" height=\"{height}\" fill=\"#fff\"/>")
+    writeln!(svg, "<rect id=\"background\" x=\"{left}\" y=\"{top}\" width=\"{width}\" height=\"{height}\" fill=\"#fff\"/>")
         .expect("writing to a String cannot fail");
-    let mut row_top = 0;
     for (part_index, (part, rendered_part)) in score.parts.iter().zip(rendered).enumerate() {
-        let offset_y = row_top + 28 - rendered_part.view_box.top;
         let scale = 12.0 / noto_sans_glyphs::UNITS_PER_EM;
-        let mut name_x = 12.0;
-        for (glyph_index, character) in part.name.chars().enumerate() {
-            let glyph = noto_sans_glyphs::glyph(character)
-                .expect("Part name was checked against the bundled glyph repertoire");
-            if !glyph.path.is_empty() {
-                writeln!(svg, "<path id=\"part-name-{part_index}-glyph-{glyph_index}\" transform=\"translate({name_x:.2} {}) scale({scale:.4})\" d=\"{}\" fill=\"#171717\" fill-rule=\"evenodd\"/>", row_top + 18, glyph.path)
-                    .expect("writing to a String cannot fail");
+        for system_index in 0..system_layout.starts.len() {
+            let row_top =
+                (system_index * score.parts.len() + part_index) as i32 * SYSTEM_ROW_HEIGHT;
+            let mut name_x = 12.0;
+            for (glyph_index, character) in part.name.chars().enumerate() {
+                let glyph = noto_sans_glyphs::glyph(character)
+                    .expect("Part name was checked against the bundled glyph repertoire");
+                if !glyph.path.is_empty() {
+                    let id = if system_index == 0 {
+                        format!("part-name-{part_index}-glyph-{glyph_index}")
+                    } else {
+                        format!("part-name-system-{system_index}-{part_index}-glyph-{glyph_index}")
+                    };
+                    writeln!(svg, "<path id=\"{id}\" transform=\"translate({name_x:.2} {}) scale({scale:.4})\" d=\"{}\" fill=\"#171717\" fill-rule=\"evenodd\"/>", row_top + 18, glyph.path)
+                        .expect("writing to a String cannot fail");
+                }
+                name_x += glyph.advance * scale;
             }
-            name_x += glyph.advance * scale;
         }
-        writeln!(svg, "<g transform=\"translate(0 {offset_y})\">")
-            .expect("writing to a String cannot fail");
+        writeln!(svg, "<g>").expect("writing to a String cannot fail");
         for line in rendered_part
             .svg
             .lines()
@@ -9061,10 +10118,15 @@ fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
             svg.push('\n');
         }
         svg.push_str("</g>\n");
-        row_top += row_heights[part_index];
     }
     svg.push_str("</svg>\n");
-    svg
+    Ok(svg)
+}
+
+#[cfg(test)]
+fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
+    render_svg_with_alignment(score, warnings, SystemAlignment::Left)
+        .expect("score fits the configured System width")
 }
 
 fn measure_barline_position(
@@ -9289,6 +10351,9 @@ fn render_part_svg(
     part: &Part,
     warnings: &mut Vec<String>,
     measure_barline_positions: Option<&[i32]>,
+    system_layout: Option<&SystemLayout>,
+    part_index: usize,
+    part_count: usize,
 ) -> RenderedPart {
     let mut scene = Scene::new(0, 0, 0);
     let group_stem_directions = beamed_group_stem_directions(part);
@@ -9312,8 +10377,25 @@ fn render_part_svg(
     let mut occupied_text = Vec::new();
     let mut pending_texts = Vec::new();
     let mut notation_bounds = Vec::new();
+    let mut system_notation_bounds = Vec::new();
     let mut active_ending: Option<(i32, String)> = None;
     for (measure_index, measure) in part.measures.iter().enumerate() {
+        let system_index = system_layout
+            .map(|layout| layout.measure_systems[measure_index])
+            .unwrap_or(0);
+        let is_system_start = measure_index == 0
+            || system_layout.is_some_and(|layout| layout.starts[system_index] == measure_index);
+        if is_system_start {
+            if measure_index > 0 {
+                system_notation_bounds.push(notation_bounds.clone());
+                notation_bounds.clear();
+            }
+            x = 92 + system_layout.map_or(0, |layout| layout.x_offsets[system_index]);
+            scene.set_system_y_offset(
+                (system_index * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT,
+            );
+            active_meter = None;
+        }
         let measure_start_x = f64::from(x);
         let mut event_positions = Vec::new();
         let mut previous_event_geometry = None;
@@ -9332,7 +10414,7 @@ fn render_part_svg(
                 } else {
                     format!("meter-denominator-{meter_index}")
                 };
-                let meter_x = if measure_index == 0 { x - 34 } else { x };
+                let meter_x = if is_system_start { x - 34 } else { x };
                 scene.add_path(
                     DrawLayer::Event,
                     numerator_id,
@@ -9435,6 +10517,7 @@ fn render_part_svg(
                     text_item_index,
                     f64::from(x) + measure.texts[text_index].offset_x,
                     measure_start_x,
+                    system_index,
                 ));
                 text_index += 1;
                 text_item_index += 1;
@@ -9536,10 +10619,12 @@ fn render_part_svg(
                         &mut scene,
                         format!("fermata-{index}-{fermata_index}"),
                         fermata,
-                        f64::from(x + 7),
-                        rest_y,
-                        rest_y + 18.0,
-                        event.glyph_scale,
+                        FermataAnchor {
+                            x: f64::from(x + 7),
+                            top: rest_y,
+                            bottom: rest_y + 18.0,
+                            scale: event.glyph_scale,
+                        },
                         &occupied,
                     );
                     occupied_fermata_bounds.push(bounds);
@@ -10152,10 +11237,12 @@ fn render_part_svg(
                     &mut scene,
                     format!("fermata-{index}-{fermata_index}"),
                     fermata,
-                    f64::from(tone_xs[tone_index] + 6),
-                    f64::from(tone_y),
-                    f64::from(tone_y + 18),
-                    event.glyph_scale,
+                    FermataAnchor {
+                        x: f64::from(tone_xs[tone_index] + 6),
+                        top: f64::from(tone_y),
+                        bottom: f64::from(tone_y + 18),
+                        scale: event.glyph_scale,
+                    },
                     &event_mark_bounds,
                 );
                 event_mark_bounds.push(bounds);
@@ -10197,6 +11284,7 @@ fn render_part_svg(
                 text_item_index,
                 f64::from(x) + text.offset_x,
                 measure_start_x,
+                system_index,
             ));
             text_index += 1;
             text_item_index += 1;
@@ -10471,10 +11559,12 @@ fn render_part_svg(
                     &mut scene,
                     format!("fermata-barline-{measure_index}-{fermata_index}"),
                     &fermata,
-                    f64::from(fermata_x),
-                    27.5,
-                    108.5,
-                    1.0,
+                    FermataAnchor {
+                        x: f64::from(fermata_x),
+                        top: 27.5,
+                        bottom: 108.5,
+                        scale: 1.0,
+                    },
                     &occupied_fermata_bounds,
                 );
                 occupied_fermata_bounds.push(bounds);
@@ -10524,8 +11614,9 @@ fn render_part_svg(
         final_barline_x = barline_x;
         barline_positions.push(barline_x);
         right = right.max(barline_x + 12);
-        x = barline_x + 4;
+        x = barline_x + 4 + system_layout.map_or(0, |layout| layout.gap_expansions[measure_index]);
     }
+    system_notation_bounds.push(notation_bounds.clone());
     for (measure_index, measure) in part.measures.iter().enumerate() {
         let Some(multiple_rest) = &measure.multiple_rest else {
             continue;
@@ -10621,18 +11712,72 @@ fn render_part_svg(
         }
         right = right.max(span_end);
     }
-    for staff_y in [28.0, 68.0, 108.0] {
-        notation_bounds.push(ComponentBounds::stroked(
-            12.0,
-            staff_y,
-            f64::from(final_barline_x),
-            staff_y,
-            1.0,
-        ));
+    let system_count = system_layout.map_or(1, |layout| layout.starts.len());
+    let system_ends = (0..system_count)
+        .map(|system_index| {
+            system_layout
+                .and_then(|layout| layout.starts.get(system_index + 1).copied())
+                .unwrap_or(part.measures.len())
+        })
+        .collect::<Vec<_>>();
+    for (system_index, end) in system_ends.iter().copied().enumerate() {
+        let system_barline = barline_positions
+            .get(end.saturating_sub(1))
+            .copied()
+            .unwrap_or(final_barline_x);
+        let system_offset = (system_index * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT;
+        scene.set_system_y_offset(system_offset);
+        for (staff_index, staff_y) in [28.0, 68.0, 108.0].into_iter().enumerate() {
+            let id = if system_index == 0 {
+                format!("staff-line-{}", staff_index + 1)
+            } else {
+                format!("system-{system_index}-staff-line-{}", staff_index + 1)
+            };
+            scene.add_path(
+                DrawLayer::Staff,
+                id,
+                None,
+                Vec::new(),
+                PathGeometry::new(
+                    None,
+                    format!("M12 {staff_y}H{system_barline}"),
+                    PathStyle::StaffLine,
+                ),
+            );
+        }
+        for (label, y, tone) in [("octave-5", 49, 5), ("octave-4", 69, 4)] {
+            let id = if system_index == 0 {
+                label.to_owned()
+            } else {
+                format!("system-{system_index}-{label}")
+            };
+            scene.add_path(
+                DrawLayer::Staff,
+                id,
+                None,
+                Vec::new(),
+                PathGeometry::new(Some((26, y)), glyph_path(tone), PathStyle::FilledGlyph),
+            );
+        }
+        let system_bounds = &mut system_notation_bounds[system_index];
+        system_bounds.extend([28.0, 68.0, 108.0].into_iter().map(|staff_y| {
+            ComponentBounds::stroked(12.0, staff_y, f64::from(system_barline), staff_y, 1.0)
+        }));
+        system_bounds.push(ComponentBounds::filled(26.0, 49.0, 38.0, 67.0));
+        system_bounds.push(ComponentBounds::filled(26.0, 69.0, 38.0, 87.0));
     }
-    notation_bounds.push(ComponentBounds::filled(26.0, 49.0, 38.0, 67.0));
-    notation_bounds.push(ComponentBounds::filled(26.0, 69.0, 38.0, 87.0));
-    for (text, text_item_index, anchor_x, measure_start_x) in pending_texts {
+    pending_texts.sort_by_key(|(text, _, _, _, system_index)| {
+        (*system_index, text.path_id_prefix == "metronome")
+    });
+    let mut current_text_system = None;
+    for (text, text_item_index, anchor_x, measure_start_x, system_index) in pending_texts {
+        if current_text_system != Some(system_index) {
+            occupied_text.clear();
+            current_text_system = Some(system_index);
+        }
+        scene.set_system_y_offset(
+            (system_index * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT,
+        );
         add_text_item(
             &mut scene,
             text,
@@ -10641,7 +11786,7 @@ fn render_part_svg(
             measure_start_x,
             &mut TextLayoutContext {
                 occupied: &mut occupied_text,
-                notation_bounds: &notation_bounds,
+                notation_bounds: &system_notation_bounds[system_index],
                 warnings,
                 left: &mut left,
                 right: &mut right,
@@ -10651,43 +11796,23 @@ fn render_part_svg(
         );
     }
     let view_width = right + 12 - left;
+    let row_count = system_count * part_count;
+    let system_height = if row_count == 1 {
+        view_bottom - view_top
+    } else {
+        row_count as i32 * SYSTEM_ROW_HEIGHT
+    };
     scene.view_left = left;
     scene.view_top = view_top;
     scene.view_width = view_width;
-    scene.view_height = view_bottom - view_top;
+    scene.view_height = system_height;
     let view_box = SvgViewBox {
         left,
         top: view_top,
         width: view_width,
-        height: view_bottom - view_top,
+        height: system_height,
     };
-    for (id, path_data) in [
-        ("staff-line-1", format!("M12 28H{final_barline_x}")),
-        ("staff-line-2", format!("M12 68H{final_barline_x}")),
-        ("staff-line-3", format!("M12 108H{final_barline_x}")),
-    ] {
-        scene.add_path(
-            DrawLayer::Staff,
-            id,
-            None,
-            Vec::new(),
-            PathGeometry::new(None, path_data, PathStyle::StaffLine),
-        );
-    }
-    scene.add_path(
-        DrawLayer::Staff,
-        "octave-5",
-        None,
-        Vec::new(),
-        PathGeometry::new(Some((26, 49)), glyph_path(5), PathStyle::FilledGlyph),
-    );
-    scene.add_path(
-        DrawLayer::Staff,
-        "octave-4",
-        None,
-        Vec::new(),
-        PathGeometry::new(Some((26, 69)), glyph_path(4), PathStyle::FilledGlyph),
-    );
+    scene.set_system_y_offset(0);
     RenderedPart {
         svg: scene.to_svg(),
         view_box,
@@ -11006,7 +12131,64 @@ fn time_signature_glyph_path(value: u8) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{glyph_path, parse_score, render_svg, Meter};
+    use super::{
+        glyph_path, parse_score, plan_system_layout, render_part_svg, render_svg, Meter,
+        SystemAlignment,
+    };
+
+    #[test]
+    fn justified_systems_expand_gaps_proportionally() {
+        let layout = plan_system_layout(
+            &[150, 200, 280, 480, 530],
+            SystemAlignment::Justified,
+            340,
+            &[],
+        )
+        .expect("each measure fits");
+
+        assert_eq!(layout.starts, [0, 3, 4]);
+        assert_eq!(&layout.gap_expansions[..3], [18, 30, 0]);
+        assert_eq!(&layout.local_barline_positions[..3], [150, 218, 328]);
+    }
+
+    #[test]
+    fn short_system_alignment_offsets_the_system_without_justifying_it() {
+        for (alignment, expected_offset) in [
+            (SystemAlignment::Left, 0),
+            (SystemAlignment::Justified, 0),
+            (SystemAlignment::Centered, 44),
+            (SystemAlignment::Right, 88),
+        ] {
+            let layout =
+                plan_system_layout(&[150, 200], alignment, 300, &[]).expect("each measure fits");
+            assert_eq!(layout.x_offsets, [expected_offset]);
+            assert_eq!(layout.gap_expansions, [0, 0]);
+        }
+    }
+
+    #[test]
+    fn system_planner_rejects_an_overwide_measure() {
+        assert!(matches!(
+            plan_system_layout(&[1000], SystemAlignment::Left, 680, &[]),
+            Err(error) if error.contains("measure 1 is") && error.contains("maximum System width")
+        ));
+    }
+
+    #[test]
+    fn renders_breve_long_and_maxima_rest_glyphs() {
+        let source = "<score-partwise version=\"4.0\"><part-list><score-part id=\"P1\"><part-name>Music</part-name></score-part></part-list><part id=\"P1\"><measure number=\"1\"><attributes><divisions>1</divisions></attributes><note><rest/><duration>8</duration><voice>1</voice><type>breve</type></note><note><rest/><duration>16</duration><voice>1</voice><type>long</type></note><note><rest/><duration>32</duration><voice>1</voice><type>maxima</type></note></measure></part></score-partwise>";
+        let score = parse_score(source.as_bytes()).expect("extended rests should parse");
+        let mut warnings = score.warnings.clone();
+        let svg = render_part_svg(&score.parts[0], &mut warnings, None, None, 0, 1).svg;
+
+        assert_eq!(svg.matches("class=\"rest\"").count(), 3, "{svg}");
+        for duration in ["breve", "long", "maxima"] {
+            assert!(
+                svg.contains(&format!("data-duration=\"{duration}\"")),
+                "{svg}"
+            );
+        }
+    }
 
     #[test]
     fn tonehead_one_has_no_projecting_foot() {

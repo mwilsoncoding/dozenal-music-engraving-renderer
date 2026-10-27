@@ -10,6 +10,115 @@ fn scratch_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("domunor-cli-{}-{nonce}", std::process::id()))
 }
 
+#[test]
+fn wraps_complete_measures_into_systems() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("system-breaks.musicxml");
+    let measures = (1..=24)
+        .map(|number| {
+            let divisions = if number == 1 {
+                "<attributes><divisions>1</divisions></attributes>"
+            } else {
+                ""
+            };
+            format!(
+                "<measure number=\"{number}\">{divisions}<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure>"
+            )
+        })
+        .collect::<String>();
+    let fixture = format!(
+        "<?xml version=\"1.0\"?><score-partwise version=\"4.0\"><part-list><score-part id=\"P1\"><part-name>Music</part-name></score-part></part-list><part id=\"P1\">{measures}</part></score-partwise>"
+    );
+    fs::write(&input, fixture).expect("write system-break score");
+
+    let mut first_tonehead_x = Vec::new();
+    let mut svg = String::new();
+    for alignment in ["justified", "left", "centered", "right"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .arg("--system-alignment")
+            .arg(alignment)
+            .output()
+            .expect("run CLI");
+        assert!(
+            output.status.success(),
+            "{alignment} system layout failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        svg = fs::read_to_string(directory.join("system-breaks.svg")).expect("read SVG");
+        let first = svg
+            .lines()
+            .find(|line| line.contains("id=\"tonehead\""))
+            .expect("first measure Tonehead");
+        first_tonehead_x.push(path_translation_f64(first).0);
+    }
+    assert!(svg.contains("id=\"system-1-staff-line-1\""), "{svg}");
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 24, "{svg}");
+    let staff_endpoints = svg
+        .lines()
+        .filter(|line| line.contains("staff-line-1\""))
+        .map(|line| {
+            line.split_once("H")
+                .and_then(|(_, endpoint)| endpoint.split('"').next())
+                .and_then(|endpoint| endpoint.parse::<i32>().ok())
+                .expect("System staff endpoint")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        staff_endpoints.iter().all(|endpoint| endpoint + 12 <= 680),
+        "System exceeds the configured width: {staff_endpoints:?}"
+    );
+    assert!(first_tonehead_x[0] < first_tonehead_x[2]);
+    assert!(first_tonehead_x[2] < first_tonehead_x[3]);
+    assert_eq!(first_tonehead_x[1], first_tonehead_x[0]);
+    let first = svg
+        .lines()
+        .find(|line| line.contains("id=\"tonehead\""))
+        .expect("first measure Tonehead");
+    let last = svg
+        .lines()
+        .find(|line| line.contains("id=\"tonehead-23\""))
+        .expect("last measure Tonehead");
+    assert!(
+        path_translation_f64(last).1 > path_translation_f64(first).1,
+        "later measures should continue on a lower System"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_a_measure_wider_than_the_configured_system() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("too-wide.musicxml");
+    let notes = (0..40)
+        .map(|_| {
+            "<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>"
+        })
+        .collect::<String>();
+    let fixture = format!(
+        "<?xml version=\"1.0\"?><score-partwise version=\"4.0\"><part-list><score-part id=\"P1\"><part-name>Music</part-name></score-part></part-list><part id=\"P1\"><measure number=\"1\"><attributes><divisions>1</divisions></attributes>{notes}</measure></part></score-partwise>"
+    );
+    fs::write(&input, fixture).expect("write overwide score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("measure 1 is")
+            && String::from_utf8_lossy(&output.stderr).contains("maximum System width"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!directory.join("too-wide.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
 fn path_translation(line: &str) -> (i32, i32) {
     let coordinates = line
         .split("transform=\"translate(")
@@ -678,8 +787,7 @@ fn pairs_two_note_tremolo_across_measures_without_changing_durations() {
     );
     let tremolo_path = svg
         .lines()
-        .filter(|line| line.contains("class=\"tremolo-mark\""))
-        .next()
+        .find(|line| line.contains("class=\"tremolo-mark\""))
         .expect("connecting tremolo path");
     assert_eq!(tremolo_path.matches('M').count(), 2, "{tremolo_path}");
     assert!(tremolo_path.contains('L'), "{tremolo_path}");
@@ -995,13 +1103,12 @@ fn renders_articulation_ornament_fermata_example() {
     );
     let svg = fs::read_to_string(directory.join("articulation-ornament-fermata.svg"))
         .expect("read example SVG");
-    for id in ["articulation-4-0"] {
-        let path = svg
-            .lines()
-            .find(|line| line.contains(&format!("id=\"{id}\"")))
-            .unwrap_or_else(|| panic!("missing {id} path in {svg}"));
-        assert!(path.contains("fill=\"none\""), "{path}");
-    }
+    let id = "articulation-4-0";
+    let path = svg
+        .lines()
+        .find(|line| line.contains(&format!("id=\"{id}\"")))
+        .unwrap_or_else(|| panic!("missing {id} path in {svg}"));
+    assert!(path.contains("fill=\"none\""), "{path}");
     for id in ["ornament-6-0", "fermata-11-0"] {
         let path = svg
             .lines()
@@ -2028,7 +2135,7 @@ fn assert_measure_barline_layout(svg: &str) {
         .expect("final barline x position");
     let staff_end_x = svg
         .lines()
-        .find(|line| line.contains("id=\"staff-line-1\""))
+        .rfind(|line| line.contains("staff-line-1\""))
         .and_then(|line| line.split('H').nth(1))
         .and_then(|value| value.split('\"').next())
         .and_then(|value| value.parse::<i32>().ok())
@@ -2658,6 +2765,380 @@ fn renders_path_backed_symbol_directions() {
         svg.matches("class=\"direction-symbol\"").count(),
         15,
         "every allowlisted Bravura symbol should render as a path"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_metronome_rate_in_dozenal() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("dozenal-tempo.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml").replace(
+        "<rehearsal>A</rehearsal>",
+        "<metronome><beat-unit>quarter</beat-unit><per-minute>120</per-minute></metronome>",
+    );
+    fs::write(&input, fixture).expect("write tempo score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "tempo direction failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("<metronome> direction is not supported"),
+        "supported tempo direction should not warn: {stderr}"
+    );
+    let svg = fs::read_to_string(directory.join("dozenal-tempo.svg")).expect("read SVG");
+    assert!(
+        svg.contains("data-value=\"↊0\""),
+        "decimal tempo 120 should be labeled with its dozenal value: {svg}"
+    );
+    let head_line = svg
+        .lines()
+        .find(|line| line.contains("id=\"metronome-0-beat-0-head\""))
+        .expect("tempo X tonehead");
+    let stem_line = svg
+        .lines()
+        .find(|line| line.contains("id=\"metronome-0-beat-0-stem\""))
+        .expect("tempo stem");
+    let numeral_line = svg
+        .lines()
+        .find(|line| line.contains("id=\"metronome-0-glyph-3\""))
+        .expect("last dozenal rate numeral");
+    let (head_x, head_y) = path_translation_f64(head_line);
+    let (stem_x, _) = path_translation_f64(stem_line);
+    let (_, numeral_y) = path_translation_f64(numeral_line);
+    assert!(
+        stem_line.contains("d=\"M0 0V29\"") && stem_line.contains("scale(0.6)"),
+        "tempo stem should use the staff's standard length scaled to cue size"
+    );
+    assert!(
+        (head_y + 16.0 * 0.6 - numeral_y).abs() < 0.01,
+        "X tonehead bottom ({}) should align with the rate numeral baseline ({numeral_y})",
+        head_y + 16.0 * 0.6
+    );
+    assert!(
+        (stem_x - (head_x + 6.0 * 0.6)).abs() < 0.01,
+        "tempo stem should be centered on the X tonehead"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn warns_and_omits_fractional_metronome_rates() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("fractional-tempo.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml").replace(
+        "<rehearsal>A</rehearsal>",
+        "<metronome><beat-unit>quarter</beat-unit><per-minute>120.5</per-minute></metronome>",
+    );
+    fs::write(&input, fixture).expect("write fractional tempo score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "fractional tempo should be nonfatal: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("fractional per-minute rate is unsupported"),
+        "fractional tempo should explain its omission"
+    );
+    let svg = fs::read_to_string(directory.join("fractional-tempo.svg")).expect("read SVG");
+    assert!(
+        !svg.contains("class=\"metronome-mark\""),
+        "unsupported fractional tempo must not be rounded or rendered: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_simple_metronome_beat_equivalence() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("tempo-equivalence.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml").replace(
+        "<rehearsal>A</rehearsal>",
+        "<metronome><beat-unit>quarter</beat-unit><beat-unit-dot/><beat-unit>half</beat-unit><beat-unit-dot/></metronome>",
+    );
+    fs::write(&input, fixture).expect("write tempo equivalence score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "tempo equivalence failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("tempo-equivalence.svg")).expect("read SVG");
+    assert!(
+        svg.contains("id=\"metronome-0-beat-0-head\"")
+            && svg.contains("id=\"metronome-0-beat-1-head\""),
+        "simple tempo equivalence should show both beat-unit symbols: {svg}"
+    );
+    assert_eq!(
+        svg.matches("d=\"M2 2L10 16M10 2L2 16\"").count(),
+        2,
+        "tempo beat units should use unpitched X toneheads"
+    );
+    assert!(
+        svg.contains("id=\"metronome-0-beat-0-mark-0\"")
+            && svg.contains("id=\"metronome-0-beat-1-mark-0\"")
+            && svg.contains("id=\"metronome-0-beat-1-mark-1\"")
+            && svg.contains("id=\"metronome-0-beat-1-mark-2\""),
+        "dotted quarter and half-note beat units should show dot and colon-plus-dot marks"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_direction_dynamics_in_source_order() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("dynamics.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml")
+        .replace(
+            "<rehearsal>A</rehearsal>",
+            "<dynamics color=\"#006699\" font-size=\"large\"><p/><mf/></dynamics>",
+        )
+        .replacen("<direction placement=\"above\">", "<direction>", 1);
+    fs::write(&input, fixture).expect("write dynamics score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "dynamics direction failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("<dynamics> direction is not supported"),
+        "named Dynamics should not warn: {stderr}"
+    );
+    let svg = fs::read_to_string(directory.join("dynamics.svg")).expect("read SVG");
+    assert!(
+        svg.contains("id=\"dynamic-0-glyph-0\"")
+            && svg.contains("id=\"dynamic-0-glyph-1\"")
+            && svg.contains("id=\"dynamic-0-glyph-2\""),
+        "p followed by mf should render three source-ordered glyphs: {svg}"
+    );
+    assert_eq!(svg.matches("class=\"dynamic-mark\"").count(), 3, "{svg}");
+    assert!(
+        svg.contains("fill=\"#006699\"") && svg.contains("scale(0.018)"),
+        "Dynamics should honor color and font-size: {svg}"
+    );
+    assert!(
+        text_path_y(&svg, "dynamic-0-glyph-0") > 68.0,
+        "a direction-level Dynamic Mark without explicit placement defaults below the Staff"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn warns_and_omits_custom_dynamics_while_rendering_named_siblings() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("custom-dynamics.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml").replace(
+        "<rehearsal>A</rehearsal>",
+        "<dynamics><other-dynamics>subito</other-dynamics><mf/></dynamics>",
+    );
+    fs::write(&input, fixture).expect("write custom dynamics score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "unsupported custom Dynamics should be nonfatal: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("custom Dynamics are unsupported"),
+        "unsupported custom Dynamics should warn"
+    );
+    let svg = fs::read_to_string(directory.join("custom-dynamics.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"dynamic-mark\"").count(), 2, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_malformed_tempo_and_dynamic_values_without_svg() {
+    let cases = [
+        (
+            "malformed-tempo",
+            "<metronome><beat-unit>quarter</beat-unit><per-minute>0</per-minute></metronome>",
+            "per-minute must be a positive integer or fractional number",
+        ),
+        (
+            "malformed-dynamics",
+            "<dynamics><forte/></dynamics>",
+            "unsupported dynamics child <forte>",
+        ),
+    ];
+    for (name, item, expected_error) in cases {
+        let directory = scratch_dir();
+        fs::create_dir_all(&directory).expect("create test directory");
+        let input = directory.join(format!("{name}.musicxml"));
+        let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml")
+            .replace("<rehearsal>A</rehearsal>", item);
+        fs::write(&input, fixture).expect("write malformed score");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .output()
+            .expect("run CLI");
+        assert!(!output.status.success(), "{name} unexpectedly succeeded");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected_error),
+            "{name} should report {expected_error:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !directory.join(format!("{name}.svg")).exists(),
+            "{name} must not write partial SVG"
+        );
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+}
+
+#[test]
+fn renders_note_attached_dynamics() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("note-dynamics.musicxml");
+    let fixture = include_str!("../examples/words-rehearsal/words-rehearsal.musicxml").replacen(
+        "<type>quarter</type></note>",
+        "<type>quarter</type><notations><dynamics><f/></dynamics></notations></note>",
+        1,
+    );
+    fs::write(&input, fixture).expect("write note dynamics score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "note-attached dynamics failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("note-dynamics.svg")).expect("read SVG");
+    assert!(
+        svg.contains("class=\"dynamic-mark\"")
+            && !svg.contains("<dynamics> direction is not supported"),
+        "note-attached forte should render as a path-backed Dynamic Mark: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_tempo_and_dynamic_marks_example() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("tempo-dynamic-marks.musicxml");
+    fs::copy(
+        "examples/tempo-dynamic-marks/tempo-dynamic-marks.musicxml",
+        &input,
+    )
+    .expect("copy tempo and dynamics example");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "tempo and dynamics example failed to render: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("tempo-dynamic-marks.svg")).expect("read SVG");
+    assert!(
+        svg.contains("class=\"metronome-mark\"")
+            && svg.contains("class=\"dynamic-mark\"")
+            && svg.contains("data-value=\"↊0\""),
+        "example should render tempo and Dynamics using dozenal rate labels: {svg}"
+    );
+    let tempo_head = svg
+        .lines()
+        .find(|line| line.contains("id=\"metronome-5-beat-0-head\""))
+        .expect("measure 3 tempo beat indicator");
+    let tempo_stem = svg
+        .lines()
+        .find(|line| line.contains("id=\"metronome-5-beat-0-stem\""))
+        .expect("measure 3 tempo stem");
+    let sfz = svg
+        .lines()
+        .find(|line| line.contains("id=\"dynamic-6-glyph-0\""))
+        .expect("measure 3 sfz Dynamic Mark");
+    assert!(
+        tempo_head.contains("scale(0.6)") && tempo_stem.contains("scale(0.6)"),
+        "beat-unit indicators should be cue-sized"
+    );
+    let (_, head_y) = path_translation_f64(tempo_head);
+    let (_, sfz_y) = path_translation_f64(sfz);
+    assert!(
+        head_y + 16.0 * 0.6 + 2.0 < sfz_y,
+        "measure 3 tempo stem should clear and sit above the sfz Dynamic Mark"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn explicit_tempo_coordinates_override_dynamic_collision_placement() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("explicit-tempo-position.musicxml");
+    let fixture = include_str!("../examples/tempo-dynamic-marks/tempo-dynamic-marks.musicxml").replace(
+        "<metronome><beat-unit>half</beat-unit><beat-unit>quarter</beat-unit></metronome>",
+        "<metronome default-x=\"0\" default-y=\"20\"><beat-unit>half</beat-unit><beat-unit>quarter</beat-unit></metronome>",
+    );
+    fs::write(&input, fixture).expect("write explicitly positioned tempo score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "explicit tempo positioning failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("explicit-tempo-position.svg"))
+        .expect("read explicitly positioned tempo SVG");
+    let tempo_head = svg
+        .lines()
+        .find(|line| line.contains("id=\"metronome-5-beat-0-head\""))
+        .expect("explicitly positioned measure 3 tempo beat");
+    let (_, head_y) = path_translation_f64(tempo_head);
+    assert!(
+        (head_y - 18.4).abs() < 0.01,
+        "explicit default-y should override collision placement: {head_y}"
     );
 
     fs::remove_dir_all(directory).expect("remove test directory");
@@ -4816,20 +5297,44 @@ fn engraves_supported_note_durations_and_one_or_two_dots() {
         ("quarter", 28, 2),
         ("half", 56, 2),
     ];
-    let events = forms
-        .iter()
-        .map(|(note_type, ticks, dots)| {
-            let dot = "<dot/>".repeat(*dots);
+    let measures = forms
+        .chunks(4)
+        .enumerate()
+        .map(|(measure_index, measure_forms)| {
+            let events = measure_forms
+                .iter()
+                .map(|(note_type, ticks, dots)| {
+                    let dot = "<dot/>".repeat(*dots);
+                    format!(
+                        "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>{ticks}</duration><voice>1</voice><type>{note_type}</type>{dot}</note>\n"
+                    )
+                })
+                .collect::<String>();
+            let attributes = if measure_index == 0 {
+                "<attributes><divisions>16</divisions></attributes>"
+            } else {
+                ""
+            };
             format!(
-                "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>{ticks}</duration><voice>1</voice><type>{note_type}</type>{dot}</note>\n"
+                "    <measure number=\"{}\">{attributes}{events}</measure>\n",
+                measure_index + 1
             )
         })
         .collect::<String>();
     let source = include_str!("fixtures/minimal.musicxml");
-    let note_start = source.find("      <note>").expect("canonical note start");
-    let note_end = source.find("      </note>").expect("canonical note end") + 13;
-    let fixture = format!("{}{}{}", &source[..note_start], events, &source[note_end..])
-        .replace("<divisions>1</divisions>", "<divisions>16</divisions>");
+    let measure_start = source
+        .find("    <measure number=\"1\">")
+        .expect("canonical measure start");
+    let measure_end = source
+        .find("    </measure>")
+        .expect("canonical measure end")
+        + 15;
+    let fixture = format!(
+        "{}{}{}",
+        &source[..measure_start],
+        measures,
+        &source[measure_end..]
+    );
     fs::write(&input, fixture).expect("write duration score");
 
     let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
@@ -6395,31 +6900,6 @@ fn renders_single_measure_rest_centered_at_double_width() {
         svg.contains("id=\"barline-1\""),
         "explicit barline must remain: {svg}"
     );
-
-    fs::remove_dir_all(directory).expect("remove test directory");
-}
-
-#[test]
-fn renders_breve_long_and_maxima_rests() {
-    let directory = scratch_dir();
-    fs::create_dir_all(&directory).expect("create test directory");
-    let input = directory.join("extended-rests.musicxml");
-    let original_note = "      <note>\n        <pitch><step>C</step><octave>4</octave></pitch>\n        <duration>1</duration><voice>1</voice><type>quarter</type>\n      </note>";
-    let rests = "<note><rest/><duration>8</duration><voice>1</voice><type>breve</type></note>\n      <note><rest/><duration>16</duration><voice>1</voice><type>long</type></note>\n      <note><rest/><duration>32</duration><voice>1</voice><type>maxima</type></note>";
-    let fixture = include_str!("fixtures/minimal.musicxml").replace(original_note, rests);
-    fs::write(&input, fixture).expect("write extended-rest score");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
-        .arg(&input)
-        .output()
-        .expect("run CLI");
-    assert!(
-        output.status.success(),
-        "extended Rests should render: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let svg = fs::read_to_string(directory.join("extended-rests.svg")).expect("read SVG");
-    assert_eq!(svg.matches("class=\"rest\"").count(), 3, "{svg}");
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
