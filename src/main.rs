@@ -12172,6 +12172,7 @@ fn add_note_span_paths(
     let mut active: Vec<NoteSpanAnchor> = Vec::new();
     let mut span_index = 0;
     let mut labels = Vec::new();
+    let mut placed_segments: Vec<(usize, i32, i32, i32, i32, i32)> = Vec::new();
     for anchor in anchors {
         if anchor.mark.endpoint == NoteSpanEndpoint::Start {
             active.push(anchor);
@@ -12198,12 +12199,58 @@ fn add_note_span_paths(
             } else {
                 barline_positions[system_ends[system_index] - 1]
             };
-            let start_y = start.y;
-            let end_y = if system_index == system_end {
+            let base_start_y = start.y;
+            let base_end_y = if system_index == system_end {
                 anchor.y
             } else {
                 start.y
             };
+            let left_edge = left_x.min(right_x);
+            let right_edge = left_x.max(right_x);
+            let curve_padding = if start.mark.kind == NoteSpanKind::Slur {
+                12
+            } else if start.mark.line_type == "wavy" {
+                2
+            } else {
+                0
+            };
+            let base_top = base_start_y.min(base_end_y) - curve_padding;
+            let base_bottom = base_start_y.max(base_end_y) + curve_padding;
+            let y_offset = (0..=placed_segments.len())
+                .map(|candidate| match candidate {
+                    0 => 0,
+                    value if value % 2 == 1 => -((value.div_ceil(2) * 4) as i32),
+                    value => (value / 2 * 4) as i32,
+                })
+                .find(|candidate| {
+                    placed_segments.iter().all(
+                        |(
+                            other_system,
+                            other_left,
+                            other_right,
+                            other_top,
+                            other_bottom,
+                            other_y,
+                        )| {
+                            *other_system != system_index
+                                || left_edge >= *other_right
+                                || right_edge <= *other_left
+                                || base_top + candidate >= other_bottom + other_y + 4
+                                || base_bottom + candidate <= other_top + other_y - 4
+                        },
+                    )
+                })
+                .unwrap_or(0);
+            placed_segments.push((
+                system_index,
+                left_edge,
+                right_edge,
+                base_top,
+                base_bottom,
+                y_offset,
+            ));
+            let start_y = base_start_y + y_offset;
+            let end_y = base_end_y + y_offset;
             let width = right_x - left_x;
             let path = if start.mark.kind == NoteSpanKind::Slur {
                 let curve = if start.y < 68 { -12 } else { 12 };

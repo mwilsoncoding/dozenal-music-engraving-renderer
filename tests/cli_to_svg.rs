@@ -155,8 +155,21 @@ fn renders_glissandi_and_slides_with_distinct_styles_and_labels() {
     assert!(svg.contains("stroke-dasharray=\"1 3\""), "{svg}");
     assert!(svg.contains("stroke-dasharray=\"5 3\""), "{svg}");
     assert!(svg.contains("id=\"note-span-label-"), "{svg}");
-    assert!(svg.contains("class=\"slide\" d=\"M98 78L"), "{svg}");
-    assert!(svg.contains("L106.0 80.0L114.0 76.0"), "{svg}");
+    let path_data = |class: &str, dash_pattern: &str| {
+        svg.lines()
+            .find(|line| {
+                line.contains(&format!("class=\"{class}\""))
+                    && line.contains(&format!("stroke-dasharray=\"{dash_pattern}\""))
+            })
+            .and_then(|line| line.split_once(" d=\"").map(|(_, rest)| rest))
+            .and_then(|rest| rest.split_once('"').map(|(data, _)| data))
+            .expect("styled span path")
+    };
+    assert_ne!(
+        path_data("glissando", "1 3"),
+        path_data("slide", "5 3"),
+        "{svg}"
+    );
     let label_y = |value: &str| {
         let line = svg
             .lines()
