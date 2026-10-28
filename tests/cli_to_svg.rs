@@ -3621,9 +3621,9 @@ fn splits_direction_wedges_across_systems() {
                 ""
             };
             let direction = if number == 1 {
-                "<direction><direction-type><wedge type=\"crescendo\" number=\"5\"/></direction-type></direction>"
+                "<direction><direction-type><wedge type=\"crescendo\" number=\"5\"/><bracket type=\"start\" number=\"6\" line-end=\"both\"/><dashes type=\"start\" number=\"7\"/></direction-type></direction>"
             } else if number == 24 {
-                "<direction><direction-type><wedge type=\"stop\" number=\"5\"/></direction-type></direction>"
+                "<direction><direction-type><wedge type=\"stop\" number=\"5\"/><bracket type=\"stop\" number=\"6\" line-end=\"both\"/><dashes type=\"stop\" number=\"7\"/></direction-type></direction>"
             } else {
                 ""
             };
@@ -3650,6 +3650,10 @@ fn splits_direction_wedges_across_systems() {
     assert!(svg.contains("id=\"system-1-staff-line-1\""), "{svg}");
     assert!(svg.contains("dynamic-wedge-5-0-system-0"), "{svg}");
     assert!(svg.contains("dynamic-wedge-5-0-system-1"), "{svg}");
+    assert!(svg.contains("bracket-span-6-1-system-0"), "{svg}");
+    assert!(svg.contains("bracket-span-6-1-system-1"), "{svg}");
+    assert!(svg.contains("dash-span-7-2-system-0"), "{svg}");
+    assert!(svg.contains("dash-span-7-2-system-1"), "{svg}");
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
