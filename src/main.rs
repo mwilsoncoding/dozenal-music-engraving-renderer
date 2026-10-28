@@ -389,6 +389,8 @@ struct Measure {
     input_staff_states: Vec<InputStaffState>,
     barlines: Vec<MeasureBarline>,
     new_page_before: bool,
+    system_break_before: Option<bool>,
+    minimum_measure_advance: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -1033,6 +1035,8 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
                         }],
                         barlines,
                         new_page_before: measure.new_page_before,
+                        system_break_before: measure.system_break_before,
+                        minimum_measure_advance: measure.minimum_measure_advance,
                     }
                 })
                 .collect();
@@ -1195,14 +1199,47 @@ fn parse_score(source: &[u8]) -> Result<Score, String> {
 fn parse_note_size_defaults(
     elements: &[Element],
     defaults: usize,
+    warnings: &mut Vec<String>,
 ) -> Result<NoteSizeScales, String> {
     let defaults_element = &elements[defaults];
     require_no_attributes(defaults_element)?;
     require_container_text(defaults_element)?;
-    let [appearance] = exact_children(elements, defaults, &["appearance"])?;
+    let appearances = defaults_element
+        .children
+        .iter()
+        .filter(|child| elements[**child].name == "appearance")
+        .copied()
+        .collect::<Vec<_>>();
+    if appearances.len() > 1 {
+        return Err(element_diagnostic(
+            &elements[appearances[1]],
+            "duplicate <appearance> in defaults".to_owned(),
+        ));
+    }
+    for child in &defaults_element.children {
+        match elements[*child].name.as_str() {
+            "appearance" | "scaling" => {}
+            "system-layout" | "staff-layout" => warnings.push(element_diagnostic(
+                &elements[*child],
+                format!(
+                    "unsupported defaults <{}> geometry is ignored",
+                    elements[*child].name
+                ),
+            )),
+            _ => {
+                return Err(element_diagnostic(
+                    &elements[*child],
+                    format!("unsupported defaults child <{}>", elements[*child].name),
+                ));
+            }
+        }
+    }
+    let mut scales = NoteSizeScales::default();
+    let Some(appearance) = appearances.first().copied() else {
+        return Ok(scales);
+    };
     require_no_attributes(&elements[appearance])?;
     require_container_text(&elements[appearance])?;
-    let mut scales = NoteSizeScales::default();
     let mut seen = Vec::new();
     for child in &elements[appearance].children {
         let note_size = &elements[*child];
@@ -1260,6 +1297,136 @@ fn parse_note_size_defaults(
     Ok(scales)
 }
 
+fn parse_musicxml_tenths_scale(
+    elements: &[Element],
+    defaults: Option<usize>,
+) -> Result<f64, String> {
+    let Some(defaults) = defaults else {
+        return Ok(2.0);
+    };
+    let scaling_elements = elements[defaults]
+        .children
+        .iter()
+        .filter(|child| elements[**child].name == "scaling")
+        .copied()
+        .collect::<Vec<_>>();
+    let Some(scaling) = scaling_elements.first().copied() else {
+        return Ok(2.0);
+    };
+    if scaling_elements.len() > 1 {
+        return Err(element_diagnostic(
+            &elements[scaling_elements[1]],
+            "duplicate <scaling> in defaults".to_owned(),
+        ));
+    }
+    require_no_attributes(&elements[scaling])?;
+    require_container_text(&elements[scaling])?;
+    let [millimeters, tenths] = exact_children(elements, scaling, &["millimeters", "tenths"])?;
+    let parse_positive = |index: usize, name: &str| {
+        let element = &elements[index];
+        require_no_attributes(element)?;
+        if !element.children.is_empty() {
+            return Err(element_diagnostic(
+                element,
+                format!("<{name}> must be a number"),
+            ));
+        }
+        element
+            .text
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .ok_or_else(|| {
+                element_diagnostic(element, format!("<{name}> must be positive and finite"))
+            })
+    };
+    let millimeters = parse_positive(millimeters, "millimeters")?;
+    let tenths = parse_positive(tenths, "tenths")?;
+    Ok(millimeters / tenths * (96.0 / 25.4))
+}
+
+fn parse_print_measure_distance(
+    elements: &[Element],
+    print: usize,
+    tenths_to_pixels: f64,
+    warnings: &mut Vec<String>,
+) -> Result<Option<f64>, String> {
+    let mut distance = None;
+    let mut saw_measure_layout = false;
+    for child in &elements[print].children {
+        let element = &elements[*child];
+        match element.name.as_str() {
+            "measure-layout" => {
+                if saw_measure_layout {
+                    return Err(element_diagnostic(
+                        element,
+                        "duplicate <measure-layout> in <print>".to_owned(),
+                    ));
+                }
+                saw_measure_layout = true;
+                require_no_attributes(element)?;
+                require_container_text(element)?;
+                let mut saw_measure_distance = false;
+                for layout_child in &element.children {
+                    let distance_element = &elements[*layout_child];
+                    if distance_element.name != "measure-distance" {
+                        return Err(element_diagnostic(
+                            distance_element,
+                            "measure-layout supports only <measure-distance>".to_owned(),
+                        ));
+                    }
+                    if saw_measure_distance {
+                        return Err(element_diagnostic(
+                            distance_element,
+                            "duplicate <measure-distance> in <measure-layout>".to_owned(),
+                        ));
+                    }
+                    saw_measure_distance = true;
+                    require_no_attributes(distance_element)?;
+                    if !distance_element.children.is_empty() {
+                        return Err(element_diagnostic(
+                            distance_element,
+                            "measure-distance must contain a numeric value".to_owned(),
+                        ));
+                    }
+                    let tenths = distance_element
+                        .text
+                        .trim()
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|value| value.is_finite() && *value >= 0.0)
+                        .ok_or_else(|| {
+                            element_diagnostic(
+                                distance_element,
+                                "measure-distance must be a finite nonnegative number".to_owned(),
+                            )
+                        })?;
+                    let pixels = tenths * tenths_to_pixels;
+                    if distance.is_some_and(|existing: f64| existing != pixels) {
+                        return Err(element_diagnostic(
+                            distance_element,
+                            "conflicting measure-distance values in one print element".to_owned(),
+                        ));
+                    }
+                    distance = Some(pixels);
+                }
+            }
+            "system-layout" | "staff-layout" => warnings.push(element_diagnostic(
+                element,
+                format!("unsupported <{}> geometry is ignored", element.name),
+            )),
+            _ => {
+                return Err(element_diagnostic(
+                    element,
+                    format!("unsupported <print> child <{}>", element.name),
+                ));
+            }
+        }
+    }
+    Ok(distance)
+}
+
 fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Result<Score, String> {
     let elements = xml::parse(source).map_err(|error| error.to_string())?;
     let root = root_element(&elements)?;
@@ -1311,11 +1478,13 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
             "unsupported score-partwise child before <part-list>".to_owned(),
         ));
     }
-    let note_size_scales = root_children[..part_list_index]
-        .first()
-        .map(|defaults| parse_note_size_defaults(&elements, *defaults))
+    let mut warnings = Vec::new();
+    let defaults = root_children[..part_list_index].first().copied();
+    let note_size_scales = defaults
+        .map(|defaults| parse_note_size_defaults(&elements, defaults, &mut warnings))
         .transpose()?
         .unwrap_or_default();
+    let tenths_to_pixels = parse_musicxml_tenths_scale(&elements, defaults)?;
     let part_list = root_children[part_list_index];
     require_no_attributes(&elements[part_list])?;
     require_container_text(&elements[part_list])?;
@@ -1495,7 +1664,6 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
     }
     let mut parts = Vec::new();
     let mut expected_measure_count = None;
-    let mut warnings = Vec::new();
     for score_part in &score_parts {
         let score_part_id = &score_part.id;
         let name = &score_part.name;
@@ -1565,6 +1733,8 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
             let mut multiple_rest = None;
             let mut measure_repeat_marker = None;
             let mut beat_repeat_markers = Vec::new();
+            let mut minimum_measure_advance = None;
+            let mut system_break_before = None;
             let mut event_sources = Vec::new();
             let mut cursor_units = 0.0;
             let mut maximum_cursor_units: f64 = 0.0;
@@ -1574,15 +1744,59 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                 let element = &elements[*child];
                 match element.name.as_str() {
                     "print" => {
-                        validate_attributes(element, &["new-page"])?;
+                        validate_attributes(element, &["new-page", "new-system", "staff-spacing"])?;
                         require_container_text(element)?;
-                        if let Some(value) = optional_attribute(element, "new-page") {
-                            if !matches!(value, "yes" | "no") {
+                        for attribute in ["new-page", "new-system"] {
+                            if let Some(value) = optional_attribute(element, attribute) {
+                                if !matches!(value, "yes" | "no") {
+                                    return Err(element_diagnostic(
+                                        element,
+                                        format!("print {attribute} must be 'yes' or 'no', not {value:?}"),
+                                    ));
+                                }
+                            }
+                        }
+                        if let Some(value) = optional_attribute(element, "new-system") {
+                            let hint = value == "yes";
+                            if system_break_before.is_some_and(|existing| existing != hint) {
                                 return Err(element_diagnostic(
                                     element,
-                                    format!("print new-page must be 'yes' or 'no', not {value:?}"),
+                                    "conflicting new-system hints in one Measure".to_owned(),
                                 ));
                             }
+                            system_break_before = Some(hint);
+                        }
+                        if let Some(value) = optional_attribute(element, "staff-spacing") {
+                            if value
+                                .parse::<f64>()
+                                .ok()
+                                .is_none_or(|spacing| !spacing.is_finite() || spacing < 0.0)
+                            {
+                                return Err(element_diagnostic(
+                                    element,
+                                    "deprecated print staff-spacing must be a finite nonnegative number".to_owned(),
+                                ));
+                            }
+                            warnings.push(element_diagnostic(
+                                element,
+                                "deprecated print staff-spacing is ignored".to_owned(),
+                            ));
+                        }
+                        if let Some(distance) = parse_print_measure_distance(
+                            &elements,
+                            *child,
+                            tenths_to_pixels,
+                            &mut warnings,
+                        )? {
+                            if minimum_measure_advance
+                                .is_some_and(|existing: f64| existing != distance)
+                            {
+                                return Err(element_diagnostic(
+                                    element,
+                                    "conflicting measure-distance values in one Measure".to_owned(),
+                                ));
+                            }
+                            minimum_measure_advance = Some(distance);
                         }
                     }
                     "attributes" => {
@@ -2432,6 +2646,8 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                     elements[*child].name == "print"
                         && optional_attribute(&elements[*child], "new-page") == Some("yes")
                 }),
+                system_break_before,
+                minimum_measure_advance,
             });
         }
         if measures.is_empty() {
@@ -10619,6 +10835,8 @@ fn plan_system_layout(
     alignment: SystemAlignment,
     max_width: i32,
     explicit_breaks: &[usize],
+    prohibited_breaks: &[usize],
+    measure_advance_expansions: &[i32],
 ) -> Result<SystemLayout, String> {
     if barline_positions.is_empty() {
         return Ok(SystemLayout {
@@ -10635,7 +10853,12 @@ fn plan_system_layout(
         if index == 0 {
             barline_positions[index] + 12
         } else {
-            128 + barline_positions[index] - barline_positions[index - 1]
+            128 + barline_positions[index]
+                - barline_positions[index - 1]
+                - measure_advance_expansions
+                    .get(index)
+                    .copied()
+                    .unwrap_or_default()
         }
     };
     let mut ranges = Vec::new();
@@ -10657,6 +10880,12 @@ fn plan_system_layout(
         let next_width = width + barline_positions[measure] - barline_positions[measure - 1];
         let explicit_break = explicit_breaks.contains(&measure);
         if explicit_break || next_width > max_width {
+            if !explicit_break && prohibited_breaks.contains(&measure) {
+                return Err(format!(
+                    "new-system=\"no\" before measure {} prevents the required System break",
+                    measure + 1
+                ));
+            }
             ranges.push((start, measure, width, !explicit_break));
             start = measure;
             width = measure_width;
@@ -10692,9 +10921,14 @@ fn plan_system_layout(
         if system_start == 0 {
             local_barline_positions[system_start] = barline_positions[system_start] + x_offset;
         } else {
-            local_barline_positions[system_start] =
-                92 + barline_positions[system_start] - barline_positions[system_start - 1] - 4
-                    + x_offset;
+            local_barline_positions[system_start] = 92 + barline_positions[system_start]
+                - barline_positions[system_start - 1]
+                - 4
+                - measure_advance_expansions
+                    .get(system_start)
+                    .copied()
+                    .unwrap_or_default()
+                + x_offset;
         }
         for measure in system_start + 1..system_end {
             local_barline_positions[measure] = local_barline_positions[measure - 1]
@@ -10797,7 +11031,7 @@ fn render_svg_with_alignment(
         .iter()
         .map(|part| {
             let mut provisional_warnings = Vec::new();
-            render_part_svg(part, &mut provisional_warnings, None, None, 0, 1)
+            render_part_svg(part, &mut provisional_warnings, None, None, None, 0, 1)
         })
         .collect::<Vec<_>>();
     let provisional_barline_positions = provisional
@@ -10819,6 +11053,24 @@ fn render_svg_with_alignment(
             .max()
             .expect("a score contains at least one Part");
     }
+    let mut measure_advance_expansions = vec![0; measure_barline_positions.len()];
+    for measure_index in 1..measure_barline_positions.len() {
+        let minimum_advance = score
+            .parts
+            .iter()
+            .filter_map(|part| part.measures[measure_index].minimum_measure_advance)
+            .fold(0.0_f64, f64::max)
+            .ceil() as i32;
+        let actual_advance =
+            measure_barline_positions[measure_index] - measure_barline_positions[measure_index - 1];
+        if actual_advance < minimum_advance {
+            let extra = minimum_advance - actual_advance;
+            measure_advance_expansions[measure_index] = extra;
+            for position in measure_barline_positions.iter_mut().skip(measure_index) {
+                *position += extra;
+            }
+        }
+    }
     let page_break_before = (0..score.parts[0].measures.len())
         .map(|measure_index| {
             score
@@ -10827,11 +11079,42 @@ fn render_svg_with_alignment(
                 .any(|part| part.measures[measure_index].new_page_before)
         })
         .collect::<Vec<_>>();
-    let explicit_page_breaks = page_break_before
-        .iter()
-        .enumerate()
-        .filter_map(|(index, forced)| (*forced).then_some(index))
-        .collect::<Vec<_>>();
+    let mut explicit_system_breaks = Vec::new();
+    let mut prohibited_system_breaks = Vec::new();
+    for (measure_index, page_break) in page_break_before.iter().copied().enumerate() {
+        let affirmative_parts = score
+            .parts
+            .iter()
+            .filter(|part| part.measures[measure_index].system_break_before == Some(true))
+            .map(|part| part.name.as_str())
+            .collect::<Vec<_>>();
+        let prohibiting_parts = score
+            .parts
+            .iter()
+            .filter(|part| part.measures[measure_index].system_break_before == Some(false))
+            .map(|part| part.name.as_str())
+            .collect::<Vec<_>>();
+        if (!affirmative_parts.is_empty() && !prohibiting_parts.is_empty())
+            || (page_break && !prohibiting_parts.is_empty())
+        {
+            return Err(format!(
+                "conflicting System break instructions before measure {} (Parts: {})",
+                measure_index + 1,
+                affirmative_parts
+                    .iter()
+                    .chain(prohibiting_parts.iter())
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if measure_index > 0 && !prohibiting_parts.is_empty() {
+            prohibited_system_breaks.push(measure_index);
+        }
+        if page_break || !affirmative_parts.is_empty() {
+            explicit_system_breaks.push(measure_index);
+        }
+    }
     let (page_width, page_height, page_width_mm, page_height_mm, physical_page_height) =
         page_size.dimensions();
     let content_left = PAGE_MARGIN
@@ -10846,7 +11129,9 @@ fn render_svg_with_alignment(
         &measure_barline_positions,
         alignment,
         printable_width,
-        &explicit_page_breaks,
+        &explicit_system_breaks,
+        &prohibited_system_breaks,
+        &measure_advance_expansions,
     )?;
     let measured_systems = score
         .parts
@@ -10857,7 +11142,8 @@ fn render_svg_with_alignment(
             render_part_svg(
                 part,
                 &mut measure_warnings,
-                (score.parts.len() > 1).then_some(&system_layout.local_barline_positions),
+                Some(&system_layout.local_barline_positions),
+                Some(&measure_advance_expansions),
                 Some(&system_layout),
                 part_index,
                 score.parts.len(),
@@ -10905,7 +11191,8 @@ fn render_svg_with_alignment(
             render_part_svg(
                 part,
                 warnings,
-                (score.parts.len() > 1).then_some(&system_layout.local_barline_positions),
+                Some(&system_layout.local_barline_positions),
+                Some(&measure_advance_expansions),
                 Some(&system_layout),
                 part_index,
                 score.parts.len(),
@@ -11221,6 +11508,7 @@ fn render_part_svg(
     part: &Part,
     warnings: &mut Vec<String>,
     measure_barline_positions: Option<&[i32]>,
+    measure_advance_expansions: Option<&[i32]>,
     system_layout: Option<&SystemLayout>,
     part_index: usize,
     part_count: usize,
@@ -11284,6 +11572,8 @@ fn render_part_svg(
                 part_count,
             ));
             active_meter = None;
+        } else if let Some(expansions) = measure_advance_expansions {
+            x += expansions.get(measure_index).copied().unwrap_or_default();
         }
         let measure_start_x = f64::from(x);
         let mut event_positions = Vec::new();
@@ -13663,6 +13953,8 @@ mod tests {
             SystemAlignment::Justified,
             340,
             &[],
+            &[],
+            &[],
         )
         .expect("each measure fits");
 
@@ -13679,8 +13971,8 @@ mod tests {
             (SystemAlignment::Centered, 44),
             (SystemAlignment::Right, 88),
         ] {
-            let layout =
-                plan_system_layout(&[150, 200], alignment, 300, &[]).expect("each measure fits");
+            let layout = plan_system_layout(&[150, 200], alignment, 300, &[], &[], &[])
+                .expect("each measure fits");
             assert_eq!(layout.x_offsets, [expected_offset]);
             assert_eq!(layout.gap_expansions, [0, 0]);
         }
@@ -13689,7 +13981,7 @@ mod tests {
     #[test]
     fn system_planner_rejects_an_overwide_measure() {
         assert!(matches!(
-            plan_system_layout(&[1000], SystemAlignment::Left, 680, &[]),
+            plan_system_layout(&[1000], SystemAlignment::Left, 680, &[], &[], &[]),
             Err(error) if error.contains("measure 1 is") && error.contains("maximum System width")
         ));
     }
@@ -13699,7 +13991,7 @@ mod tests {
         let source = "<score-partwise version=\"4.0\"><part-list><score-part id=\"P1\"><part-name>Music</part-name></score-part></part-list><part id=\"P1\"><measure number=\"1\"><attributes><divisions>1</divisions></attributes><note><rest/><duration>8</duration><voice>1</voice><type>breve</type></note><note><rest/><duration>16</duration><voice>1</voice><type>long</type></note><note><rest/><duration>32</duration><voice>1</voice><type>maxima</type></note></measure></part></score-partwise>";
         let score = parse_score(source.as_bytes()).expect("extended rests should parse");
         let mut warnings = score.warnings.clone();
-        let svg = render_part_svg(&score.parts[0], &mut warnings, None, None, 0, 1).svg;
+        let svg = render_part_svg(&score.parts[0], &mut warnings, None, None, None, 0, 1).svg;
 
         assert_eq!(svg.matches("class=\"rest\"").count(), 3, "{svg}");
         for duration in ["breve", "long", "maxima"] {
