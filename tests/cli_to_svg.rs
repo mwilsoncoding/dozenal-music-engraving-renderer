@@ -164,16 +164,8 @@ fn musicxml_measure_distance_sets_a_minimum_inter_measure_advance() {
         String::from_utf8_lossy(&output.stderr)
     );
     let svg = fs::read_to_string(directory.join("measure-distance.svg")).expect("read SVG");
-    let barline_x = |id: &str| {
-        svg.lines()
-            .find(|line| line.contains(&format!("id=\"{id}\"")))
-            .and_then(|line| line.split_once("d=\"M"))
-            .and_then(|(_, path)| path.split_once(' '))
-            .and_then(|(x, _)| x.parse::<i32>().ok())
-            .unwrap_or_else(|| panic!("missing barline path {id}"))
-    };
     assert!(
-        barline_x("barline-2") - barline_x("barline-1") >= 240,
+        svg_barline_x(&svg, "barline-2") - svg_barline_x(&svg, "barline-1") >= 240,
         "{svg}"
     );
 
@@ -198,16 +190,9 @@ fn musicxml_scaling_converts_measure_distance_to_renderer_units() {
         String::from_utf8_lossy(&output.stderr)
     );
     let svg = fs::read_to_string(directory.join("scaled-measure-distance.svg")).expect("read SVG");
-    let barline_x = |id: &str| {
-        svg.lines()
-            .find(|line| line.contains(&format!("id=\"{id}\"")))
-            .and_then(|line| line.split_once("d=\"M"))
-            .and_then(|(_, path)| path.split_once(' '))
-            .and_then(|(x, _)| x.parse::<i32>().ok())
-            .unwrap_or_else(|| panic!("missing barline path {id}"))
-    };
-    assert!(
-        barline_x("barline-2") - barline_x("barline-1") >= 80,
+    assert_eq!(
+        svg_barline_x(&svg, "barline-2") - svg_barline_x(&svg, "barline-1"),
+        80,
         "{svg}"
     );
 
@@ -301,16 +286,10 @@ fn aligned_parts_use_the_largest_measure_distance_minimum() {
         String::from_utf8_lossy(&output.stderr)
     );
     let svg = fs::read_to_string(directory.join("aligned-measure-distance.svg")).expect("read SVG");
-    let barline_x = |id: &str| {
-        svg.lines()
-            .find(|line| line.contains(&format!("id=\"{id}\"")))
-            .and_then(|line| line.split_once("d=\"M"))
-            .and_then(|(_, path)| path.split_once(' '))
-            .and_then(|(x, _)| x.parse::<i32>().ok())
-            .unwrap_or_else(|| panic!("missing barline path {id}"))
-    };
-    let first_part_gap = barline_x("part-0-barline-2") - barline_x("part-0-barline-1");
-    let second_part_gap = barline_x("part-1-barline-2") - barline_x("part-1-barline-1");
+    let first_part_gap =
+        svg_barline_x(&svg, "part-0-barline-2") - svg_barline_x(&svg, "part-0-barline-1");
+    let second_part_gap =
+        svg_barline_x(&svg, "part-1-barline-2") - svg_barline_x(&svg, "part-1-barline-1");
     assert!(first_part_gap >= 240, "{svg}");
     assert_eq!(first_part_gap, second_part_gap, "{svg}");
 
@@ -1003,6 +982,15 @@ fn path_translation(line: &str) -> (i32, i32) {
         coordinates.next().expect("translation has an x coordinate"),
         coordinates.next().expect("translation has a y coordinate"),
     )
+}
+
+fn svg_barline_x(svg: &str, id: &str) -> i32 {
+    svg.lines()
+        .find(|line| line.contains(&format!("id=\"{id}\"")))
+        .and_then(|line| line.split_once("d=\"M"))
+        .and_then(|(_, path)| path.split_once(' '))
+        .and_then(|(x, _)| x.parse::<i32>().ok())
+        .unwrap_or_else(|| panic!("missing barline path {id}"))
 }
 
 fn path_translation_f64(line: &str) -> (f64, f64) {
