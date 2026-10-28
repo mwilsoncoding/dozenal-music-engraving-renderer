@@ -298,6 +298,18 @@ struct NoteSpanRenderContext<'a> {
     part_count: usize,
 }
 
+struct DirectionSpanRenderContext<'a> {
+    scene: &'a mut Scene,
+    system_ends: &'a [usize],
+    barline_positions: &'a [i32],
+    system_notation_bounds: &'a mut [Vec<ComponentBounds>],
+    system_vertical_bounds: &'a mut [VerticalBounds],
+    right: &'a mut i32,
+    system_layout: Option<&'a SystemLayout>,
+    part_index: usize,
+    part_count: usize,
+}
+
 #[derive(Default)]
 struct NotationMarkers {
     tie_start: bool,
@@ -368,6 +380,7 @@ struct Measure {
     tuplets: Vec<TupletSpan>,
     harmonies: Vec<PositionedHarmony>,
     texts: Vec<PositionedText>,
+    direction_spans: Vec<DirectionSpanMark>,
     meter: Option<Meter>,
     multiple_rest: Option<MultipleRest>,
     measure_repeat_marker: Option<MeasureRepeatMarker>,
@@ -587,6 +600,60 @@ struct PositionedHarmony {
     input_staff: Option<u32>,
     offset_x: f64,
     symbol: ChordSymbol,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DirectionSpanKind {
+    DynamicWedge,
+    Bracket,
+    Dashes,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DirectionSpanEndpoint {
+    Start,
+    Continue,
+    Stop,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WedgeDirection {
+    Crescendo,
+    Diminuendo,
+}
+
+#[derive(Clone)]
+struct DirectionSpanMark {
+    kind: DirectionSpanKind,
+    endpoint: DirectionSpanEndpoint,
+    number: u32,
+    wedge_direction: Option<WedgeDirection>,
+    spread: Option<f64>,
+    dash_length: Option<f64>,
+    space_length: Option<f64>,
+    line_end: Option<String>,
+    end_length: Option<f64>,
+    niente: bool,
+    line_type: String,
+    placement: TextPlacement,
+    coordinates: [Option<f64>; 4],
+    offset_x: f64,
+    color: String,
+    event_index: usize,
+    input_staff: Option<u32>,
+    source: String,
+}
+
+struct ParsedDirection {
+    texts: Vec<PositionedText>,
+    spans: Vec<DirectionSpanMark>,
+}
+
+struct DirectionSpanAnchor {
+    mark: DirectionSpanMark,
+    system_index: usize,
+    x: f64,
+    y: f64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -952,6 +1019,7 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
                         tuplets: measure.tuplets.clone(),
                         harmonies,
                         texts,
+                        direction_spans: measure.direction_spans.clone(),
                         meter: staff_state.meter,
                         multiple_rest: measure.multiple_rest.clone(),
                         measure_repeat_marker: measure.measure_repeat_marker.clone(),
@@ -1492,6 +1560,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
             let mut tuplets = Vec::new();
             let mut harmonies = Vec::new();
             let mut texts = Vec::new();
+            let mut direction_spans = Vec::new();
             let mut barlines = Vec::new();
             let mut multiple_rest = None;
             let mut measure_repeat_marker = None;
@@ -2043,14 +2112,18 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                             });
                         }
                     }
-                    "direction" => texts.extend(parse_direction(
-                        &elements,
-                        *child,
-                        events.len(),
-                        divisions,
-                        input_staff_count,
-                        &mut warnings,
-                    )?),
+                    "direction" => {
+                        let parsed = parse_direction(
+                            &elements,
+                            *child,
+                            events.len(),
+                            divisions,
+                            input_staff_count,
+                            &mut warnings,
+                        )?;
+                        texts.extend(parsed.texts);
+                        direction_spans.extend(parsed.spans);
+                    }
                     "barline" => {
                         let parsed =
                             parse_repeat_barline(&elements, *child, events.len(), &mut warnings)?;
@@ -2347,6 +2420,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                 tuplets,
                 harmonies,
                 texts,
+                direction_spans,
                 meter: active_staff_states.first().and_then(|state| state.meter),
                 multiple_rest,
                 measure_repeat_marker,
@@ -2451,6 +2525,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
         }
         validate_tremolo_pairs(&elements, &mut measures, &mut warnings)?;
         validate_note_spans(&measures)?;
+        validate_direction_spans(&measures)?;
         parts.push(Part {
             name: name.clone(),
             input_staff_count,
@@ -2617,6 +2692,76 @@ fn validate_note_spans(measures: &[Measure]) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn validate_direction_spans(measures: &[Measure]) -> Result<(), String> {
+    let mut active: Vec<DirectionSpanMark> = Vec::new();
+    for measure in measures {
+        for mark in &measure.direction_spans {
+            let active_position = active
+                .iter()
+                .rposition(|start| start.kind == mark.kind && start.number == mark.number);
+            match mark.endpoint {
+                DirectionSpanEndpoint::Start => {
+                    if active_position.is_some() {
+                        return Err(element_span_error(
+                            mark,
+                            format!(
+                                "overlapping direction span start for number {}",
+                                mark.number
+                            ),
+                        ));
+                    }
+                    active.push(mark.clone());
+                }
+                DirectionSpanEndpoint::Continue => {
+                    if mark.kind == DirectionSpanKind::DynamicWedge {
+                        return Err(element_span_error(
+                            mark,
+                            "Dynamic Wedges do not support continue endpoints".to_owned(),
+                        ));
+                    }
+                    let Some(position) = active_position else {
+                        return Err(element_span_error(
+                            mark,
+                            format!(
+                                "direction span continue has no matching start for number {}",
+                                mark.number
+                            ),
+                        ));
+                    };
+                    active.remove(position);
+                    active.push(mark.clone());
+                }
+                DirectionSpanEndpoint::Stop => {
+                    let Some(position) = active_position else {
+                        return Err(element_span_error(
+                            mark,
+                            format!(
+                                "direction span stop has no matching start for number {}",
+                                mark.number
+                            ),
+                        ));
+                    };
+                    active.remove(position);
+                }
+            }
+        }
+    }
+    if let Some(start) = active.first() {
+        return Err(element_span_error(
+            start,
+            format!(
+                "direction span start has no matching stop for number {}",
+                start.number
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn element_span_error(mark: &DirectionSpanMark, message: String) -> String {
+    format!("{message} ({})", mark.source)
 }
 
 fn has_intervening_voice_rest(
@@ -2884,6 +3029,191 @@ fn dozenal_ending_label(number: &str) -> Option<String> {
     Some(labels.join(", "))
 }
 
+fn parse_direction_span(
+    elements: &[Element],
+    span: usize,
+    kind: DirectionSpanKind,
+    event_index: usize,
+    placement: TextPlacement,
+) -> Result<DirectionSpanMark, String> {
+    let element = &elements[span];
+    let mut attributes = vec![
+        "type",
+        "number",
+        "color",
+        "default-x",
+        "default-y",
+        "relative-x",
+        "relative-y",
+        "id",
+    ];
+    match kind {
+        DirectionSpanKind::DynamicWedge => {
+            attributes.extend([
+                "spread",
+                "niente",
+                "line-type",
+                "dash-length",
+                "space-length",
+            ]);
+        }
+        DirectionSpanKind::Bracket => {
+            attributes.extend([
+                "line-end",
+                "line-type",
+                "end-length",
+                "dash-length",
+                "space-length",
+            ]);
+        }
+        DirectionSpanKind::Dashes => attributes.extend(["dash-length", "space-length"]),
+    }
+    validate_attributes(element, &attributes)?;
+    require_container_text(element)?;
+    if !element.children.is_empty() || !element.text.trim().is_empty() {
+        return Err(element_diagnostic(
+            element,
+            format!("<{}> direction span must be empty", element.name),
+        ));
+    }
+    let endpoint_value = optional_attribute(element, "type").ok_or_else(|| {
+        element_diagnostic(
+            element,
+            format!("<{}> requires a type attribute", element.name),
+        )
+    })?;
+    let (endpoint, wedge_direction) = match (kind, endpoint_value) {
+        (DirectionSpanKind::DynamicWedge, "crescendo") => (
+            DirectionSpanEndpoint::Start,
+            Some(WedgeDirection::Crescendo),
+        ),
+        (DirectionSpanKind::DynamicWedge, "diminuendo") => (
+            DirectionSpanEndpoint::Start,
+            Some(WedgeDirection::Diminuendo),
+        ),
+        (DirectionSpanKind::DynamicWedge, "stop") => (DirectionSpanEndpoint::Stop, None),
+        (DirectionSpanKind::DynamicWedge, value) => {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid wedge type {value:?}"),
+            ));
+        }
+        (_, "start") => (DirectionSpanEndpoint::Start, None),
+        (_, "continue") => (DirectionSpanEndpoint::Continue, None),
+        (_, "stop") => (DirectionSpanEndpoint::Stop, None),
+        (_, value) => {
+            return Err(element_diagnostic(
+                element,
+                format!("invalid direction span type {value:?}"),
+            ));
+        }
+    };
+    let number = optional_attribute(element, "number")
+        .unwrap_or("1")
+        .parse::<u32>()
+        .ok()
+        .filter(|number| (1..=16).contains(number))
+        .ok_or_else(|| {
+            element_diagnostic(
+                element,
+                "direction span number must be between 1 and 16".to_owned(),
+            )
+        })?;
+    let parse_nonnegative = |attribute: &str| -> Result<Option<f64>, String> {
+        optional_attribute(element, attribute)
+            .map(|value| {
+                value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|number| number.is_finite() && *number >= 0.0)
+                    .ok_or_else(|| {
+                        element_diagnostic(
+                            element,
+                            format!("{attribute} must be a finite nonnegative number"),
+                        )
+                    })
+            })
+            .transpose()
+    };
+    let mut coordinates = [None; 4];
+    for (index, attribute) in ["default-x", "default-y", "relative-x", "relative-y"]
+        .into_iter()
+        .enumerate()
+    {
+        if let Some(value) = optional_attribute(element, attribute) {
+            coordinates[index] = Some(
+                value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|number| number.is_finite())
+                    .ok_or_else(|| {
+                        element_diagnostic(element, format!("{attribute} must be a finite number"))
+                    })?,
+            );
+        }
+    }
+    let color = optional_attribute(element, "color").unwrap_or("#171717");
+    if !valid_musicxml_color(color) {
+        return Err(element_diagnostic(
+            element,
+            "direction span color must be a six-digit hexadecimal color".to_owned(),
+        ));
+    }
+    let line_type = optional_attribute(element, "line-type").unwrap_or(match kind {
+        DirectionSpanKind::DynamicWedge | DirectionSpanKind::Bracket => "solid",
+        DirectionSpanKind::Dashes => "dashed",
+    });
+    if !matches!(line_type, "solid" | "dashed" | "dotted" | "wavy") {
+        return Err(element_diagnostic(
+            element,
+            format!("unsupported direction span line type {line_type:?}"),
+        ));
+    }
+    let niente = match optional_attribute(element, "niente").unwrap_or("no") {
+        "yes" => true,
+        "no" => false,
+        value => {
+            return Err(element_diagnostic(
+                element,
+                format!("wedge niente must be 'yes' or 'no', not {value:?}"),
+            ));
+        }
+    };
+    let line_end = optional_attribute(element, "line-end").map(str::to_owned);
+    if kind == DirectionSpanKind::Bracket {
+        let value = line_end.as_deref().unwrap_or("");
+        if !matches!(value, "up" | "down" | "both" | "arrow" | "none") {
+            return Err(element_diagnostic(
+                element,
+                "bracket requires a supported line-end value".to_owned(),
+            ));
+        }
+    }
+    Ok(DirectionSpanMark {
+        kind,
+        endpoint,
+        number,
+        wedge_direction,
+        spread: parse_nonnegative("spread")?,
+        dash_length: parse_nonnegative("dash-length")?,
+        space_length: parse_nonnegative("space-length")?,
+        line_end,
+        end_length: parse_nonnegative("end-length")?,
+        niente,
+        line_type: line_type.to_owned(),
+        placement,
+        coordinates,
+        offset_x: 0.0,
+        color: color.to_ascii_lowercase(),
+        event_index,
+        input_staff: None,
+        source: format!(
+            "byte {}, line {}, column {}, XML path {}",
+            element.byte_offset, element.line, element.column, element.path
+        ),
+    })
+}
+
 fn parse_direction(
     elements: &[Element],
     direction: usize,
@@ -2891,7 +3221,7 @@ fn parse_direction(
     divisions: Option<u32>,
     input_staff_count: u32,
     warnings: &mut Vec<String>,
-) -> Result<Vec<PositionedText>, String> {
+) -> Result<ParsedDirection, String> {
     let element = &elements[direction];
     validate_attributes(element, &["placement", "directive", "system", "id"])?;
     require_container_text(element)?;
@@ -2929,6 +3259,7 @@ fn parse_direction(
     }
 
     let mut text_items = Vec::new();
+    let mut span_items = Vec::new();
     let mut saw_direction_type = false;
     let mut saw_offset = false;
     let mut offset_ticks = 0i32;
@@ -3001,8 +3332,22 @@ fn parse_direction(
                                 text_items.push(dynamic);
                             }
                         }
-                        "wedge" | "bracket" | "dashes" | "pedal" | "octave-shift"
-                        | "other-direction" => {
+                        "wedge" | "bracket" | "dashes" => {
+                            let kind = match text_element.name.as_str() {
+                                "wedge" => DirectionSpanKind::DynamicWedge,
+                                "bracket" => DirectionSpanKind::Bracket,
+                                "dashes" => DirectionSpanKind::Dashes,
+                                _ => unreachable!(),
+                            };
+                            span_items.push(parse_direction_span(
+                                elements,
+                                *item,
+                                kind,
+                                event_index,
+                                placement,
+                            )?);
+                        }
+                        "pedal" | "octave-shift" | "other-direction" => {
                             warnings.push(element_diagnostic(
                                 text_element,
                                 format!(
@@ -3097,7 +3442,14 @@ fn parse_direction(
         text.offset_x = offset_x;
         text.input_staff = input_staff;
     }
-    Ok(text_items)
+    for span in &mut span_items {
+        span.offset_x = offset_x;
+        span.input_staff = input_staff;
+    }
+    Ok(ParsedDirection {
+        texts: text_items,
+        spans: span_items,
+    })
 }
 
 fn parse_metronome(
@@ -8317,6 +8669,9 @@ enum PathClass {
     OrnamentMark,
     TremoloMark,
     FermataMark,
+    DynamicWedge,
+    BracketSpan,
+    DashSpan,
 }
 
 #[derive(Clone)]
@@ -8344,6 +8699,7 @@ enum PathStyle {
     HeavyStroke,
     DottedStroke,
     DashedStroke,
+    DashedStrokeWithLengths(f64, f64),
     MediumOutline,
     FilledGlyph,
     BravuraGlyph,
@@ -9322,6 +9678,9 @@ impl Scene {
                 PathClass::OrnamentMark => "ornament-mark",
                 PathClass::TremoloMark => "tremolo-mark",
                 PathClass::FermataMark => "fermata-mark",
+                PathClass::DynamicWedge => "dynamic-wedge",
+                PathClass::BracketSpan => "bracket-span",
+                PathClass::DashSpan => "dash-span",
             };
             write!(svg, " class=\"{class}\"").expect("writing to a String cannot fail");
         }
@@ -9432,6 +9791,12 @@ impl Scene {
             PathStyle::DashedStroke => {
                 svg.push_str(" stroke=\"#171717\" stroke-width=\"1.5\" stroke-dasharray=\"5 3\"")
             }
+            PathStyle::DashedStrokeWithLengths(dash, space) => write!(
+                svg,
+                " fill=\"none\" stroke=\"{}\" stroke-width=\"1.5\" stroke-dasharray=\"{dash} {space}\"",
+                command.geometry.color.as_deref().unwrap_or("#171717")
+            )
+            .expect("writing to a String cannot fail"),
             PathStyle::MediumOutline => write!(
                 svg,
                 " fill=\"none\" stroke=\"{}\" stroke-width=\"1.5\"",
@@ -10884,6 +11249,7 @@ fn render_part_svg(
     let mut notation_bounds = Vec::new();
     let mut system_notation_bounds = Vec::new();
     let mut span_anchors = Vec::new();
+    let mut direction_span_anchors = Vec::new();
     let system_count = system_layout.map_or(1, |layout| layout.starts.len());
     let mut system_vertical_bounds = vec![
         VerticalBounds {
@@ -11802,6 +12168,30 @@ fn render_part_svg(
             previous_event_geometry = Some(geometry);
             index += 1;
         }
+        for mark in &measure.direction_spans {
+            let event_anchor_x = event_positions
+                .get(mark.event_index)
+                .copied()
+                .map_or(f64::from(event_origin_x), f64::from)
+                + mark.offset_x;
+            let anchor_x = mark.coordinates[0]
+                .map(|coordinate| f64::from(event_origin_x) + coordinate * 2.0)
+                .unwrap_or(event_anchor_x)
+                + mark.coordinates[2].unwrap_or(0.0) * 2.0;
+            let y = mark.coordinates[1]
+                .map(|coordinate| 28.0 - coordinate * 2.0)
+                .unwrap_or(match mark.placement {
+                    TextPlacement::Above => 16.0,
+                    TextPlacement::Below => 140.0,
+                })
+                - mark.coordinates[3].unwrap_or(0.0) * 2.0;
+            direction_span_anchors.push(DirectionSpanAnchor {
+                mark: mark.clone(),
+                system_index,
+                x: anchor_x,
+                y,
+            });
+        }
         let in_multiple_rest_span = part.measures.iter().enumerate().any(|(start, candidate)| {
             candidate
                 .multiple_rest
@@ -12340,6 +12730,20 @@ fn render_part_svg(
             part_count,
         },
     );
+    add_direction_span_paths(
+        direction_span_anchors,
+        DirectionSpanRenderContext {
+            scene: &mut scene,
+            system_ends: &system_ends,
+            barline_positions: &barline_positions,
+            system_notation_bounds: &mut system_notation_bounds,
+            system_vertical_bounds: &mut system_vertical_bounds,
+            right: &mut right,
+            system_layout,
+            part_index,
+            part_count,
+        },
+    );
     pending_texts.sort_by_key(|(text, _, _, _, system_index)| {
         (*system_index, text.path_id_prefix == "metronome")
     });
@@ -12665,6 +13069,245 @@ fn add_note_span_paths(
         }
     }
     labels
+}
+
+fn add_direction_span_paths(
+    anchors: Vec<DirectionSpanAnchor>,
+    context: DirectionSpanRenderContext<'_>,
+) {
+    let DirectionSpanRenderContext {
+        scene,
+        system_ends,
+        barline_positions,
+        system_notation_bounds,
+        system_vertical_bounds,
+        right,
+        system_layout,
+        part_index,
+        part_count,
+    } = context;
+    let mut active: Vec<DirectionSpanAnchor> = Vec::new();
+    let mut span_index = 0;
+    for anchor in anchors {
+        if anchor.mark.endpoint == DirectionSpanEndpoint::Start {
+            active.push(anchor);
+            continue;
+        }
+        let Some(position) = active.iter().rposition(|start| {
+            start.mark.kind == anchor.mark.kind && start.mark.number == anchor.mark.number
+        }) else {
+            continue;
+        };
+        let start = active.remove(position);
+        for system_index in start.system_index..=anchor.system_index {
+            let left_x = if system_index == start.system_index {
+                start.x
+            } else {
+                f64::from(92 + system_layout.map_or(0, |layout| layout.x_offsets[system_index]))
+            };
+            let right_x = if system_index == anchor.system_index {
+                anchor.x
+            } else {
+                f64::from(barline_positions[system_ends[system_index] - 1])
+            };
+            let y = if system_index == anchor.system_index {
+                anchor.y
+            } else {
+                start.y
+            };
+            let progress = if anchor.system_index == start.system_index {
+                1.0
+            } else {
+                (system_index - start.system_index + 1) as f64
+                    / (anchor.system_index - start.system_index + 1) as f64
+            };
+            let start_spread = start.mark.spread.unwrap_or(0.0) / 2.0;
+            let end_spread = anchor.mark.spread.unwrap_or(10.0) / 2.0;
+            let segment_start_spread =
+                start_spread + (end_spread - start_spread) * (progress - 1.0);
+            let segment_end_spread = start_spread + (end_spread - start_spread) * progress;
+            let (left_spread, right_spread) =
+                if start.mark.wedge_direction == Some(WedgeDirection::Diminuendo) {
+                    (segment_end_spread, segment_start_spread)
+                } else {
+                    (segment_start_spread, segment_end_spread)
+                };
+            let (class, id_prefix, path, style) = match start.mark.kind {
+                DirectionSpanKind::DynamicWedge => (
+                    PathClass::DynamicWedge,
+                    "dynamic-wedge",
+                    direction_span_line_path(
+                        left_x,
+                        right_x,
+                        y - left_spread,
+                        y - right_spread,
+                        start.mark.line_type == "wavy",
+                    ),
+                    direction_span_style(&start.mark),
+                ),
+                DirectionSpanKind::Bracket => {
+                    let end_length = start.mark.end_length.unwrap_or(8.0);
+                    let line_end = start.mark.line_end.as_deref().unwrap_or("down");
+                    let mut path = format!("M{left_x:.2} {y:.2}H{right_x:.2}");
+                    if line_end == "up" || line_end == "both" {
+                        path.push_str(&format!("M{right_x:.2} {y:.2}v{}", -end_length));
+                    }
+                    if line_end == "down" || line_end == "both" {
+                        path.push_str(&format!("M{right_x:.2} {y:.2}v{end_length}"));
+                    }
+                    if line_end == "arrow" {
+                        path.push_str(&format!("M{:.2} {:.2}l3 3l-3 3", right_x - 3.0, y - 3.0));
+                    }
+                    (
+                        PathClass::BracketSpan,
+                        "bracket-span",
+                        path,
+                        direction_span_style(&start.mark),
+                    )
+                }
+                DirectionSpanKind::Dashes => (
+                    PathClass::DashSpan,
+                    "dash-span",
+                    direction_span_line_path(left_x, right_x, y, y, start.mark.line_type == "wavy"),
+                    direction_span_style(&start.mark),
+                ),
+            };
+            if matches!(
+                start.mark.kind,
+                DirectionSpanKind::Bracket | DirectionSpanKind::Dashes
+            ) {
+                system_notation_bounds[system_index].push(ComponentBounds::stroked(
+                    left_x.min(right_x),
+                    y.min(y + 8.0),
+                    left_x.max(right_x),
+                    y.max(y + 8.0),
+                    1.5,
+                ));
+            } else {
+                let half_spread = start.mark.spread.unwrap_or(10.0) / 2.0;
+                system_notation_bounds[system_index].push(ComponentBounds::stroked(
+                    left_x.min(right_x),
+                    y - half_spread,
+                    left_x.max(right_x),
+                    y + half_spread,
+                    1.5,
+                ));
+            }
+            let vertical = &mut system_vertical_bounds[system_index];
+            vertical.top = vertical.top.min((y - 10.0).floor() as i32);
+            vertical.bottom = vertical.bottom.max((y + 10.0).ceil() as i32);
+            *right = (*right).max(right_x.ceil() as i32);
+            scene.set_system_y_offset(system_y_offset(
+                system_layout,
+                system_index,
+                part_index,
+                part_count,
+            ));
+            let id = format!(
+                "{id_prefix}-{}-{span_index}-system-{system_index}",
+                start.mark.number
+            );
+            let mut geometry = PathGeometry::new(None, path, style);
+            geometry.color = Some(start.mark.color.clone());
+            scene.add_path(
+                DrawLayer::Tie,
+                id.clone(),
+                Some(class),
+                Vec::new(),
+                geometry,
+            );
+            if start.mark.kind == DirectionSpanKind::DynamicWedge {
+                let mut lower = PathGeometry::new(
+                    None,
+                    direction_span_line_path(
+                        left_x,
+                        right_x,
+                        y + left_spread,
+                        y + right_spread,
+                        start.mark.line_type == "wavy",
+                    ),
+                    style,
+                );
+                lower.color = Some(start.mark.color.clone());
+                scene.add_path(
+                    DrawLayer::Tie,
+                    format!("{id}-lower"),
+                    Some(class),
+                    Vec::new(),
+                    lower,
+                );
+            }
+            if start.mark.kind == DirectionSpanKind::DynamicWedge && start.mark.niente {
+                let circle_x = if start.mark.wedge_direction == Some(WedgeDirection::Diminuendo) {
+                    right_x
+                } else {
+                    left_x
+                };
+                let mut circle = PathGeometry::new(
+                    None,
+                    format!("M{circle_x:.2} {:.2}a3 3 0 1 0 6 0a3 3 0 1 0 -6 0", y - 3.0),
+                    PathStyle::MediumOutline,
+                );
+                circle.color = Some(start.mark.color.clone());
+                scene.add_path(
+                    DrawLayer::Tie,
+                    format!("dynamic-wedge-niente-{span_index}-{system_index}"),
+                    Some(PathClass::DynamicWedge),
+                    Vec::new(),
+                    circle,
+                );
+            }
+        }
+        span_index += 1;
+        if anchor.mark.endpoint == DirectionSpanEndpoint::Continue {
+            active.push(anchor);
+        }
+    }
+}
+
+fn direction_span_style(mark: &DirectionSpanMark) -> PathStyle {
+    match mark.line_type.as_str() {
+        "dashed" if mark.dash_length.is_some() || mark.space_length.is_some() => {
+            PathStyle::DashedStrokeWithLengths(
+                mark.dash_length.unwrap_or(5.0),
+                mark.space_length.unwrap_or(3.0),
+            )
+        }
+        "dashed" => PathStyle::DashedStroke,
+        "dotted" => PathStyle::DottedStroke,
+        _ => PathStyle::MediumOutline,
+    }
+}
+
+fn direction_span_line_path(
+    left_x: f64,
+    right_x: f64,
+    start_y: f64,
+    end_y: f64,
+    wavy: bool,
+) -> String {
+    if !wavy {
+        return format!("M{left_x:.2} {start_y:.2}L{right_x:.2} {end_y:.2}");
+    }
+    let width = right_x - left_x;
+    let segments = (width / 8.0).ceil().max(1.0) as usize;
+    let mut path = format!("M{left_x:.2} {start_y:.2}");
+    for segment in 1..=segments {
+        let progress = segment as f64 / segments as f64;
+        let wave = if segment == segments {
+            0.0
+        } else if segment % 2 == 0 {
+            -2.0
+        } else {
+            2.0
+        };
+        path.push_str(&format!(
+            "L{:.2} {:.2}",
+            left_x + width * progress,
+            start_y + (end_y - start_y) * progress + wave
+        ));
+    }
+    path
 }
 
 fn add_partial_tie_path(scene: &mut Scene, id: String, tone_x: i32, tie_y: i32, is_start: bool) {

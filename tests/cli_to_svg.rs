@@ -3556,6 +3556,132 @@ fn renders_direction_dynamics_in_source_order() {
 }
 
 #[test]
+fn renders_a_crescendo_wedge_as_a_direction_span() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("crescendo-wedge.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Wedge</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><direction><direction-type><wedge type="crescendo" number="2"/></direction-type></direction><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note><direction><direction-type><wedge type="stop" number="2" spread="12"/></direction-type></direction><note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write wedge score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "wedge score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("<wedge> direction is not supported"),
+        "{stderr}"
+    );
+    let svg = fs::read_to_string(directory.join("crescendo-wedge.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"dynamic-wedge\"").count(), 2, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_bracket_and_continued_dash_direction_spans() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("direction-spans.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Spans</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><direction><direction-type><bracket type="start" number="3" line-end="both"/></direction-type></direction><direction><direction-type><dashes type="start" number="4" dash-length="7" space-length="2"/></direction-type></direction><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note><direction><direction-type><bracket type="stop" number="3" line-end="both"/></direction-type></direction><direction><direction-type><dashes type="continue" number="4"/></direction-type></direction><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note><direction><direction-type><dashes type="stop" number="4"/></direction-type></direction></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write direction-span score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "direction-span score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("direction-spans.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"bracket-span\"").count(), 1, "{svg}");
+    assert_eq!(svg.matches("class=\"dash-span\"").count(), 2, "{svg}");
+    assert!(svg.contains("stroke-dasharray=\"7 2\""), "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn splits_direction_wedges_across_systems() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("system-wedge.musicxml");
+    let measures = (1..=24)
+        .map(|number| {
+            let divisions = if number == 1 {
+                "<attributes><divisions>1</divisions></attributes>"
+            } else {
+                ""
+            };
+            let direction = if number == 1 {
+                "<direction><direction-type><wedge type=\"crescendo\" number=\"5\"/><bracket type=\"start\" number=\"6\" line-end=\"both\"/><dashes type=\"start\" number=\"7\"/></direction-type></direction>"
+            } else if number == 24 {
+                "<direction><direction-type><wedge type=\"stop\" number=\"5\"/><bracket type=\"stop\" number=\"6\" line-end=\"both\"/><dashes type=\"stop\" number=\"7\"/></direction-type></direction>"
+            } else {
+                ""
+            };
+            format!(
+                "<measure number=\"{number}\">{divisions}{direction}<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure>"
+            )
+        })
+        .collect::<String>();
+    let fixture = format!(
+        "<?xml version=\"1.0\"?><score-partwise version=\"4.0\"><part-list><score-part id=\"P1\"><part-name>Wedge</part-name></score-part></part-list><part id=\"P1\">{measures}</part></score-partwise>"
+    );
+    fs::write(&input, fixture).expect("write cross-System wedge score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "cross-System wedge failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("system-wedge.svg")).expect("read SVG");
+    assert!(svg.contains("id=\"system-1-staff-line-1\""), "{svg}");
+    assert!(svg.contains("dynamic-wedge-5-0-system-0"), "{svg}");
+    assert!(svg.contains("dynamic-wedge-5-0-system-1"), "{svg}");
+    assert!(svg.contains("bracket-span-6-1-system-0"), "{svg}");
+    assert!(svg.contains("bracket-span-6-1-system-1"), "{svg}");
+    assert!(svg.contains("dash-span-7-2-system-0"), "{svg}");
+    assert!(svg.contains("dash-span-7-2-system-1"), "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_direction_span_without_matching_endpoint() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("unmatched-wedge.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Wedge</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><direction><direction-type><wedge type="stop" number="2"/></direction-type></direction><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write unmatched-span score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("direction span stop has no matching start"),
+        "{stderr}"
+    );
+    assert!(!directory.join("unmatched-wedge.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn warns_and_omits_custom_dynamics_while_rendering_named_siblings() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
