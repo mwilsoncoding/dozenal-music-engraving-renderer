@@ -11160,7 +11160,7 @@ fn render_part_svg(
                 let y = if mark.kind == NoteSpanKind::Slur {
                     tone.glyph_top() + if above { -8 } else { 28 }
                 } else {
-                    tone.glyph_top() + 9
+                    tone.glyph_top() + if above { -4 } else { 20 }
                 };
                 span_anchors.push(NoteSpanAnchor {
                     mark: mark.clone(),

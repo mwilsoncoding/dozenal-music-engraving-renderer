@@ -449,7 +449,7 @@ fn renders_glissandi_and_slides_with_distinct_styles_and_labels() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
     let input = directory.join("note-spans.musicxml");
-    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Spans</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><notations><glissando type="start" number="1" line-type="dotted" text="gliss."/><slide type="start" number="2" line-type="dashed" text="slide"/><slide type="start" number="3" line-type="wavy"/></notations></note><note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><notations><glissando type="stop" number="1"/><slide type="stop" number="2"/><slide type="stop" number="3"/></notations></note></measure></part></score-partwise>"#;
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Spans</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><notations><glissando type="start" number="1" line-type="dotted" placement="above" text="gliss."/><slide type="start" number="2" line-type="dashed" placement="below" text="slide"/><slide type="start" number="3" line-type="wavy"/></notations></note><note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><notations><glissando type="stop" number="1"/><slide type="stop" number="2"/><slide type="stop" number="3"/></notations></note></measure></part></score-partwise>"#;
     fs::write(&input, fixture).expect("write note-span score");
 
     let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
@@ -480,6 +480,14 @@ fn renders_glissandi_and_slides_with_distinct_styles_and_labels() {
     let dotted_path = path_data("glissando", "1 3");
     let dashed_path = path_data("slide", "5 3");
     assert_ne!(dotted_path, dashed_path, "{svg}");
+    let start_y = |path: &str| {
+        path.strip_prefix('M')
+            .and_then(|path| path.split(['L', 'C']).next())
+            .and_then(|point| point.split_whitespace().nth(1))
+            .and_then(|y| y.parse::<f64>().ok())
+            .expect("span path start y coordinate")
+    };
+    assert!(start_y(dotted_path) < start_y(dashed_path), "{svg}");
     for path in [dotted_path, dashed_path] {
         assert!(path.starts_with("M106 "), "{path}");
         assert_eq!(
@@ -531,6 +539,47 @@ fn renders_glissandi_and_slides_with_distinct_styles_and_labels() {
             "{label} overlaps a span path: {svg}"
         );
     }
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn note_span_uses_the_specified_chord_tone_endpoint() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("chord-span.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Chord Span</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note><note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><notations><glissando type="start" number="1"/></notations></note><note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><notations><glissando type="stop" number="1"/></notations></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write chord-span score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "chord span failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("chord-span.svg")).expect("read SVG");
+    let second_chord_tone = svg
+        .lines()
+        .find(|line| line.contains("id=\"tonehead-0-1\""))
+        .expect("second chord Tonehead");
+    let span = svg
+        .lines()
+        .find(|line| line.contains("class=\"glissando\""))
+        .expect("Glissando path");
+    let tonehead_x = path_translation_f64(second_chord_tone).0;
+    let span_start_x = span
+        .split_once(" d=\"M")
+        .and_then(|(_, data)| data.split_once(' ').map(|(x, _)| x))
+        .and_then(|x| x.parse::<f64>().ok())
+        .expect("Glissando start x coordinate");
+    assert_eq!(
+        span_start_x,
+        tonehead_x + 14.0,
+        "{span}\n{second_chord_tone}"
+    );
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
