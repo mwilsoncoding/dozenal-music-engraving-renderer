@@ -108,6 +108,17 @@ struct NoteParseContext<'a> {
     options: NoteParseOptions,
 }
 
+struct TupletNotationContext<'a> {
+    elements: &'a [Element],
+    ratio: Option<&'a TupletRatio>,
+    event_index: usize,
+    is_rest: bool,
+    is_unpitched: bool,
+    is_grace: bool,
+    is_cue: bool,
+    warnings: &'a mut Vec<String>,
+}
+
 impl Default for NoteSizeScales {
     fn default() -> Self {
         Self {
@@ -275,6 +286,16 @@ struct NoteSpanLabel {
     y: i32,
     system_index: usize,
     index: usize,
+}
+
+struct NoteSpanRenderContext<'a> {
+    scene: &'a mut Scene,
+    system_ends: &'a [usize],
+    barline_positions: &'a [i32],
+    system_notation_bounds: &'a mut [Vec<ComponentBounds>],
+    system_layout: Option<&'a SystemLayout>,
+    part_index: usize,
+    part_count: usize,
 }
 
 #[derive(Default)]
@@ -6169,16 +6190,19 @@ fn parse_fermata(
 }
 
 fn parse_tuplet_notations(
-    elements: &[Element],
     notations: usize,
-    ratio: Option<&TupletRatio>,
-    event_index: usize,
-    is_rest: bool,
-    is_unpitched: bool,
-    is_grace: bool,
-    is_cue: bool,
-    warnings: &mut Vec<String>,
+    context: TupletNotationContext<'_>,
 ) -> Result<NotationMarkers, String> {
+    let TupletNotationContext {
+        elements,
+        ratio,
+        event_index,
+        is_rest,
+        is_unpitched,
+        is_grace,
+        is_cue,
+        warnings,
+    } = context;
     let element = &elements[notations];
     require_no_attributes(element)?;
     require_container_text(element)?;
@@ -6957,15 +6981,17 @@ fn parse_note(
     {
         position += 1;
         parse_tuplet_notations(
-            elements,
             notations,
-            time_modification.as_ref(),
-            event_index,
-            is_rest,
-            is_unpitched,
-            is_grace,
-            is_cue,
-            warnings,
+            TupletNotationContext {
+                elements,
+                ratio: time_modification.as_ref(),
+                event_index,
+                is_rest,
+                is_unpitched,
+                is_grace,
+                is_cue,
+                warnings,
+            },
         )?
     } else {
         NotationMarkers::default()
@@ -12303,14 +12329,16 @@ fn render_part_svg(
         system_bounds.push(ComponentBounds::filled(26.0, 69.0, 38.0, 87.0));
     }
     let span_labels = add_note_span_paths(
-        &mut scene,
         span_anchors,
-        &system_ends,
-        &barline_positions,
-        &mut system_notation_bounds,
-        system_layout,
-        part_index,
-        part_count,
+        NoteSpanRenderContext {
+            scene: &mut scene,
+            system_ends: &system_ends,
+            barline_positions: &barline_positions,
+            system_notation_bounds: &mut system_notation_bounds,
+            system_layout,
+            part_index,
+            part_count,
+        },
     );
     pending_texts.sort_by_key(|(text, _, _, _, system_index)| {
         (*system_index, text.path_id_prefix == "metronome")
@@ -12444,15 +12472,18 @@ fn render_part_svg(
 }
 
 fn add_note_span_paths(
-    scene: &mut Scene,
     anchors: Vec<NoteSpanAnchor>,
-    system_ends: &[usize],
-    barline_positions: &[i32],
-    system_notation_bounds: &mut [Vec<ComponentBounds>],
-    system_layout: Option<&SystemLayout>,
-    part_index: usize,
-    part_count: usize,
+    context: NoteSpanRenderContext<'_>,
 ) -> Vec<NoteSpanLabel> {
+    let NoteSpanRenderContext {
+        scene,
+        system_ends,
+        barline_positions,
+        system_notation_bounds,
+        system_layout,
+        part_index,
+        part_count,
+    } = context;
     let mut active: Vec<NoteSpanAnchor> = Vec::new();
     let mut span_index = 0;
     let mut labels = Vec::new();
