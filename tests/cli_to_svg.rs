@@ -89,47 +89,6 @@ fn wraps_complete_measures_into_systems() {
 }
 
 #[test]
-fn composes_systems_onto_multiple_a4_pages() {
-    let directory = scratch_dir();
-    fs::create_dir_all(&directory).expect("create test directory");
-    let input = directory.join("pages.musicxml");
-    let measures = (1..=96)
-        .map(|number| {
-            let divisions = if number == 1 {
-                "<attributes><divisions>1</divisions></attributes>"
-            } else {
-                ""
-            };
-            format!(
-                "<measure number=\"{number}\">{divisions}<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure>"
-            )
-        })
-        .collect::<String>();
-    let fixture = format!(
-        "<?xml version=\"1.0\"?><score-partwise version=\"4.0\"><part-list><score-part id=\"P1\"><part-name>Music</part-name></score-part></part-list><part id=\"P1\">{measures}</part></score-partwise>"
-    );
-    fs::write(&input, fixture).expect("write multi-page score");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
-        .arg(&input)
-        .output()
-        .expect("run CLI");
-    assert!(
-        output.status.success(),
-        "page layout failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let svg = fs::read_to_string(directory.join("pages.svg")).expect("read SVG");
-    assert!(svg.contains("width=\"210mm\" height=\"600.35mm\""), "{svg}");
-    assert!(svg.contains("viewBox=\"0 0 794 2270\""), "{svg}");
-    assert_eq!(svg.matches("class=\"page\"").count(), 2, "{svg}");
-    assert!(svg.contains("fill=\"#e5e5e5\""), "{svg}");
-    assert_eq!(svg.matches("class=\"tonehead\"").count(), 96, "{svg}");
-
-    fs::remove_dir_all(directory).expect("remove test directory");
-}
-
-#[test]
 fn musicxml_new_page_print_creates_a_hard_page_break() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
@@ -330,6 +289,384 @@ fn renders_multi_page_layout_example() {
     let svg = fs::read_to_string(directory.join("multi-page-layout.svg")).expect("read SVG");
     assert_eq!(svg.matches("class=\"page\"").count(), 2, "{svg}");
     assert_eq!(svg.matches("class=\"tonehead\"").count(), 74, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_a_voice_local_slur_across_systems() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("cross-system-slur.musicxml");
+    let measures = (1..=24)
+        .map(|number| {
+            let divisions = if number == 1 {
+                "<attributes><divisions>1</divisions></attributes>"
+            } else {
+                ""
+            };
+            let span = match number {
+                1 => "<notations><slur type=\"start\" number=\"1\"/></notations>",
+                14 => "<notations><slur type=\"continue\" number=\"1\"/></notations>",
+                24 => "<notations><slur type=\"stop\" number=\"1\"/></notations>",
+                _ => "",
+            };
+            format!(
+                "<measure number=\"{number}\">{divisions}<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type>{span}</note></measure>"
+            )
+        })
+        .collect::<String>();
+    let fixture = format!(
+        "<?xml version=\"1.0\"?><score-partwise version=\"4.0\"><part-list><score-part id=\"P1\"><part-name>Slur</part-name></score-part></part-list><part id=\"P1\">{measures}</part></score-partwise>"
+    );
+    fs::write(&input, fixture).expect("write cross-System Slur score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "cross-System Slur failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("cross-system-slur.svg")).expect("read SVG");
+    assert!(svg.contains("id=\"system-1-staff-line-1\""), "{svg}");
+    assert!(svg.matches("class=\"slur\"").count() >= 3, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_a_note_span_across_a_page_boundary_at_system_offset() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("cross-page-slur.musicxml");
+    let measures = (1..=96)
+        .map(|number| {
+            let divisions = if number == 1 {
+                "<attributes><divisions>1</divisions></attributes>"
+            } else {
+                ""
+            };
+            let span = match number {
+                1 => "<notations><slur type=\"start\" number=\"1\"/></notations>",
+                49 => "<notations><slur type=\"continue\" number=\"1\"/></notations>",
+                96 => "<notations><slur type=\"stop\" number=\"1\"/></notations>",
+                _ => "",
+            };
+            format!(
+                "<measure number=\"{number}\">{divisions}<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type>{span}</note></measure>"
+            )
+        })
+        .collect::<String>();
+    let fixture = format!(
+        "<?xml version=\"1.0\"?><score-partwise version=\"4.0\"><part-list><score-part id=\"P1\"><part-name>Slur</part-name></score-part></part-list><part id=\"P1\">{measures}</part></score-partwise>"
+    );
+    fs::write(&input, fixture).expect("write cross-Page Slur score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "cross-Page Slur failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("cross-page-slur.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"page\"").count(), 2, "{svg}");
+    let final_span = svg
+        .lines()
+        .filter(|line| {
+            line.contains("class=\"slur\"")
+                && line.contains("system-")
+                && line.contains("transform=\"translate(")
+        })
+        .find(|line| path_translation_f64(line).1 > 1000.0)
+        .expect("Slur segment on the second Page");
+    let system_index = final_span
+        .split_once("system-")
+        .and_then(|(_, suffix)| suffix.split_once('"').map(|(index, _)| index))
+        .expect("final Slur System index");
+    let staff_line_id = format!("id=\"system-{system_index}-staff-line-1\"");
+    let staff_line = svg
+        .lines()
+        .find(|line| line.contains(&staff_line_id))
+        .expect("staff line on the final Slur System");
+    assert_eq!(
+        path_translation_f64(final_span).1,
+        path_translation_f64(staff_line).1,
+        "Slur segment and staff must share the same page-aware System offset: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn composes_systems_onto_multiple_a4_pages() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("pages.musicxml");
+    let measures = (1..=96)
+        .map(|number| {
+            let divisions = if number == 1 {
+                "<attributes><divisions>1</divisions></attributes>"
+            } else {
+                ""
+            };
+            format!(
+                "<measure number=\"{number}\">{divisions}<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure>"
+            )
+        })
+        .collect::<String>();
+    let fixture = format!(
+        "<?xml version=\"1.0\"?><score-partwise version=\"4.0\"><part-list><score-part id=\"P1\"><part-name>Music</part-name></score-part></part-list><part id=\"P1\">{measures}</part></score-partwise>"
+    );
+    fs::write(&input, fixture).expect("write multi-page score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "page layout failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("pages.svg")).expect("read SVG");
+    assert!(svg.contains("width=\"210mm\" height=\"600.35mm\""), "{svg}");
+    assert!(svg.contains("viewBox=\"0 0 794 2270\""), "{svg}");
+    assert_eq!(svg.matches("class=\"page\"").count(), 2, "{svg}");
+    assert!(svg.contains("fill=\"#e5e5e5\""), "{svg}");
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 96, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_glissandi_and_slides_with_distinct_styles_and_labels() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("note-spans.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Spans</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><notations><glissando type="start" number="1" line-type="dotted" placement="above" text="gliss."/><slide type="start" number="2" line-type="dashed" placement="below" text="slide"/><slide type="start" number="3" line-type="wavy"/></notations></note><note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><notations><glissando type="stop" number="1"/><slide type="stop" number="2"/><slide type="stop" number="3"/></notations></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write note-span score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "note spans failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("note-spans.svg")).expect("read SVG");
+    assert!(svg.contains("class=\"glissando\""), "{svg}");
+    assert!(svg.contains("class=\"slide\""), "{svg}");
+    assert!(svg.contains("stroke-dasharray=\"1 3\""), "{svg}");
+    assert!(svg.contains("stroke-dasharray=\"5 3\""), "{svg}");
+    assert!(svg.contains("id=\"note-span-label-"), "{svg}");
+    let path_data = |class: &str, dash_pattern: &str| {
+        svg.lines()
+            .find(|line| {
+                line.contains(&format!("class=\"{class}\""))
+                    && line.contains(&format!("stroke-dasharray=\"{dash_pattern}\""))
+            })
+            .and_then(|line| line.split_once(" d=\"").map(|(_, rest)| rest))
+            .and_then(|rest| rest.split_once('"').map(|(data, _)| data))
+            .expect("styled span path")
+    };
+    let dotted_path = path_data("glissando", "1 3");
+    let dashed_path = path_data("slide", "5 3");
+    assert_ne!(dotted_path, dashed_path, "{svg}");
+    let start_y = |path: &str| {
+        path.strip_prefix('M')
+            .and_then(|path| path.split(['L', 'C']).next())
+            .and_then(|point| point.split_whitespace().nth(1))
+            .and_then(|y| y.parse::<f64>().ok())
+            .expect("span path start y coordinate")
+    };
+    assert!(start_y(dotted_path) < start_y(dashed_path), "{svg}");
+    for path in [dotted_path, dashed_path] {
+        assert!(path.starts_with("M106 "), "{path}");
+        assert_eq!(
+            path.rsplit_once('L')
+                .and_then(|(_, endpoint)| endpoint.split_whitespace().next()),
+            Some("130"),
+            "{path}"
+        );
+    }
+    let label_y = |value: &str| {
+        let line = svg
+            .lines()
+            .find(|line| line.contains(&format!("data-value=\"{value}\"")))
+            .expect("span label glyph");
+        path_translation_f64(line).1
+    };
+    let span_line_ys = svg
+        .lines()
+        .filter(|line| line.contains("class=\"glissando\"") || line.contains("class=\"slide\""))
+        .flat_map(|line| {
+            let path = line
+                .split_once(" d=\"")
+                .and_then(|(_, data)| data.split_once('"').map(|(data, _)| data))
+                .expect("span path data");
+            path.split(['M', 'L'])
+                .filter_map(|point| {
+                    point
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|y| y.parse::<f64>().ok())
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    for label in ["gliss.", "slide"] {
+        let label_y = label_y(label);
+        let text_top = label_y - 6.5;
+        let text_bottom = label_y + 2.0;
+        assert!(
+            [28.0, 68.0, 108.0]
+                .into_iter()
+                .all(|staff_y| staff_y < text_top - 0.75 || staff_y > text_bottom + 0.75),
+            "{label} overlaps a staff line: {svg}"
+        );
+        assert!(
+            span_line_ys
+                .iter()
+                .all(|span_y| text_bottom + 0.75 < *span_y || text_top - 0.75 > *span_y),
+            "{label} overlaps a span path: {svg}"
+        );
+    }
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn note_span_uses_the_specified_chord_tone_endpoint() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("chord-span.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Chord Span</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note><note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><notations><glissando type="start" number="1"/></notations></note><note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><notations><glissando type="stop" number="1"/></notations></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write chord-span score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "chord span failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("chord-span.svg")).expect("read SVG");
+    let second_chord_tone = svg
+        .lines()
+        .find(|line| line.contains("id=\"tonehead-0-1\""))
+        .expect("second chord Tonehead");
+    let span = svg
+        .lines()
+        .find(|line| line.contains("class=\"glissando\""))
+        .expect("Glissando path");
+    let tonehead_x = path_translation_f64(second_chord_tone).0;
+    let span_start_x = span
+        .split_once(" d=\"M")
+        .and_then(|(_, data)| data.split_once(' ').map(|(x, _)| x))
+        .and_then(|x| x.parse::<f64>().ok())
+        .expect("Glissando start x coordinate");
+    assert_eq!(
+        span_start_x,
+        tonehead_x + 14.0,
+        "{span}\n{second_chord_tone}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn diagnoses_a_note_span_stop_without_a_matching_start() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("missing-span-start.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Spans</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><notations><slur type="stop" number="3"/></notations></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write malformed note-span score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("note span stop has no matching start"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("XML path /score-partwise/part"), "{stderr}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_note_span_endpoints_on_rests() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("rest-span.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Spans</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><rest/><duration>1</duration><voice>1</voice><type>quarter</type><notations><slur type="start" number="1"/></notations></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write Rest span score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("note spans may connect only pitched events"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("XML path /score-partwise/part"), "{stderr}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_the_note_spans_example_through_the_cli() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("note-spans.musicxml");
+    fs::write(
+        &input,
+        include_str!("../examples/note-spans/note-spans.musicxml"),
+    )
+    .expect("write note-spans example");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "note-spans example failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("note-spans.svg")).expect("read SVG");
+    assert!(svg.contains("class=\"slur\""), "{svg}");
+    assert!(svg.contains("class=\"glissando\""), "{svg}");
+    assert!(svg.contains("class=\"slide\""), "{svg}");
+    let span_y = |id: &str| {
+        svg.lines()
+            .find(|line| line.contains(&format!("id=\"{id}\"")))
+            .and_then(|line| line.split_once(" d=\"M"))
+            .and_then(|(_, data)| data.split_once('L'))
+            .and_then(|(start, _)| start.split_whitespace().nth(1))
+            .and_then(|y| y.parse::<f64>().ok())
+            .expect("numbered span path")
+    };
+    assert!(
+        span_y("glissando-1-0-system-0") < span_y("slide-2-1-system-0"),
+        "number-1 dotted glissando should be above number-2 dashed slide: {svg}"
+    );
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }

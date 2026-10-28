@@ -57,6 +57,7 @@ struct Event {
     ornaments: Vec<OrnamentMark>,
     tremolos: Vec<TremoloMark>,
     fermatas: Vec<FermataMark>,
+    spans: Vec<NoteSpanMark>,
 }
 
 #[derive(Clone)]
@@ -105,6 +106,17 @@ struct NoteParseContext<'a> {
     active_tuplets: &'a VoiceState<Option<ActiveTuplet>>,
     score_instrument_ids: &'a [String],
     options: NoteParseOptions,
+}
+
+struct TupletNotationContext<'a> {
+    elements: &'a [Element],
+    ratio: Option<&'a TupletRatio>,
+    event_index: usize,
+    is_rest: bool,
+    is_unpitched: bool,
+    is_grace: bool,
+    is_cue: bool,
+    warnings: &'a mut Vec<String>,
 }
 
 impl Default for NoteSizeScales {
@@ -233,6 +245,59 @@ struct FermataMark {
     tone_index: Option<usize>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NoteSpanKind {
+    Slur,
+    Glissando,
+    Slide,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NoteSpanEndpoint {
+    Start,
+    Stop,
+    Continue,
+}
+
+#[derive(Clone)]
+struct NoteSpanMark {
+    kind: NoteSpanKind,
+    endpoint: NoteSpanEndpoint,
+    number: u32,
+    tone_index: usize,
+    placement: Option<MarkPlacement>,
+    orientation: Option<String>,
+    line_type: String,
+    label: Option<String>,
+    source: String,
+}
+
+struct NoteSpanAnchor {
+    mark: NoteSpanMark,
+    voice_id: VoiceId,
+    system_index: usize,
+    x: i32,
+    y: i32,
+}
+
+struct NoteSpanLabel {
+    text: String,
+    center_x: i32,
+    y: i32,
+    system_index: usize,
+    index: usize,
+}
+
+struct NoteSpanRenderContext<'a> {
+    scene: &'a mut Scene,
+    system_ends: &'a [usize],
+    barline_positions: &'a [i32],
+    system_notation_bounds: &'a mut [Vec<ComponentBounds>],
+    system_layout: Option<&'a SystemLayout>,
+    part_index: usize,
+    part_count: usize,
+}
+
 #[derive(Default)]
 struct NotationMarkers {
     tie_start: bool,
@@ -245,6 +310,7 @@ struct NotationMarkers {
     ornaments: Vec<OrnamentMark>,
     tremolos: Vec<TremoloMark>,
     fermatas: Vec<FermataMark>,
+    spans: Vec<NoteSpanMark>,
 }
 
 #[derive(Clone)]
@@ -416,6 +482,7 @@ struct VerticalBounds {
 
 const SYSTEM_MAX_WIDTH: i32 = 680;
 const SYSTEM_ROW_HEIGHT: i32 = 160;
+const NOTE_SPAN_TONEHEAD_INSET: i32 = 8;
 
 struct SystemLayout {
     starts: Vec<usize>,
@@ -1754,7 +1821,10 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                     Some(active_tuplet) => {
                                         return Err(element_diagnostic(
                                             element,
-                                            format!("tuplet stop number {number:?} does not match active tuplet {:?}", active_tuplet.number),
+                                            format!(
+                                                "tuplet stop number {number:?} does not match active tuplet {:?}",
+                                                active_tuplet.number
+                                            ),
                                         ));
                                     }
                                     None => {
@@ -1841,6 +1911,10 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                             }
                             let chord_tone_index = event.tones.len();
                             event.tones.push(tone);
+                            for mut span in parsed.event.spans {
+                                span.tone_index = chord_tone_index;
+                                event.spans.push(span);
+                            }
                             let default_placement = default_mark_placement(
                                 event,
                                 stem_direction_is_up(event.tones.iter()),
@@ -1996,7 +2070,10 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                 Some(active_label) => {
                                     return Err(element_diagnostic(
                                         element,
-                                        format!("ending endpoint {:?} does not match active ending {active_label:?}", label.number),
+                                        format!(
+                                            "ending endpoint {:?} does not match active ending {active_label:?}",
+                                            label.number
+                                        ),
                                     ));
                                 }
                                 None => {
@@ -2363,13 +2440,17 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
             if measures.len() != expected {
                 return Err(element_diagnostic(
                     &elements[part],
-                    format!("Part {score_part_id:?} has {} measures; expected {expected} to align with the other Parts", measures.len()),
+                    format!(
+                        "Part {score_part_id:?} has {} measures; expected {expected} to align with the other Parts",
+                        measures.len()
+                    ),
                 ));
             }
         } else {
             expected_measure_count = Some(measures.len());
         }
         validate_tremolo_pairs(&elements, &mut measures, &mut warnings)?;
+        validate_note_spans(&measures)?;
         parts.push(Part {
             name: name.clone(),
             input_staff_count,
@@ -2483,6 +2564,56 @@ fn validate_tremolo_pairs(
             &elements[source],
             "two-note tremolo endpoints are separated by a Rest; both endpoints are ignored"
                 .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_note_spans(measures: &[Measure]) -> Result<(), String> {
+    let mut active: Vec<(VoiceId, NoteSpanMark)> = Vec::new();
+    for measure in measures {
+        for event in &measure.events {
+            for mark in &event.spans {
+                let active_position = active.iter().rposition(|(voice_id, start)| {
+                    voice_id == &event.voice_id
+                        && start.kind == mark.kind
+                        && start.number == mark.number
+                });
+                match mark.endpoint {
+                    NoteSpanEndpoint::Start => {
+                        if active_position.is_some() {
+                            return Err(format!(
+                                "overlapping note span start for number {} ({})",
+                                mark.number, mark.source
+                            ));
+                        }
+                        active.push((event.voice_id.clone(), mark.clone()));
+                    }
+                    NoteSpanEndpoint::Stop => {
+                        let Some(position) = active_position else {
+                            return Err(format!(
+                                "note span stop has no matching start for number {} ({})",
+                                mark.number, mark.source
+                            ));
+                        };
+                        active.remove(position);
+                    }
+                    NoteSpanEndpoint::Continue => {
+                        if active_position.is_none() {
+                            return Err(format!(
+                                "Slur continue has no matching start for number {} ({})",
+                                mark.number, mark.source
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some((_, start)) = active.first() {
+        return Err(format!(
+            "note span start has no matching stop for number {} ({})",
+            start.number, start.source
         ));
     }
     Ok(())
@@ -3907,7 +4038,7 @@ fn parse_direction_text(
             return Err(element_diagnostic(
                 element,
                 format!("invalid text enclosure {value:?}"),
-            ))
+            ));
         }
         None if is_rehearsal => Some("square".to_owned()),
         None => None,
@@ -5741,7 +5872,9 @@ fn parse_ornaments(
             }
             warnings.push(element_diagnostic(
                 element,
-                format!("ornament SMuFL override {smufl:?} is not supported; conventional glyph is used"),
+                format!(
+                    "ornament SMuFL override {smufl:?} is not supported; conventional glyph is used"
+                ),
             ));
         }
         if kind.is_none() {
@@ -6057,13 +6190,19 @@ fn parse_fermata(
 }
 
 fn parse_tuplet_notations(
-    elements: &[Element],
     notations: usize,
-    ratio: Option<&TupletRatio>,
-    event_index: usize,
-    is_rest: bool,
-    warnings: &mut Vec<String>,
+    context: TupletNotationContext<'_>,
 ) -> Result<NotationMarkers, String> {
+    let TupletNotationContext {
+        elements,
+        ratio,
+        event_index,
+        is_rest,
+        is_unpitched,
+        is_grace,
+        is_cue,
+        warnings,
+    } = context;
     let element = &elements[notations];
     require_no_attributes(element)?;
     require_container_text(element)?;
@@ -6116,6 +6255,21 @@ fn parse_tuplet_notations(
             "fermata" => markers
                 .fermatas
                 .push(parse_fermata(child_element, is_rest, warnings)?),
+            "slur" => markers.spans.push(parse_note_span(
+                child_element,
+                NoteSpanKind::Slur,
+                is_rest || is_unpitched || is_grace || is_cue,
+            )?),
+            "glissando" => markers.spans.push(parse_note_span(
+                child_element,
+                NoteSpanKind::Glissando,
+                is_rest || is_unpitched || is_grace || is_cue,
+            )?),
+            "slide" => markers.spans.push(parse_note_span(
+                child_element,
+                NoteSpanKind::Slide,
+                is_rest || is_unpitched || is_grace || is_cue,
+            )?),
             "tied" => {
                 validate_attributes(child_element, &["type", "number"])?;
                 require_container_text(child_element)?;
@@ -6168,7 +6322,7 @@ fn parse_tuplet_notations(
             _ => {
                 return Err(element_diagnostic(
                     child_element,
-                    "unsupported notation; expected <tied> or <tuplet>".to_owned(),
+                    "unsupported notation; expected <tied>, <tuplet>, <slur>, <glissando>, or <slide>".to_owned(),
                 ));
             }
         }
@@ -6327,6 +6481,129 @@ fn parse_tuplet_notations(
         }
     });
     Ok(markers)
+}
+
+fn parse_note_span(
+    element: &Element,
+    kind: NoteSpanKind,
+    is_rest: bool,
+) -> Result<NoteSpanMark, String> {
+    validate_attributes(
+        element,
+        &[
+            "type",
+            "number",
+            "placement",
+            "orientation",
+            "line-type",
+            "text",
+        ],
+    )?;
+    require_container_text(element)?;
+    if !element.children.is_empty() {
+        return Err(element_diagnostic(
+            element,
+            "note span elements must be empty".to_owned(),
+        ));
+    }
+    if is_rest {
+        return Err(element_diagnostic(
+            element,
+            "note spans may connect only pitched events".to_owned(),
+        ));
+    }
+    let endpoint = match optional_attribute(element, "type") {
+        Some("start") => NoteSpanEndpoint::Start,
+        Some("stop") => NoteSpanEndpoint::Stop,
+        Some("continue") if kind == NoteSpanKind::Slur => NoteSpanEndpoint::Continue,
+        Some(value) => {
+            return Err(element_diagnostic(
+                element,
+                format!("unsupported note span type {value:?}"),
+            ));
+        }
+        None => {
+            return Err(element_diagnostic(
+                element,
+                "note span requires a type attribute".to_owned(),
+            ));
+        }
+    };
+    let number = optional_attribute(element, "number")
+        .unwrap_or("1")
+        .parse::<u32>()
+        .ok()
+        .filter(|number| *number > 0)
+        .ok_or_else(|| {
+            element_diagnostic(
+                element,
+                "note span number must be a positive integer".to_owned(),
+            )
+        })?;
+    let placement = optional_attribute(element, "placement")
+        .map(|value| match value {
+            "above" => Ok(MarkPlacement::Above),
+            "below" => Ok(MarkPlacement::Below),
+            _ => Err(element_diagnostic(
+                element,
+                format!("unsupported note span placement {value:?}"),
+            )),
+        })
+        .transpose()?;
+    let orientation = optional_attribute(element, "orientation").map(str::to_owned);
+    if orientation
+        .as_deref()
+        .is_some_and(|value| !matches!(value, "over" | "under"))
+    {
+        return Err(element_diagnostic(
+            element,
+            "note span orientation must be 'over' or 'under'".to_owned(),
+        ));
+    }
+    let line_type = optional_attribute(element, "line-type").unwrap_or("solid");
+    if !matches!(line_type, "solid" | "dashed" | "dotted" | "wavy") {
+        return Err(element_diagnostic(
+            element,
+            format!("unsupported note span line type {line_type:?}"),
+        ));
+    }
+    let label = optional_attribute(element, "text")
+        .map(|text| {
+            let normalized = normalize_text_nfc(text).map_err(|character| {
+                element_diagnostic(
+                    element,
+                    format!(
+                        "unsupported note span label character U+{:04X}",
+                        u32::from(character)
+                    ),
+                )
+            })?;
+            if normalized
+                .chars()
+                .any(|character| noto_sans_glyphs::glyph(character).is_none())
+            {
+                return Err(element_diagnostic(
+                    element,
+                    "note span label contains an unsupported text character".to_owned(),
+                ));
+            }
+            Ok(normalized)
+        })
+        .transpose()?;
+    Ok(NoteSpanMark {
+        kind,
+        endpoint,
+        number,
+        tone_index: 0,
+        placement,
+        orientation,
+        line_type: line_type.to_owned(),
+        label,
+        source: format!(
+            "byte {}, line {}, column {}, XML path {}",
+            element.byte_offset, element.line, element.column, element.path
+        ),
+    })
 }
 
 fn parse_note(
@@ -6704,12 +6981,17 @@ fn parse_note(
     {
         position += 1;
         parse_tuplet_notations(
-            elements,
             notations,
-            time_modification.as_ref(),
-            event_index,
-            is_rest,
-            warnings,
+            TupletNotationContext {
+                elements,
+                ratio: time_modification.as_ref(),
+                event_index,
+                is_rest,
+                is_unpitched,
+                is_grace,
+                is_cue,
+                warnings,
+            },
         )?
     } else {
         NotationMarkers::default()
@@ -6954,6 +7236,7 @@ fn parse_note(
             ornaments: notation_markers.ornaments,
             tremolos: notation_markers.tremolos,
             fermatas: notation_markers.fermatas,
+            spans: notation_markers.spans,
         },
         chord_marker,
         tuplet_boundary,
@@ -7571,7 +7854,7 @@ fn transpose_semitones(elements: &[Element], transpose: usize) -> Result<i32, St
                 return Err(element_diagnostic(
                     element,
                     "unsupported transpose element".to_owned(),
-                ))
+                ));
             }
         };
         if order <= previous_order {
@@ -7622,7 +7905,7 @@ fn transpose_semitones(elements: &[Element], transpose: usize) -> Result<i32, St
                         return Err(element_diagnostic(
                             element,
                             "double transposition has an invalid above attribute".to_owned(),
-                        ))
+                        ));
                     }
                 };
                 octave_change = octave_change
@@ -8017,6 +8300,9 @@ enum PathClass {
     CodaMark,
     TextEnclosure,
     Tie,
+    Slur,
+    Glissando,
+    Slide,
     RepeatBarline,
     RepeatDot,
     MeasureRepeatDot,
@@ -8446,22 +8732,38 @@ fn ornament_layouts(event: &Event, x: i32, stems_up: bool) -> Vec<OrnamentLayout
 
 fn ornament_glyph(kind: OrnamentKind, placement: MarkPlacement) -> &'static str {
     match (kind, placement) {
-        (OrnamentKind::Trill, _) => "M10.14 0C10.04 0 9.89 0.05 9.81 0.07L8.59 0.47C8.36 0.55 8.26 0.62 8.16 0.88L7.26 3.07C7.16 3.32 7.14 3.38 7.06 3.38C6.96 3.38 6.81 3.25 6.59 3.15C6.24 3 5.91 2.92 5.54 2.92C4.36 2.92 3.49 3.62 3.49 4.67C3.49 5.45 4.01 6.1 5.14 6.1C5.44 6.1 5.76 6.05 5.91 6.05C5.96 6.05 5.99 6.07 5.99 6.12C5.99 6.17 5.96 6.25 5.91 6.38L5.64 7.05C5.36 7.72 5.16 8.22 5.16 8.75C5.16 9.45 5.64 10 6.59 10C7.89 10 9.14 8.95 9.14 7.1C9.14 6.5 9.04 5.95 8.81 5.4C8.76 5.27 8.74 5.22 8.74 5.15C8.74 5 8.89 4.88 9.29 4.65L9.44 4.57C10.31 4.05 10.91 3.7 11.39 3.7C11.61 3.7 11.71 3.77 11.71 4.07C11.71 4.32 11.64 4.62 11.56 4.8L9.74 9.32C9.69 9.45 9.66 9.53 9.66 9.6C9.66 9.7 9.74 9.75 9.94 9.75H11.16C11.39 9.75 11.46 9.7 11.56 9.45L13.19 5.4C13.51 4.57 14.31 3.65 14.86 3.65C15.01 3.65 15.11 3.7 15.11 3.8C15.11 4.02 14.56 4.1 14.56 4.8C14.56 5.3 14.94 5.6 15.46 5.6C16.06 5.6 16.51 5.1 16.51 4.22C16.51 3.5 16.14 2.9 15.21 2.9C14.56 2.9 14.04 3.25 13.66 3.67C13.44 3.92 13.41 4.02 13.31 4.02C13.19 4.02 13.29 3.85 13.09 3.47C12.91 3.15 12.54 2.92 11.99 2.92C10.99 2.92 10.04 3.42 9.51 3.7C9.19 3.88 9.04 3.97 8.91 3.97C8.86 3.97 8.84 3.95 8.84 3.9C8.84 3.8 8.91 3.65 8.96 3.52L10.21 0.42C10.26 0.3 10.29 0.22 10.29 0.15C10.29 0.05 10.24 0 10.14 0ZM5.54 3.5C5.84 3.5 6.21 3.6 6.49 3.75C6.71 3.88 6.81 3.97 6.81 4.1C6.81 4.17 6.76 4.3 6.71 4.42L6.61 4.67C6.49 5 6.39 5.08 6.06 5.15C5.74 5.22 5.44 5.27 5.19 5.27C4.36 5.27 4.16 4.88 4.16 4.52C4.16 4.07 4.54 3.5 5.54 3.5ZM8.21 5.58C8.29 5.58 8.29 5.65 8.34 5.78C8.54 6.22 8.56 6.67 8.56 7.12C8.56 8.22 7.89 9.22 7.16 9.22C6.96 9.22 6.89 9.1 6.89 8.93C6.89 8.72 6.99 8.4 7.09 8.15C7.09 8.12 7.11 8.12 8.06 5.75C8.11 5.62 8.14 5.58 8.21 5.58Z",
+        (OrnamentKind::Trill, _) => {
+            "M10.14 0C10.04 0 9.89 0.05 9.81 0.07L8.59 0.47C8.36 0.55 8.26 0.62 8.16 0.88L7.26 3.07C7.16 3.32 7.14 3.38 7.06 3.38C6.96 3.38 6.81 3.25 6.59 3.15C6.24 3 5.91 2.92 5.54 2.92C4.36 2.92 3.49 3.62 3.49 4.67C3.49 5.45 4.01 6.1 5.14 6.1C5.44 6.1 5.76 6.05 5.91 6.05C5.96 6.05 5.99 6.07 5.99 6.12C5.99 6.17 5.96 6.25 5.91 6.38L5.64 7.05C5.36 7.72 5.16 8.22 5.16 8.75C5.16 9.45 5.64 10 6.59 10C7.89 10 9.14 8.95 9.14 7.1C9.14 6.5 9.04 5.95 8.81 5.4C8.76 5.27 8.74 5.22 8.74 5.15C8.74 5 8.89 4.88 9.29 4.65L9.44 4.57C10.31 4.05 10.91 3.7 11.39 3.7C11.61 3.7 11.71 3.77 11.71 4.07C11.71 4.32 11.64 4.62 11.56 4.8L9.74 9.32C9.69 9.45 9.66 9.53 9.66 9.6C9.66 9.7 9.74 9.75 9.94 9.75H11.16C11.39 9.75 11.46 9.7 11.56 9.45L13.19 5.4C13.51 4.57 14.31 3.65 14.86 3.65C15.01 3.65 15.11 3.7 15.11 3.8C15.11 4.02 14.56 4.1 14.56 4.8C14.56 5.3 14.94 5.6 15.46 5.6C16.06 5.6 16.51 5.1 16.51 4.22C16.51 3.5 16.14 2.9 15.21 2.9C14.56 2.9 14.04 3.25 13.66 3.67C13.44 3.92 13.41 4.02 13.31 4.02C13.19 4.02 13.29 3.85 13.09 3.47C12.91 3.15 12.54 2.92 11.99 2.92C10.99 2.92 10.04 3.42 9.51 3.7C9.19 3.88 9.04 3.97 8.91 3.97C8.86 3.97 8.84 3.95 8.84 3.9C8.84 3.8 8.91 3.65 8.96 3.52L10.21 0.42C10.26 0.3 10.29 0.22 10.29 0.15C10.29 0.05 10.24 0 10.14 0ZM5.54 3.5C5.84 3.5 6.21 3.6 6.49 3.75C6.71 3.88 6.81 3.97 6.81 4.1C6.81 4.17 6.76 4.3 6.71 4.42L6.61 4.67C6.49 5 6.39 5.08 6.06 5.15C5.74 5.22 5.44 5.27 5.19 5.27C4.36 5.27 4.16 4.88 4.16 4.52C4.16 4.07 4.54 3.5 5.54 3.5ZM8.21 5.58C8.29 5.58 8.29 5.65 8.34 5.78C8.54 6.22 8.56 6.67 8.56 7.12C8.56 8.22 7.89 9.22 7.16 9.22C6.96 9.22 6.89 9.1 6.89 8.93C6.89 8.72 6.99 8.4 7.09 8.15C7.09 8.12 7.11 8.12 8.06 5.75C8.11 5.62 8.14 5.58 8.21 5.58Z"
+        }
         (OrnamentKind::Turn | OrnamentKind::InvertedTurn, _) => {
             "M16.13 0C14.78 0 13.7 0.61 13.7 1.91C13.7 2.87 14.35 3.48 15.26 3.48C16.52 3.48 16.57 2.48 17.48 2.48C18.22 2.48 18.91 3.39 18.91 4.52C18.91 6.39 17.61 7.3 16.09 7.3C14.7 7.3 13.26 6.13 11.39 4.04C9.26 1.7 7.35 0.04 4.52 0.04C1.65 0.04 0 2.22 0 5C0 8.13 2 9.48 3.87 9.48C5.22 9.48 6.3 8.87 6.3 7.57C6.3 6.61 5.65 6 4.74 6C3.48 6 3.43 7 2.52 7C1.78 7 1.09 6.09 1.09 4.96C1.09 3.09 2.39 2.17 3.91 2.17C5.3 2.17 6.74 3.35 8.61 5.43C10.74 7.78 12.65 9.43 15.48 9.43C18.35 9.43 20 7.26 20 4.48C20 1.35 18 0 16.13 0Z"
         }
-        (OrnamentKind::Mordent, _) => "M8.22 5.18 5.77 2.14C5.57 1.9 5.41 1.68 4.91 1.62C4.72 1.62 4.55 1.68 4.3 1.87C3.03 3.25 1.68 4.82 0.45 6.37C0.24 6.53 0 6.72 0 7C0 7.17 0.14 7.28 0.55 7.28C0.55 7.28 0.55 7.28 0.58 7.28C0.8 7.28 1.05 7.19 1.35 6.92L3.03 5.43C3.12 5.34 3.23 5.32 3.34 5.32C3.48 5.32 3.59 5.43 3.78 5.65C3.89 5.79 5.93 7.91 6.15 8.19C6.26 8.32 6.48 8.38 6.7 8.38C6.92 8.38 7.12 8.32 7.23 8.24L10.21 5.54C10.4 5.37 10.54 5.32 10.62 5.32C10.76 5.32 10.84 5.43 11.06 5.65C11.2 5.79 13.21 7.91 13.46 8.19C13.57 8.32 13.79 8.38 14.01 8.38C14.23 8.38 14.43 8.32 14.54 8.24C14.73 8.08 19.26 3.17 19.61 2.75C19.78 2.53 20 2.23 20 2.12C20 2.03 19.94 1.92 19.83 1.84C19.64 1.7 19.45 1.62 19.26 1.62C19.09 1.62 18.92 1.7 18.76 1.81C18.46 2.06 16.55 4.46 16.25 4.77C16.03 4.96 15.86 5.04 15.72 5.04C15.53 5.04 15.39 4.9 15.26 4.77C15.01 4.52 13.19 2.28 12.91 2.03C12.69 1.81 12.47 1.65 12.28 1.65C12.03 1.65 11.86 1.68 11.61 1.87C11.37 2.09 11.17 2.34 10.98 2.56C10.21 3.41 9.38 4.3 8.5 5.18C8.41 5.29 8.3 5.29 8.22 5.18Z",
-        (OrnamentKind::InvertedMordent, _) => "M10.36 3.44V0H9.57V4.31L8.83 5.18C8.72 5.31 8.57 5.31 8.47 5.18C7.55 4.11 6.17 2.53 6.05 2.35C5.84 2.14 5.69 1.91 5.26 1.89C5.03 1.89 4.9 1.96 4.69 2.12L1.05 6.25C0.89 6.4 0.71 6.66 0.71 6.84C0.71 6.99 0.84 7.09 1.22 7.09C1.63 7.09 1.99 6.73 2.24 6.48C2.58 6.2 2.88 5.89 3.24 5.61C3.49 5.41 3.67 5.28 3.8 5.28C3.93 5.28 4.03 5.38 4.18 5.59L6.4 7.96C6.51 8.09 6.71 8.14 6.91 8.14C7.09 8.14 7.27 8.09 7.37 7.98C7.63 7.83 9.11 6.48 9.52 6.12V10H10.33V5.43C10.43 5.36 10.54 5.31 10.64 5.31C10.77 5.31 10.89 5.38 11.05 5.59C11.15 5.74 13.04 7.7 13.27 7.96C13.37 8.09 13.57 8.14 13.75 8.14C13.95 8.14 14.13 8.09 14.23 7.98C14.44 7.83 18.6 3.29 18.93 2.91L18.98 2.83C19.13 2.68 19.29 2.5 19.29 2.32C19.29 2.24 19.26 2.17 19.16 2.09C18.98 1.96 18.8 1.89 18.62 1.89C18.44 1.89 18.29 1.96 18.16 2.07C17.88 2.3 16.12 4.49 15.82 4.77C15.61 4.95 15.48 5.03 15.36 5.03C15.18 5.03 15.03 4.9 14.9 4.77C14.69 4.57 13.01 2.47 12.76 2.24C12.53 2.04 12.32 1.89 12.12 1.89C11.91 1.89 11.79 1.94 11.56 2.12C11.33 2.3 11.15 2.55 10.97 2.76Z",
+        (OrnamentKind::Mordent, _) => {
+            "M8.22 5.18 5.77 2.14C5.57 1.9 5.41 1.68 4.91 1.62C4.72 1.62 4.55 1.68 4.3 1.87C3.03 3.25 1.68 4.82 0.45 6.37C0.24 6.53 0 6.72 0 7C0 7.17 0.14 7.28 0.55 7.28C0.55 7.28 0.55 7.28 0.58 7.28C0.8 7.28 1.05 7.19 1.35 6.92L3.03 5.43C3.12 5.34 3.23 5.32 3.34 5.32C3.48 5.32 3.59 5.43 3.78 5.65C3.89 5.79 5.93 7.91 6.15 8.19C6.26 8.32 6.48 8.38 6.7 8.38C6.92 8.38 7.12 8.32 7.23 8.24L10.21 5.54C10.4 5.37 10.54 5.32 10.62 5.32C10.76 5.32 10.84 5.43 11.06 5.65C11.2 5.79 13.21 7.91 13.46 8.19C13.57 8.32 13.79 8.38 14.01 8.38C14.23 8.38 14.43 8.32 14.54 8.24C14.73 8.08 19.26 3.17 19.61 2.75C19.78 2.53 20 2.23 20 2.12C20 2.03 19.94 1.92 19.83 1.84C19.64 1.7 19.45 1.62 19.26 1.62C19.09 1.62 18.92 1.7 18.76 1.81C18.46 2.06 16.55 4.46 16.25 4.77C16.03 4.96 15.86 5.04 15.72 5.04C15.53 5.04 15.39 4.9 15.26 4.77C15.01 4.52 13.19 2.28 12.91 2.03C12.69 1.81 12.47 1.65 12.28 1.65C12.03 1.65 11.86 1.68 11.61 1.87C11.37 2.09 11.17 2.34 10.98 2.56C10.21 3.41 9.38 4.3 8.5 5.18C8.41 5.29 8.3 5.29 8.22 5.18Z"
+        }
+        (OrnamentKind::InvertedMordent, _) => {
+            "M10.36 3.44V0H9.57V4.31L8.83 5.18C8.72 5.31 8.57 5.31 8.47 5.18C7.55 4.11 6.17 2.53 6.05 2.35C5.84 2.14 5.69 1.91 5.26 1.89C5.03 1.89 4.9 1.96 4.69 2.12L1.05 6.25C0.89 6.4 0.71 6.66 0.71 6.84C0.71 6.99 0.84 7.09 1.22 7.09C1.63 7.09 1.99 6.73 2.24 6.48C2.58 6.2 2.88 5.89 3.24 5.61C3.49 5.41 3.67 5.28 3.8 5.28C3.93 5.28 4.03 5.38 4.18 5.59L6.4 7.96C6.51 8.09 6.71 8.14 6.91 8.14C7.09 8.14 7.27 8.09 7.37 7.98C7.63 7.83 9.11 6.48 9.52 6.12V10H10.33V5.43C10.43 5.36 10.54 5.31 10.64 5.31C10.77 5.31 10.89 5.38 11.05 5.59C11.15 5.74 13.04 7.7 13.27 7.96C13.37 8.09 13.57 8.14 13.75 8.14C13.95 8.14 14.13 8.09 14.23 7.98C14.44 7.83 18.6 3.29 18.93 2.91L18.98 2.83C19.13 2.68 19.29 2.5 19.29 2.32C19.29 2.24 19.26 2.17 19.16 2.09C18.98 1.96 18.8 1.89 18.62 1.89C18.44 1.89 18.29 1.96 18.16 2.07C17.88 2.3 16.12 4.49 15.82 4.77C15.61 4.95 15.48 5.03 15.36 5.03C15.18 5.03 15.03 4.9 14.9 4.77C14.69 4.57 13.01 2.47 12.76 2.24C12.53 2.04 12.32 1.89 12.12 1.89C11.91 1.89 11.79 1.94 11.56 2.12C11.33 2.3 11.15 2.55 10.97 2.76Z"
+        }
     }
 }
 
 fn fermata_glyph(shape: FermataShape) -> &'static str {
     match shape {
-        FermataShape::Normal => "M8.94 3.27C15.31 3.27 16.59 7.99 16.89 9.13C16.92 9.22 16.92 9.31 16.95 9.34C17.16 9.75 17.28 9.96 17.58 9.96C17.85 9.96 18 9.84 18 9.54C18 9.46 18 9.37 17.97 9.25C16.12 0.1 9.87 0.04 9 0.04C8.04 0.04 1.85 0.1 0.03 9.25C0 9.37 0 9.49 0 9.57C0 9.87 0.15 9.96 0.39 9.96C0.66 9.96 0.81 9.75 0.99 9.34C1.02 9.31 1.05 9.19 1.08 9.07C1.44 7.84 2.78 3.27 8.94 3.27ZM10.61 8.32C10.61 7.45 9.87 6.7 8.97 6.7C8.1 6.7 7.36 7.45 7.36 8.32C7.36 9.22 8.1 9.96 8.97 9.96C9.87 9.96 10.61 9.22 10.61 8.32Z",
-        FermataShape::Angled => "M1.73 10C1.79 10 1.82 9.94 1.93 9.88C2.87 9.09 8.53 3.31 9 3.31C9.47 3.31 15.25 9.21 16.1 9.94C16.16 9.97 16.3 10 16.3 10H17.77C17.77 10 17.86 9.97 17.86 9.91C17.86 9.88 17.83 9.82 17.8 9.79C16.54 8.59 9.79 0 9 0C8.24 0 1.55 8.48 0.2 9.79C0.17 9.82 0.14 9.88 0.14 9.91C0.14 9.97 0.23 10 0.23 10ZM10.58 8.09C10.58 7.24 9.85 6.51 8.97 6.51C8.09 6.51 7.36 7.24 7.36 8.09C7.36 9 8.09 9.74 8.97 9.74C9.85 9.74 10.58 9 10.58 8.09Z",
-        FermataShape::Square => "M1.5 0C0.66 0 0 0.36 0 0.81V9.58C0 9.79 0.33 9.97 0.72 9.97C1.14 9.97 1.47 9.79 1.47 9.58V3.95C1.47 3.59 5.24 3.41 9.01 3.41C12.78 3.41 16.59 3.59 16.59 3.95V9.58C16.59 9.79 16.92 9.97 17.31 9.97C17.72 9.97 18.05 9.79 18.05 9.58V0.81C18.05 0.36 17.4 0 16.56 0ZM10.66 8.35C10.66 7.46 9.94 6.74 9.01 6.74C8.11 6.74 7.4 7.46 7.4 8.35C7.4 9.25 8.11 10 9.01 10C9.94 10 10.66 9.25 10.66 8.35Z",
-        FermataShape::DoubleAngled => "M1.63 10C1.69 10 1.72 9.93 1.83 9.89C2.76 9.09 8.76 2 8.89 2C9.07 2 15.15 9.2 15.99 9.93C16.06 9.98 16.19 10 16.19 10H17.02C17.02 10 17.08 9.98 17.08 9.91C17.08 9.89 17.08 9.84 17.04 9.8C15.79 8.6 9.2 0 8.89 0C8.71 0 2.32 8.49 0.96 9.8C0.92 9.84 0.92 9.87 0.92 9.89C0.92 9.96 1 10 1 10ZM4.59 10C4.63 10 4.66 9.96 4.75 9.91C5.44 9.33 8.55 6.35 8.89 6.35C9.24 6.35 12.45 9.42 13.08 9.96C13.12 9.98 13.23 10 13.23 10H14.3C14.3 10 14.37 9.98 14.37 9.93C14.37 9.91 14.35 9.87 14.32 9.84C13.39 8.95 9.13 3.67 8.89 3.67C8.6 3.67 4.46 8.86 3.48 9.84C3.45 9.87 3.43 9.91 3.43 9.93C3.43 9.98 3.5 10 3.5 10ZM10.07 8.6C10.07 7.95 9.53 7.42 8.89 7.42C8.22 7.42 7.69 7.95 7.69 8.6C7.69 9.27 8.22 9.8 8.89 9.8C9.53 9.8 10.07 9.27 10.07 8.6Z",
-        FermataShape::DoubleSquare => "M1.54 0C0.83 0 0.24 0.32 0.24 0.71V9.63C0.24 9.83 0.53 9.98 0.88 9.98C1.24 9.98 1.51 9.83 1.51 9.63V2.67C1.51 2.35 5.24 2.21 8.99 2.21C12.74 2.21 16.49 2.35 16.49 2.67V9.63C16.49 9.83 16.76 9.98 17.1 9.98C17.47 9.98 17.76 9.83 17.76 9.63V0.71C17.76 0.32 17.17 0 16.46 0ZM3.89 3.38C3.15 3.38 2.59 3.7 2.59 4.09V9.63C2.59 9.83 2.86 9.98 3.2 9.98C3.57 9.98 3.87 9.83 3.87 9.63V6.3C3.87 6 6.41 5.83 8.99 5.83C11.56 5.83 14.13 6 14.13 6.3V9.63C14.13 9.83 14.43 9.98 14.77 9.98C15.14 9.98 15.41 9.83 15.41 9.63V4.09C15.41 3.7 14.85 3.38 14.11 3.38ZM10.56 8.58C10.56 7.79 9.92 7.16 9.11 7.16C8.33 7.16 7.71 7.79 7.71 8.58C7.71 9.34 8.33 10 9.11 10C9.92 10 10.56 9.34 10.56 8.58Z",
+        FermataShape::Normal => {
+            "M8.94 3.27C15.31 3.27 16.59 7.99 16.89 9.13C16.92 9.22 16.92 9.31 16.95 9.34C17.16 9.75 17.28 9.96 17.58 9.96C17.85 9.96 18 9.84 18 9.54C18 9.46 18 9.37 17.97 9.25C16.12 0.1 9.87 0.04 9 0.04C8.04 0.04 1.85 0.1 0.03 9.25C0 9.37 0 9.49 0 9.57C0 9.87 0.15 9.96 0.39 9.96C0.66 9.96 0.81 9.75 0.99 9.34C1.02 9.31 1.05 9.19 1.08 9.07C1.44 7.84 2.78 3.27 8.94 3.27ZM10.61 8.32C10.61 7.45 9.87 6.7 8.97 6.7C8.1 6.7 7.36 7.45 7.36 8.32C7.36 9.22 8.1 9.96 8.97 9.96C9.87 9.96 10.61 9.22 10.61 8.32Z"
+        }
+        FermataShape::Angled => {
+            "M1.73 10C1.79 10 1.82 9.94 1.93 9.88C2.87 9.09 8.53 3.31 9 3.31C9.47 3.31 15.25 9.21 16.1 9.94C16.16 9.97 16.3 10 16.3 10H17.77C17.77 10 17.86 9.97 17.86 9.91C17.86 9.88 17.83 9.82 17.8 9.79C16.54 8.59 9.79 0 9 0C8.24 0 1.55 8.48 0.2 9.79C0.17 9.82 0.14 9.88 0.14 9.91C0.14 9.97 0.23 10 0.23 10ZM10.58 8.09C10.58 7.24 9.85 6.51 8.97 6.51C8.09 6.51 7.36 7.24 7.36 8.09C7.36 9 8.09 9.74 8.97 9.74C9.85 9.74 10.58 9 10.58 8.09Z"
+        }
+        FermataShape::Square => {
+            "M1.5 0C0.66 0 0 0.36 0 0.81V9.58C0 9.79 0.33 9.97 0.72 9.97C1.14 9.97 1.47 9.79 1.47 9.58V3.95C1.47 3.59 5.24 3.41 9.01 3.41C12.78 3.41 16.59 3.59 16.59 3.95V9.58C16.59 9.79 16.92 9.97 17.31 9.97C17.72 9.97 18.05 9.79 18.05 9.58V0.81C18.05 0.36 17.4 0 16.56 0ZM10.66 8.35C10.66 7.46 9.94 6.74 9.01 6.74C8.11 6.74 7.4 7.46 7.4 8.35C7.4 9.25 8.11 10 9.01 10C9.94 10 10.66 9.25 10.66 8.35Z"
+        }
+        FermataShape::DoubleAngled => {
+            "M1.63 10C1.69 10 1.72 9.93 1.83 9.89C2.76 9.09 8.76 2 8.89 2C9.07 2 15.15 9.2 15.99 9.93C16.06 9.98 16.19 10 16.19 10H17.02C17.02 10 17.08 9.98 17.08 9.91C17.08 9.89 17.08 9.84 17.04 9.8C15.79 8.6 9.2 0 8.89 0C8.71 0 2.32 8.49 0.96 9.8C0.92 9.84 0.92 9.87 0.92 9.89C0.92 9.96 1 10 1 10ZM4.59 10C4.63 10 4.66 9.96 4.75 9.91C5.44 9.33 8.55 6.35 8.89 6.35C9.24 6.35 12.45 9.42 13.08 9.96C13.12 9.98 13.23 10 13.23 10H14.3C14.3 10 14.37 9.98 14.37 9.93C14.37 9.91 14.35 9.87 14.32 9.84C13.39 8.95 9.13 3.67 8.89 3.67C8.6 3.67 4.46 8.86 3.48 9.84C3.45 9.87 3.43 9.91 3.43 9.93C3.43 9.98 3.5 10 3.5 10ZM10.07 8.6C10.07 7.95 9.53 7.42 8.89 7.42C8.22 7.42 7.69 7.95 7.69 8.6C7.69 9.27 8.22 9.8 8.89 9.8C9.53 9.8 10.07 9.27 10.07 8.6Z"
+        }
+        FermataShape::DoubleSquare => {
+            "M1.54 0C0.83 0 0.24 0.32 0.24 0.71V9.63C0.24 9.83 0.53 9.98 0.88 9.98C1.24 9.98 1.51 9.83 1.51 9.63V2.67C1.51 2.35 5.24 2.21 8.99 2.21C12.74 2.21 16.49 2.35 16.49 2.67V9.63C16.49 9.83 16.76 9.98 17.1 9.98C17.47 9.98 17.76 9.83 17.76 9.63V0.71C17.76 0.32 17.17 0 16.46 0ZM3.89 3.38C3.15 3.38 2.59 3.7 2.59 4.09V9.63C2.59 9.83 2.86 9.98 3.2 9.98C3.57 9.98 3.87 9.83 3.87 9.63V6.3C3.87 6 6.41 5.83 8.99 5.83C11.56 5.83 14.13 6 14.13 6.3V9.63C14.13 9.83 14.43 9.98 14.77 9.98C15.14 9.98 15.41 9.83 15.41 9.63V4.09C15.41 3.7 14.85 3.38 14.11 3.38ZM10.56 8.58C10.56 7.79 9.92 7.16 9.11 7.16C8.33 7.16 7.71 7.79 7.71 8.58C7.71 9.34 8.33 10 9.11 10C9.92 10 10.56 9.34 10.56 8.58Z"
+        }
     }
 }
 
@@ -9003,6 +9305,9 @@ impl Scene {
                 PathClass::CodaMark => "coda-mark",
                 PathClass::TextEnclosure => "text-enclosure",
                 PathClass::Tie => "tie",
+                PathClass::Slur => "slur",
+                PathClass::Glissando => "glissando",
+                PathClass::Slide => "slide",
                 PathClass::RepeatBarline => "repeat-barline",
                 PathClass::RepeatDot => "repeat-dot",
                 PathClass::MeasureRepeatDot => "measure-repeat-dot",
@@ -9365,11 +9670,16 @@ fn add_text_item(
     let left = text_x + ink_left.min(0.0);
     let text_right = text_x + ink_right.max(max_line_width);
     let padding = if item.enclosure.is_some() { 3.0 } else { 0.0 };
-    let step = (ink_bottom - ink_top + padding * 2.0 + 4.0).max(item.font_size + 4.0);
+    let step = if item.path_id_prefix == "note-span" {
+        (ink_bottom - ink_top + padding * 2.0 + 5.0).max(item.font_size + 5.0)
+    } else {
+        (ink_bottom - ink_top + padding * 2.0 + 4.0).max(item.font_size + 4.0)
+    };
     let fixed_metronome_position = item.path_id_prefix == "metronome"
         && (item.default_x.is_some() || item.relative_x.is_some())
         && (item.default_y.is_some() || item.relative_y.is_some());
     let mut shift: f64 = 0.0;
+    let mut note_span_collision_attempt = 0usize;
     let (box_left, box_top, box_right, box_bottom) = loop {
         let candidate = enclosure_bounds(
             item.enclosure.as_deref(),
@@ -9401,17 +9711,28 @@ fn add_text_item(
             ));
             break candidate;
         }
-        let collision_side = if base_y < 68.0 {
-            TextPlacement::Above
-        } else if base_y > 68.0 {
-            TextPlacement::Below
+        if item.path_id_prefix == "note-span" {
+            const ABOVE_ATTEMPTS: usize = 8;
+            let distance = if note_span_collision_attempt < ABOVE_ATTEMPTS {
+                -((note_span_collision_attempt + 1) as f64 * 2.0)
+            } else {
+                (note_span_collision_attempt - ABOVE_ATTEMPTS + 1) as f64 * 2.0
+            };
+            shift = distance;
+            note_span_collision_attempt += 1;
         } else {
-            item.placement
-        };
-        shift += match collision_side {
-            TextPlacement::Above => -step,
-            TextPlacement::Below => step,
-        };
+            let collision_side = if base_y < 68.0 {
+                TextPlacement::Above
+            } else if base_y > 68.0 {
+                TextPlacement::Below
+            } else {
+                item.placement
+            };
+            shift += match collision_side {
+                TextPlacement::Above => -step,
+                TextPlacement::Below => step,
+            };
+        }
     };
     layout.occupied.push(TextBounds {
         left: box_left,
@@ -9443,6 +9764,10 @@ fn add_text_item(
             "metronome" => (
                 format!("metronome-{index}-glyph-{glyph_index}"),
                 PathClass::MetronomeMark,
+            ),
+            "note-span" => (
+                format!("note-span-label-{index}-glyph-{glyph_index}"),
+                PathClass::TextGlyph,
             ),
             _ => (
                 format!("text-{index}-glyph-{glyph_index}"),
@@ -10558,6 +10883,7 @@ fn render_part_svg(
     let mut pending_texts = Vec::new();
     let mut notation_bounds = Vec::new();
     let mut system_notation_bounds = Vec::new();
+    let mut span_anchors = Vec::new();
     let system_count = system_layout.map_or(1, |layout| layout.starts.len());
     let mut system_vertical_bounds = vec![
         VerticalBounds {
@@ -10845,6 +11171,31 @@ fn render_part_svg(
                     tone_x
                 })
                 .collect::<Vec<_>>();
+            for mark in &event.spans {
+                let tone_index = mark.tone_index.min(event.tones.len() - 1);
+                let tone = &event.tones[tone_index];
+                let above = mark
+                    .orientation
+                    .as_deref()
+                    .map(|orientation| orientation == "over")
+                    .or_else(|| {
+                        mark.placement
+                            .map(|placement| placement == MarkPlacement::Above)
+                    })
+                    .unwrap_or(true);
+                let y = if mark.kind == NoteSpanKind::Slur {
+                    tone.glyph_top() + if above { -8 } else { 28 }
+                } else {
+                    tone.glyph_top() + if above { -4 } else { 20 }
+                };
+                span_anchors.push(NoteSpanAnchor {
+                    mark: mark.clone(),
+                    voice_id: event.voice_id.clone(),
+                    system_index,
+                    x: tone_xs[tone_index] + 6,
+                    y,
+                });
+            }
             let leftmost_tone_x = *tone_xs.iter().min().expect("event has tones");
             let rightmost_tone_x = *tone_xs.iter().max().expect("event has tones");
             let mut event_mark_bounds = event
@@ -11977,6 +12328,18 @@ fn render_part_svg(
         system_bounds.push(ComponentBounds::filled(26.0, 49.0, 38.0, 67.0));
         system_bounds.push(ComponentBounds::filled(26.0, 69.0, 38.0, 87.0));
     }
+    let span_labels = add_note_span_paths(
+        span_anchors,
+        NoteSpanRenderContext {
+            scene: &mut scene,
+            system_ends: &system_ends,
+            barline_positions: &barline_positions,
+            system_notation_bounds: &mut system_notation_bounds,
+            system_layout,
+            part_index,
+            part_count,
+        },
+    );
     pending_texts.sort_by_key(|(text, _, _, _, system_index)| {
         (*system_index, text.path_id_prefix == "metronome")
     });
@@ -12015,6 +12378,69 @@ fn render_part_svg(
         system_vertical_bounds[system_index].bottom =
             system_vertical_bounds[system_index].bottom.max(view_bottom);
     }
+    for label in span_labels {
+        if current_text_system != Some(label.system_index) {
+            occupied_text.clear();
+            current_text_system = Some(label.system_index);
+            view_top = system_vertical_bounds[label.system_index].top;
+            view_bottom = system_vertical_bounds[label.system_index].bottom;
+        }
+        scene.set_system_y_offset(system_y_offset(
+            system_layout,
+            label.system_index,
+            part_index,
+            part_count,
+        ));
+        let text = PositionedText {
+            event_index: 0,
+            input_staff: None,
+            offset_x: 0.0,
+            text: label.text.clone(),
+            placement: TextPlacement::Above,
+            font_size: 7.0,
+            color: "#171717".to_owned(),
+            enclosure: None,
+            default_x: None,
+            default_y: None,
+            relative_x: None,
+            relative_y: Some((16.0 - f64::from(label.y + 1)) / 2.0),
+            path_glyph: None,
+            path_id_prefix: "note-span",
+            path_scale: 1.0,
+            path_y_offset: 0.0,
+            data_value: Some(label.text.clone()),
+            metronome: None,
+        };
+        let scale = text.font_size / noto_sans_glyphs::UNITS_PER_EM;
+        let width = text
+            .text
+            .chars()
+            .filter_map(noto_sans_glyphs::glyph)
+            .map(|glyph| glyph.advance * scale)
+            .sum::<f64>();
+        add_text_item(
+            &mut scene,
+            &text,
+            text_item_index + label.index,
+            f64::from(label.center_x) - width / 2.0,
+            0.0,
+            &mut TextLayoutContext {
+                occupied: &mut occupied_text,
+                notation_bounds: &system_notation_bounds[label.system_index],
+                warnings,
+                left: &mut left,
+                right: &mut right,
+                view_top: &mut view_top,
+                view_bottom: &mut view_bottom,
+            },
+        );
+        system_vertical_bounds[label.system_index].top =
+            system_vertical_bounds[label.system_index].top.min(view_top);
+        system_vertical_bounds[label.system_index].bottom = system_vertical_bounds
+            [label.system_index]
+            .bottom
+            .max(view_bottom);
+    }
     view_top = system_vertical_bounds
         .iter()
         .map(|bounds| bounds.top)
@@ -12043,6 +12469,202 @@ fn render_part_svg(
         view_left: left,
         system_vertical_bounds,
     }
+}
+
+fn add_note_span_paths(
+    anchors: Vec<NoteSpanAnchor>,
+    context: NoteSpanRenderContext<'_>,
+) -> Vec<NoteSpanLabel> {
+    let NoteSpanRenderContext {
+        scene,
+        system_ends,
+        barline_positions,
+        system_notation_bounds,
+        system_layout,
+        part_index,
+        part_count,
+    } = context;
+    let mut active: Vec<NoteSpanAnchor> = Vec::new();
+    let mut span_index = 0;
+    let mut labels = Vec::new();
+    let mut placed_segments: Vec<(usize, i32, i32, i32, i32, i32)> = Vec::new();
+    for anchor in anchors {
+        if anchor.mark.endpoint == NoteSpanEndpoint::Start {
+            active.push(anchor);
+            continue;
+        }
+        let Some(position) = active.iter().rposition(|start| {
+            start.mark.kind == anchor.mark.kind
+                && start.mark.number == anchor.mark.number
+                && start.voice_id == anchor.voice_id
+        }) else {
+            continue;
+        };
+        let start = active.remove(position);
+        let system_start = start.system_index;
+        let system_end = anchor.system_index;
+        let mut start_segment_y_offset = 0;
+        for system_index in system_start..=system_end {
+            let left_x = if system_index == system_start {
+                start.x + NOTE_SPAN_TONEHEAD_INSET
+            } else {
+                92
+            };
+            let right_x = if system_index == system_end {
+                anchor.x - NOTE_SPAN_TONEHEAD_INSET
+            } else {
+                barline_positions[system_ends[system_index] - 1]
+            };
+            let base_start_y = start.y;
+            let base_end_y = if system_index == system_end {
+                anchor.y
+            } else {
+                start.y
+            };
+            let left_edge = left_x.min(right_x);
+            let right_edge = left_x.max(right_x);
+            let curve_padding = if start.mark.kind == NoteSpanKind::Slur {
+                12
+            } else if start.mark.line_type == "wavy" {
+                2
+            } else {
+                0
+            };
+            let base_top = base_start_y.min(base_end_y) - curve_padding;
+            let base_bottom = base_start_y.max(base_end_y) + curve_padding;
+            let preferred_direction = if start.mark.number % 2 == 1 { -1 } else { 1 };
+            let mut candidate_offsets = (0..=placed_segments.len().saturating_add(2))
+                .map(|candidate| match candidate {
+                    0 => 0,
+                    value if value % 2 == 1 => -((value.div_ceil(2) * 4) as i32),
+                    value => (value / 2 * 4) as i32,
+                })
+                .collect::<Vec<_>>();
+            candidate_offsets.sort_by_key(|candidate| {
+                (
+                    i32::from(candidate.signum() != preferred_direction),
+                    candidate.abs(),
+                )
+            });
+            let y_offset = candidate_offsets
+                .into_iter()
+                .find(|candidate| {
+                    placed_segments.iter().all(
+                        |(
+                            other_system,
+                            other_left,
+                            other_right,
+                            other_top,
+                            other_bottom,
+                            other_y,
+                        )| {
+                            *other_system != system_index
+                                || left_edge >= *other_right
+                                || right_edge <= *other_left
+                                || base_top + candidate >= other_bottom + other_y + 4
+                                || base_bottom + candidate <= other_top + other_y - 4
+                        },
+                    )
+                })
+                .unwrap_or(0);
+            placed_segments.push((
+                system_index,
+                left_edge,
+                right_edge,
+                base_top,
+                base_bottom,
+                y_offset,
+            ));
+            if system_index == system_start {
+                start_segment_y_offset = y_offset;
+            }
+            let start_y = base_start_y + y_offset;
+            let end_y = base_end_y + y_offset;
+            let width = right_x - left_x;
+            if start.mark.kind != NoteSpanKind::Slur {
+                system_notation_bounds[system_index].push(ComponentBounds::stroked(
+                    f64::from(left_edge),
+                    f64::from(base_top + y_offset),
+                    f64::from(right_edge),
+                    f64::from(base_bottom + y_offset),
+                    1.5,
+                ));
+            }
+            let path = if start.mark.kind == NoteSpanKind::Slur {
+                let curve = if start.y < 68 { -12 } else { 12 };
+                format!(
+                    "M{left_x} {start_y}C{} {} {} {} {right_x} {end_y}",
+                    left_x + width / 3,
+                    start_y + curve,
+                    right_x - width / 3,
+                    end_y + curve
+                )
+            } else if start.mark.line_type == "wavy" {
+                let segments = (width / 8).max(2);
+                let mut path = format!("M{left_x} {start_y}");
+                for segment in 1..=segments {
+                    let progress = f64::from(segment) / f64::from(segments);
+                    let x = f64::from(left_x) + f64::from(width) * progress;
+                    let y = f64::from(start_y)
+                        + f64::from(end_y - start_y) * progress
+                        + if segment == segments {
+                            0.0
+                        } else if segment % 2 == 0 {
+                            -2.0
+                        } else {
+                            2.0
+                        };
+                    path.push_str(&format!("L{:.1} {:.1}", x, y));
+                }
+                path
+            } else {
+                format!("M{left_x} {start_y}L{right_x} {end_y}")
+            };
+            let (class, prefix) = match start.mark.kind {
+                NoteSpanKind::Slur => (PathClass::Slur, "slur"),
+                NoteSpanKind::Glissando => (PathClass::Glissando, "glissando"),
+                NoteSpanKind::Slide => (PathClass::Slide, "slide"),
+            };
+            let style = match start.mark.line_type.as_str() {
+                "dashed" => PathStyle::DashedStroke,
+                "dotted" => PathStyle::DottedStroke,
+                "wavy" => PathStyle::MediumStroke,
+                _ => PathStyle::MediumOutline,
+            };
+            let system_offset =
+                system_y_offset(system_layout, system_index, part_index, part_count);
+            scene.set_system_y_offset(system_offset);
+            scene.add_path(
+                DrawLayer::Tie,
+                format!(
+                    "{prefix}-{}-{span_index}-system-{system_index}",
+                    start.mark.number
+                ),
+                Some(class),
+                Vec::new(),
+                PathGeometry::new(None, path, style),
+            );
+        }
+        if let Some(label) = start.mark.label.as_deref() {
+            let center_x = if system_start == system_end {
+                (start.x + anchor.x) / 2
+            } else {
+                start.x + 24
+            };
+            labels.push(NoteSpanLabel {
+                text: label.to_owned(),
+                center_x,
+                y: (start.y + anchor.y) / 2 + start_segment_y_offset,
+                system_index: system_start,
+                index: span_index,
+            });
+        }
+        span_index += 1;
+        if anchor.mark.endpoint == NoteSpanEndpoint::Continue {
+            active.push(anchor);
+        }
+    }
+    labels
 }
 
 fn add_partial_tie_path(scene: &mut Scene, id: String, tone_x: i32, tie_y: i32, is_start: bool) {
@@ -12320,34 +12942,64 @@ fn beam_segment_path(
 
 fn glyph_path(value: u8) -> &'static str {
     match value {
-        0 => "M6 1C2.8 1 1 3.5 1 9S2.8 17 6 17 11 14.5 11 9 9.2 1 6 1ZM6 3.5C7.7 3.5 8.4 5.2 8.4 9S7.7 14.5 6 14.5 3.6 12.8 3.6 9 4.3 3.5 6 3.5Z",
+        0 => {
+            "M6 1C2.8 1 1 3.5 1 9S2.8 17 6 17 11 14.5 11 9 9.2 1 6 1ZM6 3.5C7.7 3.5 8.4 5.2 8.4 9S7.7 14.5 6 14.5 3.6 12.8 3.6 9 4.3 3.5 6 3.5Z"
+        }
         1 => "M2 5.1L6.1 1.5H8.8V16.5H5.9V5.1L3.3 7.2Z",
-        2 => "M2 4.7C2 2.6 3.8 1 6.2 1S10.5 2.4 10.5 4.8C10.5 7.2 9.2 8.8 7.2 10.7L4.7 14.2H10.8V16.5H1.2V14.6L5.5 9.7C7.2 7.8 8 6.5 8 4.9 8 3.8 7.3 3.3 6.2 3.3S4.4 4 4.4 5.2V6H2Z",
-        3 => "M2 3.1C3 1.7 4.3 1 6.3 1 9 1 10.6 2.4 10.6 4.7 10.6 6.3 9.8 7.4 8.4 8 10 8.5 11 9.8 11 11.8 11 14.8 9 17 6 17 4 17 2.6 16.1 1.4 14.5L3.2 13C3.9 14 4.8 14.5 6 14.5 7.6 14.5 8.4 13.6 8.4 11.8 8.4 10.1 7.6 9.3 5.7 9.3H4.5V7H5.8C7.4 7 8.1 6.3 8.1 4.9 8.1 3.7 7.5 3.3 6.2 3.3 5.2 3.3 4.4 3.7 3.8 4.6Z",
+        2 => {
+            "M2 4.7C2 2.6 3.8 1 6.2 1S10.5 2.4 10.5 4.8C10.5 7.2 9.2 8.8 7.2 10.7L4.7 14.2H10.8V16.5H1.2V14.6L5.5 9.7C7.2 7.8 8 6.5 8 4.9 8 3.8 7.3 3.3 6.2 3.3S4.4 4 4.4 5.2V6H2Z"
+        }
+        3 => {
+            "M2 3.1C3 1.7 4.3 1 6.3 1 9 1 10.6 2.4 10.6 4.7 10.6 6.3 9.8 7.4 8.4 8 10 8.5 11 9.8 11 11.8 11 14.8 9 17 6 17 4 17 2.6 16.1 1.4 14.5L3.2 13C3.9 14 4.8 14.5 6 14.5 7.6 14.5 8.4 13.6 8.4 11.8 8.4 10.1 7.6 9.3 5.7 9.3H4.5V7H5.8C7.4 7 8.1 6.3 8.1 4.9 8.1 3.7 7.5 3.3 6.2 3.3 5.2 3.3 4.4 3.7 3.8 4.6Z"
+        }
         4 => "M7.2 1H9.8V10.4H11V12.8H9.8V16.5H7.1V12.8H1V10.4ZM7.1 5.2L3.6 10.4H7.1Z",
-        5 => "M2.1 1.5H10.7V3.9H4.4V6.9C5.1 6.4 6 6.1 7 6.1 9.6 6.1 11 8 11 11.2 11 14.8 9.2 17 6.2 17 4.2 17 2.8 16.2 1.6 14.7L3.4 13.1C4.1 14 5 14.5 6.2 14.5 7.7 14.5 8.4 13.4 8.4 11.3 8.4 9.3 7.8 8.4 6.5 8.4 5.6 8.4 4.9 8.8 4.4 9.5H2.1Z",
-        6 => "M8.9 1.3L10.3 3.2C8.4 4.4 6.7 5.8 5.4 7.5 6 7.1 6.8 6.9 7.5 6.9 9.8 6.9 11 8.7 11 11.5 11 14.9 9.1 17 6.1 17 3 17 1 14.9 1 11.5 1 7.2 4.2 3.4 8.9 1.3ZM6.1 9.2C4.5 9.2 3.6 10.1 3.6 11.9 3.6 13.7 4.4 14.6 6.1 14.6 7.7 14.6 8.4 13.7 8.4 11.9 8.4 10.1 7.7 9.2 6.1 9.2Z",
+        5 => {
+            "M2.1 1.5H10.7V3.9H4.4V6.9C5.1 6.4 6 6.1 7 6.1 9.6 6.1 11 8 11 11.2 11 14.8 9.2 17 6.2 17 4.2 17 2.8 16.2 1.6 14.7L3.4 13.1C4.1 14 5 14.5 6.2 14.5 7.7 14.5 8.4 13.4 8.4 11.3 8.4 9.3 7.8 8.4 6.5 8.4 5.6 8.4 4.9 8.8 4.4 9.5H2.1Z"
+        }
+        6 => {
+            "M8.9 1.3L10.3 3.2C8.4 4.4 6.7 5.8 5.4 7.5 6 7.1 6.8 6.9 7.5 6.9 9.8 6.9 11 8.7 11 11.5 11 14.9 9.1 17 6.1 17 3 17 1 14.9 1 11.5 1 7.2 4.2 3.4 8.9 1.3ZM6.1 9.2C4.5 9.2 3.6 10.1 3.6 11.9 3.6 13.7 4.4 14.6 6.1 14.6 7.7 14.6 8.4 13.7 8.4 11.9 8.4 10.1 7.7 9.2 6.1 9.2Z"
+        }
         7 => "M1.5 1.5H11V3.6L5.6 16.5H2.7L8 3.9H1.5Z",
-        8 => "M6 1C9 1 10.7 2.4 10.7 4.8 10.7 6.3 9.9 7.4 8.6 8 10.2 8.6 11 9.8 11 11.8 11 15.1 9.2 17 6 17 2.8 17 1 15.1 1 11.8 1 9.8 1.8 8.6 3.4 8 2.1 7.4 1.3 6.3 1.3 4.8 1.3 2.4 3 1 6 1ZM6 3.3C4.7 3.3 4 3.9 4 5.1 4 6.3 4.7 7 6 7S8 6.3 8 5.1C8 3.9 7.3 3.3 6 3.3ZM6 9.3C4.4 9.3 3.6 10.1 3.6 11.9 3.6 13.7 4.4 14.6 6 14.6S8.4 13.7 8.4 11.9C8.4 10.1 7.6 9.3 6 9.3Z",
-        9 => "M3.1 16.7L1.7 14.8C3.6 13.6 5.3 12.2 6.6 10.5 6 10.9 5.2 11.1 4.5 11.1 2.2 11.1 1 9.3 1 6.5 1 3.1 2.9 1 5.9 1 9 1 11 3.1 11 6.5 11 10.8 7.8 14.6 3.1 16.7ZM5.9 8.8C7.5 8.8 8.4 7.9 8.4 6.1 8.4 4.3 7.6 3.4 5.9 3.4 4.3 3.4 3.6 4.3 3.6 6.1 3.6 7.9 4.3 8.8 5.9 8.8Z",
+        8 => {
+            "M6 1C9 1 10.7 2.4 10.7 4.8 10.7 6.3 9.9 7.4 8.6 8 10.2 8.6 11 9.8 11 11.8 11 15.1 9.2 17 6 17 2.8 17 1 15.1 1 11.8 1 9.8 1.8 8.6 3.4 8 2.1 7.4 1.3 6.3 1.3 4.8 1.3 2.4 3 1 6 1ZM6 3.3C4.7 3.3 4 3.9 4 5.1 4 6.3 4.7 7 6 7S8 6.3 8 5.1C8 3.9 7.3 3.3 6 3.3ZM6 9.3C4.4 9.3 3.6 10.1 3.6 11.9 3.6 13.7 4.4 14.6 6 14.6S8.4 13.7 8.4 11.9C8.4 10.1 7.6 9.3 6 9.3Z"
+        }
+        9 => {
+            "M3.1 16.7L1.7 14.8C3.6 13.6 5.3 12.2 6.6 10.5 6 10.9 5.2 11.1 4.5 11.1 2.2 11.1 1 9.3 1 6.5 1 3.1 2.9 1 5.9 1 9 1 11 3.1 11 6.5 11 10.8 7.8 14.6 3.1 16.7ZM5.9 8.8C7.5 8.8 8.4 7.9 8.4 6.1 8.4 4.3 7.6 3.4 5.9 3.4 4.3 3.4 3.6 4.3 3.6 6.1 3.6 7.9 4.3 8.8 5.9 8.8Z"
+        }
         10 => glyph_path(2),
-        11 => "M10 3.1C9 1.7 7.7 1 5.7 1 3 1 1.4 2.4 1.4 4.7 1.4 6.3 2.2 7.4 3.6 8 2 8.5 1 9.8 1 11.8 1 14.8 3 17 6 17 8 17 9.4 16.1 10.6 14.5L8.8 13C8.1 14 7.2 14.5 6 14.5 4.4 14.5 3.6 13.6 3.6 11.8 3.6 10.1 4.4 9.3 6.3 9.3H7.5V7H6.2C4.6 7 3.9 6.3 3.9 4.9 3.9 3.7 4.5 3.3 5.8 3.3 6.8 3.3 7.6 3.7 8.2 4.6Z",
+        11 => {
+            "M10 3.1C9 1.7 7.7 1 5.7 1 3 1 1.4 2.4 1.4 4.7 1.4 6.3 2.2 7.4 3.6 8 2 8.5 1 9.8 1 11.8 1 14.8 3 17 6 17 8 17 9.4 16.1 10.6 14.5L8.8 13C8.1 14 7.2 14.5 6 14.5 4.4 14.5 3.6 13.6 3.6 11.8 3.6 10.1 4.4 9.3 6.3 9.3H7.5V7H6.2C4.6 7 3.9 6.3 3.9 4.9 3.9 3.7 4.5 3.3 5.8 3.3 6.8 3.3 7.6 3.7 8.2 4.6Z"
+        }
         _ => unreachable!("tone values are reduced to one dozenal digit"),
     }
 }
 
 fn time_signature_glyph_path(value: u8) -> &'static str {
     match value {
-        0 => "M6 1C2.7 1 1 3.5 1 9S2.7 17 6 17 11 14.5 11 9 9.3 1 6 1ZM6 3.8C7.4 3.8 8.1 5.4 8.1 9S7.4 14.2 6 14.2 3.9 12.6 3.9 9 4.6 3.8 6 3.8Z",
+        0 => {
+            "M6 1C2.7 1 1 3.5 1 9S2.7 17 6 17 11 14.5 11 9 9.3 1 6 1ZM6 3.8C7.4 3.8 8.1 5.4 8.1 9S7.4 14.2 6 14.2 3.9 12.6 3.9 9 4.6 3.8 6 3.8Z"
+        }
         1 => "M2 4L6 1H9V14.5H11V17H1V14.5H4V5.1L2 6.4Z",
-        2 => "M1.2 4.8C1.2 2.4 3.1 1 6.1 1 9.2 1 10.8 2.4 10.8 4.8 10.8 7.3 9.3 9.1 7.2 11.1L4.4 14.3H11V17H1V14.8L5.2 10C7.1 7.9 8 6.5 8 4.9 8 3.7 7.3 3.3 6.1 3.3 4.8 3.3 4.1 3.9 4.1 5.2V6H1.2Z",
-        3 => "M1.5 3.3C2.6 1.7 4.1 1 6.3 1 9.1 1 10.7 2.4 10.7 4.7 10.7 6.3 9.9 7.4 8.4 8 10.1 8.6 11 9.9 11 11.9 11 15.1 9.2 17 6.1 17 4 17 2.5 16.2 1.2 14.5L3.3 12.9C4 13.9 4.9 14.4 6.1 14.4 7.7 14.4 8.4 13.6 8.4 11.9 8.4 10.2 7.7 9.3 5.8 9.3H4.6V7H5.8C7.4 7 8.1 6.3 8.1 4.9 8.1 3.8 7.5 3.4 6.3 3.4 5.2 3.4 4.5 3.8 3.8 4.8Z",
+        2 => {
+            "M1.2 4.8C1.2 2.4 3.1 1 6.1 1 9.2 1 10.8 2.4 10.8 4.8 10.8 7.3 9.3 9.1 7.2 11.1L4.4 14.3H11V17H1V14.8L5.2 10C7.1 7.9 8 6.5 8 4.9 8 3.7 7.3 3.3 6.1 3.3 4.8 3.3 4.1 3.9 4.1 5.2V6H1.2Z"
+        }
+        3 => {
+            "M1.5 3.3C2.6 1.7 4.1 1 6.3 1 9.1 1 10.7 2.4 10.7 4.7 10.7 6.3 9.9 7.4 8.4 8 10.1 8.6 11 9.9 11 11.9 11 15.1 9.2 17 6.1 17 4 17 2.5 16.2 1.2 14.5L3.3 12.9C4 13.9 4.9 14.4 6.1 14.4 7.7 14.4 8.4 13.6 8.4 11.9 8.4 10.2 7.7 9.3 5.8 9.3H4.6V7H5.8C7.4 7 8.1 6.3 8.1 4.9 8.1 3.8 7.5 3.4 6.3 3.4 5.2 3.4 4.5 3.8 3.8 4.8Z"
+        }
         4 => "M7.3 1H10V10.2H11.5V12.8H10V17H7.2V12.8H0.8V10.3ZM7.2 5.2L3.7 10.2H7.2Z",
-        5 => "M1.4 1.5H10.8V4.1H4.2V7C5 6.4 5.9 6.1 7 6.1 9.6 6.1 11 8 11 11.4 11 15 9.2 17 6.1 17 4 17 2.5 16.2 1.2 14.6L3.3 12.9C4 13.9 4.9 14.4 6.1 14.4 7.6 14.4 8.4 13.4 8.4 11.4 8.4 9.4 7.8 8.5 6.5 8.5 5.6 8.5 4.8 8.9 4.3 9.7H1.4Z",
-        6 => "M8.9 1.2L10.8 3.2C8.5 4.8 6.6 6.5 5.2 8.1 5.8 7.6 6.7 7.3 7.6 7.3 9.8 7.3 11 9.1 11 11.8 11 15.1 9.2 17 6.1 17 2.9 17 1 15 1 11.6 1 7.1 4.1 3.3 8.9 1.2ZM6.1 9.5C4.5 9.5 3.7 10.4 3.7 12 3.7 13.7 4.5 14.5 6.1 14.5 7.6 14.5 8.4 13.7 8.4 12 8.4 10.4 7.6 9.5 6.1 9.5Z",
+        5 => {
+            "M1.4 1.5H10.8V4.1H4.2V7C5 6.4 5.9 6.1 7 6.1 9.6 6.1 11 8 11 11.4 11 15 9.2 17 6.1 17 4 17 2.5 16.2 1.2 14.6L3.3 12.9C4 13.9 4.9 14.4 6.1 14.4 7.6 14.4 8.4 13.4 8.4 11.4 8.4 9.4 7.8 8.5 6.5 8.5 5.6 8.5 4.8 8.9 4.3 9.7H1.4Z"
+        }
+        6 => {
+            "M8.9 1.2L10.8 3.2C8.5 4.8 6.6 6.5 5.2 8.1 5.8 7.6 6.7 7.3 7.6 7.3 9.8 7.3 11 9.1 11 11.8 11 15.1 9.2 17 6.1 17 2.9 17 1 15 1 11.6 1 7.1 4.1 3.3 8.9 1.2ZM6.1 9.5C4.5 9.5 3.7 10.4 3.7 12 3.7 13.7 4.5 14.5 6.1 14.5 7.6 14.5 8.4 13.7 8.4 12 8.4 10.4 7.6 9.5 6.1 9.5Z"
+        }
         7 => "M0.8 1.5H11V4L5.4 17H2.3L7.9 4.1H0.8Z",
-        8 => "M6 1C9.1 1 10.8 2.4 10.8 4.8 10.8 6.3 10 7.4 8.6 8 10.2 8.6 11 9.9 11 11.9 11 15.1 9.2 17 6 17S1 15.1 1 11.9C1 9.9 1.8 8.6 3.4 8 2 7.4 1.2 6.3 1.2 4.8 1.2 2.4 2.9 1 6 1ZM6 3.4C4.7 3.4 4 4 4 5.2S4.7 7 6 7 8 6.4 8 5.2 7.3 3.4 6 3.4ZM6 9.4C4.4 9.4 3.6 10.2 3.6 12S4.4 14.5 6 14.5 8.4 13.7 8.4 12 7.6 9.4 6 9.4Z",
-        9 => "M3.1 16.8L1.2 14.8C3.5 13.2 5.4 11.5 6.8 9.9 6.2 10.4 5.3 10.7 4.4 10.7 2.2 10.7 1 8.9 1 6.2 1 3 2.9 1 6 1 9.2 1 11 3.1 11 6.5 11 10.9 7.9 14.7 3.1 16.8ZM6 8.3C7.6 8.3 8.4 7.4 8.4 5.9 8.4 4.3 7.6 3.5 6 3.5 4.4 3.5 3.6 4.3 3.6 5.9 3.6 7.4 4.4 8.3 6 8.3Z",
+        8 => {
+            "M6 1C9.1 1 10.8 2.4 10.8 4.8 10.8 6.3 10 7.4 8.6 8 10.2 8.6 11 9.9 11 11.9 11 15.1 9.2 17 6 17S1 15.1 1 11.9C1 9.9 1.8 8.6 3.4 8 2 7.4 1.2 6.3 1.2 4.8 1.2 2.4 2.9 1 6 1ZM6 3.4C4.7 3.4 4 4 4 5.2S4.7 7 6 7 8 6.4 8 5.2 7.3 3.4 6 3.4ZM6 9.4C4.4 9.4 3.6 10.2 3.6 12S4.4 14.5 6 14.5 8.4 13.7 8.4 12 7.6 9.4 6 9.4Z"
+        }
+        9 => {
+            "M3.1 16.8L1.2 14.8C3.5 13.2 5.4 11.5 6.8 9.9 6.2 10.4 5.3 10.7 4.4 10.7 2.2 10.7 1 8.9 1 6.2 1 3 2.9 1 6 1 9.2 1 11 3.1 11 6.5 11 10.9 7.9 14.7 3.1 16.8ZM6 8.3C7.6 8.3 8.4 7.4 8.4 5.9 8.4 4.3 7.6 3.5 6 3.5 4.4 3.5 3.6 4.3 3.6 5.9 3.6 7.4 4.4 8.3 6 8.3Z"
+        }
         10 => glyph_path(10),
         11 => glyph_path(11),
         _ => unreachable!("time signatures are validated before rendering"),
