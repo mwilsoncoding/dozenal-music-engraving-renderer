@@ -354,6 +354,7 @@ struct Measure {
     beat_repeat_segments: Vec<BeatRepeatSegment>,
     input_staff_states: Vec<InputStaffState>,
     barlines: Vec<MeasureBarline>,
+    new_page_before: bool,
 }
 
 #[derive(Clone)]
@@ -445,17 +446,17 @@ struct ScorePart {
     instrument_ids: Vec<String>,
 }
 
-struct SvgViewBox {
-    left: i32,
-    top: i32,
-    width: i32,
-    height: i32,
-}
-
 struct RenderedPart {
     svg: String,
-    view_box: SvgViewBox,
     barline_positions: Vec<i32>,
+    view_left: i32,
+    system_vertical_bounds: Vec<VerticalBounds>,
+}
+
+#[derive(Clone, Copy)]
+struct VerticalBounds {
+    top: i32,
+    bottom: i32,
 }
 
 const SYSTEM_MAX_WIDTH: i32 = 680;
@@ -468,6 +469,7 @@ struct SystemLayout {
     local_barline_positions: Vec<i32>,
     x_offsets: Vec<i32>,
     gap_expansions: Vec<i32>,
+    system_y_offsets: Vec<i32>,
 }
 
 #[derive(Clone)]
@@ -604,6 +606,7 @@ struct CliOptions {
     output_path: Option<PathBuf>,
     input_staff_mode: InputStaffMode,
     system_alignment: SystemAlignment,
+    page_size: PageSize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -619,6 +622,24 @@ enum SystemAlignment {
     Right,
     Centered,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PageSize {
+    A4,
+    Letter,
+}
+
+impl PageSize {
+    fn dimensions(self) -> (i32, i32, &'static str, &'static str, f64) {
+        match self {
+            Self::A4 => (794, 1123, "210mm", "297mm", 297.0),
+            Self::Letter => (816, 1056, "215.9mm", "279.4mm", 279.4),
+        }
+    }
+}
+
+const PAGE_MARGIN: i32 = 57;
+const PAGE_GUTTER: i32 = 24;
 
 fn main() {
     if let Err(message) = run() {
@@ -648,7 +669,12 @@ fn run() -> Result<(), String> {
 
     let rendered_outputs = match options.input_staff_mode {
         InputStaffMode::Combine => {
-            let svg = render_svg_with_alignment(&score, &mut warnings, options.system_alignment)?;
+            let svg = render_svg_with_alignment(
+                &score,
+                &mut warnings,
+                options.system_alignment,
+                options.page_size,
+            )?;
             vec![(output_path, svg)]
         }
         InputStaffMode::Separate => {
@@ -666,6 +692,7 @@ fn run() -> Result<(), String> {
                     &staff_score,
                     &mut warnings,
                     options.system_alignment,
+                    options.page_size,
                 )?;
                 outputs.push((path, svg));
             }
@@ -692,6 +719,7 @@ fn parse_args() -> Result<CliOptions, String> {
     let mut output = None;
     let mut input_staff_mode = None;
     let mut system_alignment = None;
+    let mut page_size = None;
 
     while let Some(argument) = args.next() {
         if argument == "--output" {
@@ -746,6 +774,26 @@ fn parse_args() -> Result<CliOptions, String> {
                     }
                 },
             );
+        } else if argument == "--page-size" {
+            if page_size.is_some() {
+                return Err("--page-size may only be specified once".to_owned());
+            }
+            page_size = Some(
+                match args
+                    .next()
+                    .ok_or_else(|| "--page-size requires a4 or letter".to_owned())?
+                    .to_string_lossy()
+                    .as_ref()
+                {
+                    "a4" => PageSize::A4,
+                    "letter" => PageSize::Letter,
+                    value => {
+                        return Err(format!(
+                            "--page-size must be 'a4' or 'letter', not {value:?}"
+                        ));
+                    }
+                },
+            );
         } else if argument.to_string_lossy().starts_with('-') {
             return Err(format!("unsupported option {}", argument.to_string_lossy()));
         } else if input.replace(PathBuf::from(argument)).is_some() {
@@ -754,13 +802,14 @@ fn parse_args() -> Result<CliOptions, String> {
     }
 
     let input = input.ok_or_else(|| {
-        "usage: domunor INPUT [--output FILE.svg] [--input-staff-mode combine|separate] [--system-alignment justified|left|right|centered]".to_owned()
+        "usage: domunor INPUT [--output FILE.svg] [--input-staff-mode combine|separate] [--system-alignment justified|left|right|centered] [--page-size a4|letter]".to_owned()
     })?;
     Ok(CliOptions {
         input_path: input,
         output_path: output,
         input_staff_mode: input_staff_mode.unwrap_or(InputStaffMode::Combine),
         system_alignment: system_alignment.unwrap_or(SystemAlignment::Justified),
+        page_size: page_size.unwrap_or(PageSize::A4),
     })
 }
 
@@ -894,6 +943,7 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
                             transposition: staff_state.transposition,
                         }],
                         barlines,
+                        new_page_before: measure.new_page_before,
                     }
                 })
                 .collect();
@@ -1433,6 +1483,18 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
             for child in &measure_element.children {
                 let element = &elements[*child];
                 match element.name.as_str() {
+                    "print" => {
+                        validate_attributes(element, &["new-page"])?;
+                        require_container_text(element)?;
+                        if let Some(value) = optional_attribute(element, "new-page") {
+                            if !matches!(value, "yes" | "no") {
+                                return Err(element_diagnostic(
+                                    element,
+                                    format!("print new-page must be 'yes' or 'no', not {value:?}"),
+                                ));
+                            }
+                        }
+                    }
                     "attributes" => {
                         require_no_attributes(element)?;
                         require_container_text(element)?;
@@ -1738,7 +1800,10 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                     Some(active_tuplet) => {
                                         return Err(element_diagnostic(
                                             element,
-                                            format!("tuplet stop number {number:?} does not match active tuplet {:?}", active_tuplet.number),
+                                            format!(
+                                                "tuplet stop number {number:?} does not match active tuplet {:?}",
+                                                active_tuplet.number
+                                            ),
                                         ));
                                     }
                                     None => {
@@ -1984,7 +2049,10 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                 Some(active_label) => {
                                     return Err(element_diagnostic(
                                         element,
-                                        format!("ending endpoint {:?} does not match active ending {active_label:?}", label.number),
+                                        format!(
+                                            "ending endpoint {:?} does not match active ending {active_label:?}",
+                                            label.number
+                                        ),
                                     ));
                                 }
                                 None => {
@@ -2265,6 +2333,10 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                 beat_repeat_segments,
                 input_staff_states: active_staff_states.clone(),
                 barlines,
+                new_page_before: measure_element.children.iter().any(|child| {
+                    elements[*child].name == "print"
+                        && optional_attribute(&elements[*child], "new-page") == Some("yes")
+                }),
             });
         }
         if measures.is_empty() {
@@ -2347,7 +2419,10 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
             if measures.len() != expected {
                 return Err(element_diagnostic(
                     &elements[part],
-                    format!("Part {score_part_id:?} has {} measures; expected {expected} to align with the other Parts", measures.len()),
+                    format!(
+                        "Part {score_part_id:?} has {} measures; expected {expected} to align with the other Parts",
+                        measures.len()
+                    ),
                 ));
             }
         } else {
@@ -3942,7 +4017,7 @@ fn parse_direction_text(
             return Err(element_diagnostic(
                 element,
                 format!("invalid text enclosure {value:?}"),
-            ))
+            ));
         }
         None if is_rehearsal => Some("square".to_owned()),
         None => None,
@@ -5776,7 +5851,9 @@ fn parse_ornaments(
             }
             warnings.push(element_diagnostic(
                 element,
-                format!("ornament SMuFL override {smufl:?} is not supported; conventional glyph is used"),
+                format!(
+                    "ornament SMuFL override {smufl:?} is not supported; conventional glyph is used"
+                ),
             ));
         }
         if kind.is_none() {
@@ -7751,7 +7828,7 @@ fn transpose_semitones(elements: &[Element], transpose: usize) -> Result<i32, St
                 return Err(element_diagnostic(
                     element,
                     "unsupported transpose element".to_owned(),
-                ))
+                ));
             }
         };
         if order <= previous_order {
@@ -7802,7 +7879,7 @@ fn transpose_semitones(elements: &[Element], transpose: usize) -> Result<i32, St
                         return Err(element_diagnostic(
                             element,
                             "double transposition has an invalid above attribute".to_owned(),
-                        ))
+                        ));
                     }
                 };
                 octave_change = octave_change
@@ -8629,22 +8706,38 @@ fn ornament_layouts(event: &Event, x: i32, stems_up: bool) -> Vec<OrnamentLayout
 
 fn ornament_glyph(kind: OrnamentKind, placement: MarkPlacement) -> &'static str {
     match (kind, placement) {
-        (OrnamentKind::Trill, _) => "M10.14 0C10.04 0 9.89 0.05 9.81 0.07L8.59 0.47C8.36 0.55 8.26 0.62 8.16 0.88L7.26 3.07C7.16 3.32 7.14 3.38 7.06 3.38C6.96 3.38 6.81 3.25 6.59 3.15C6.24 3 5.91 2.92 5.54 2.92C4.36 2.92 3.49 3.62 3.49 4.67C3.49 5.45 4.01 6.1 5.14 6.1C5.44 6.1 5.76 6.05 5.91 6.05C5.96 6.05 5.99 6.07 5.99 6.12C5.99 6.17 5.96 6.25 5.91 6.38L5.64 7.05C5.36 7.72 5.16 8.22 5.16 8.75C5.16 9.45 5.64 10 6.59 10C7.89 10 9.14 8.95 9.14 7.1C9.14 6.5 9.04 5.95 8.81 5.4C8.76 5.27 8.74 5.22 8.74 5.15C8.74 5 8.89 4.88 9.29 4.65L9.44 4.57C10.31 4.05 10.91 3.7 11.39 3.7C11.61 3.7 11.71 3.77 11.71 4.07C11.71 4.32 11.64 4.62 11.56 4.8L9.74 9.32C9.69 9.45 9.66 9.53 9.66 9.6C9.66 9.7 9.74 9.75 9.94 9.75H11.16C11.39 9.75 11.46 9.7 11.56 9.45L13.19 5.4C13.51 4.57 14.31 3.65 14.86 3.65C15.01 3.65 15.11 3.7 15.11 3.8C15.11 4.02 14.56 4.1 14.56 4.8C14.56 5.3 14.94 5.6 15.46 5.6C16.06 5.6 16.51 5.1 16.51 4.22C16.51 3.5 16.14 2.9 15.21 2.9C14.56 2.9 14.04 3.25 13.66 3.67C13.44 3.92 13.41 4.02 13.31 4.02C13.19 4.02 13.29 3.85 13.09 3.47C12.91 3.15 12.54 2.92 11.99 2.92C10.99 2.92 10.04 3.42 9.51 3.7C9.19 3.88 9.04 3.97 8.91 3.97C8.86 3.97 8.84 3.95 8.84 3.9C8.84 3.8 8.91 3.65 8.96 3.52L10.21 0.42C10.26 0.3 10.29 0.22 10.29 0.15C10.29 0.05 10.24 0 10.14 0ZM5.54 3.5C5.84 3.5 6.21 3.6 6.49 3.75C6.71 3.88 6.81 3.97 6.81 4.1C6.81 4.17 6.76 4.3 6.71 4.42L6.61 4.67C6.49 5 6.39 5.08 6.06 5.15C5.74 5.22 5.44 5.27 5.19 5.27C4.36 5.27 4.16 4.88 4.16 4.52C4.16 4.07 4.54 3.5 5.54 3.5ZM8.21 5.58C8.29 5.58 8.29 5.65 8.34 5.78C8.54 6.22 8.56 6.67 8.56 7.12C8.56 8.22 7.89 9.22 7.16 9.22C6.96 9.22 6.89 9.1 6.89 8.93C6.89 8.72 6.99 8.4 7.09 8.15C7.09 8.12 7.11 8.12 8.06 5.75C8.11 5.62 8.14 5.58 8.21 5.58Z",
+        (OrnamentKind::Trill, _) => {
+            "M10.14 0C10.04 0 9.89 0.05 9.81 0.07L8.59 0.47C8.36 0.55 8.26 0.62 8.16 0.88L7.26 3.07C7.16 3.32 7.14 3.38 7.06 3.38C6.96 3.38 6.81 3.25 6.59 3.15C6.24 3 5.91 2.92 5.54 2.92C4.36 2.92 3.49 3.62 3.49 4.67C3.49 5.45 4.01 6.1 5.14 6.1C5.44 6.1 5.76 6.05 5.91 6.05C5.96 6.05 5.99 6.07 5.99 6.12C5.99 6.17 5.96 6.25 5.91 6.38L5.64 7.05C5.36 7.72 5.16 8.22 5.16 8.75C5.16 9.45 5.64 10 6.59 10C7.89 10 9.14 8.95 9.14 7.1C9.14 6.5 9.04 5.95 8.81 5.4C8.76 5.27 8.74 5.22 8.74 5.15C8.74 5 8.89 4.88 9.29 4.65L9.44 4.57C10.31 4.05 10.91 3.7 11.39 3.7C11.61 3.7 11.71 3.77 11.71 4.07C11.71 4.32 11.64 4.62 11.56 4.8L9.74 9.32C9.69 9.45 9.66 9.53 9.66 9.6C9.66 9.7 9.74 9.75 9.94 9.75H11.16C11.39 9.75 11.46 9.7 11.56 9.45L13.19 5.4C13.51 4.57 14.31 3.65 14.86 3.65C15.01 3.65 15.11 3.7 15.11 3.8C15.11 4.02 14.56 4.1 14.56 4.8C14.56 5.3 14.94 5.6 15.46 5.6C16.06 5.6 16.51 5.1 16.51 4.22C16.51 3.5 16.14 2.9 15.21 2.9C14.56 2.9 14.04 3.25 13.66 3.67C13.44 3.92 13.41 4.02 13.31 4.02C13.19 4.02 13.29 3.85 13.09 3.47C12.91 3.15 12.54 2.92 11.99 2.92C10.99 2.92 10.04 3.42 9.51 3.7C9.19 3.88 9.04 3.97 8.91 3.97C8.86 3.97 8.84 3.95 8.84 3.9C8.84 3.8 8.91 3.65 8.96 3.52L10.21 0.42C10.26 0.3 10.29 0.22 10.29 0.15C10.29 0.05 10.24 0 10.14 0ZM5.54 3.5C5.84 3.5 6.21 3.6 6.49 3.75C6.71 3.88 6.81 3.97 6.81 4.1C6.81 4.17 6.76 4.3 6.71 4.42L6.61 4.67C6.49 5 6.39 5.08 6.06 5.15C5.74 5.22 5.44 5.27 5.19 5.27C4.36 5.27 4.16 4.88 4.16 4.52C4.16 4.07 4.54 3.5 5.54 3.5ZM8.21 5.58C8.29 5.58 8.29 5.65 8.34 5.78C8.54 6.22 8.56 6.67 8.56 7.12C8.56 8.22 7.89 9.22 7.16 9.22C6.96 9.22 6.89 9.1 6.89 8.93C6.89 8.72 6.99 8.4 7.09 8.15C7.09 8.12 7.11 8.12 8.06 5.75C8.11 5.62 8.14 5.58 8.21 5.58Z"
+        }
         (OrnamentKind::Turn | OrnamentKind::InvertedTurn, _) => {
             "M16.13 0C14.78 0 13.7 0.61 13.7 1.91C13.7 2.87 14.35 3.48 15.26 3.48C16.52 3.48 16.57 2.48 17.48 2.48C18.22 2.48 18.91 3.39 18.91 4.52C18.91 6.39 17.61 7.3 16.09 7.3C14.7 7.3 13.26 6.13 11.39 4.04C9.26 1.7 7.35 0.04 4.52 0.04C1.65 0.04 0 2.22 0 5C0 8.13 2 9.48 3.87 9.48C5.22 9.48 6.3 8.87 6.3 7.57C6.3 6.61 5.65 6 4.74 6C3.48 6 3.43 7 2.52 7C1.78 7 1.09 6.09 1.09 4.96C1.09 3.09 2.39 2.17 3.91 2.17C5.3 2.17 6.74 3.35 8.61 5.43C10.74 7.78 12.65 9.43 15.48 9.43C18.35 9.43 20 7.26 20 4.48C20 1.35 18 0 16.13 0Z"
         }
-        (OrnamentKind::Mordent, _) => "M8.22 5.18 5.77 2.14C5.57 1.9 5.41 1.68 4.91 1.62C4.72 1.62 4.55 1.68 4.3 1.87C3.03 3.25 1.68 4.82 0.45 6.37C0.24 6.53 0 6.72 0 7C0 7.17 0.14 7.28 0.55 7.28C0.55 7.28 0.55 7.28 0.58 7.28C0.8 7.28 1.05 7.19 1.35 6.92L3.03 5.43C3.12 5.34 3.23 5.32 3.34 5.32C3.48 5.32 3.59 5.43 3.78 5.65C3.89 5.79 5.93 7.91 6.15 8.19C6.26 8.32 6.48 8.38 6.7 8.38C6.92 8.38 7.12 8.32 7.23 8.24L10.21 5.54C10.4 5.37 10.54 5.32 10.62 5.32C10.76 5.32 10.84 5.43 11.06 5.65C11.2 5.79 13.21 7.91 13.46 8.19C13.57 8.32 13.79 8.38 14.01 8.38C14.23 8.38 14.43 8.32 14.54 8.24C14.73 8.08 19.26 3.17 19.61 2.75C19.78 2.53 20 2.23 20 2.12C20 2.03 19.94 1.92 19.83 1.84C19.64 1.7 19.45 1.62 19.26 1.62C19.09 1.62 18.92 1.7 18.76 1.81C18.46 2.06 16.55 4.46 16.25 4.77C16.03 4.96 15.86 5.04 15.72 5.04C15.53 5.04 15.39 4.9 15.26 4.77C15.01 4.52 13.19 2.28 12.91 2.03C12.69 1.81 12.47 1.65 12.28 1.65C12.03 1.65 11.86 1.68 11.61 1.87C11.37 2.09 11.17 2.34 10.98 2.56C10.21 3.41 9.38 4.3 8.5 5.18C8.41 5.29 8.3 5.29 8.22 5.18Z",
-        (OrnamentKind::InvertedMordent, _) => "M10.36 3.44V0H9.57V4.31L8.83 5.18C8.72 5.31 8.57 5.31 8.47 5.18C7.55 4.11 6.17 2.53 6.05 2.35C5.84 2.14 5.69 1.91 5.26 1.89C5.03 1.89 4.9 1.96 4.69 2.12L1.05 6.25C0.89 6.4 0.71 6.66 0.71 6.84C0.71 6.99 0.84 7.09 1.22 7.09C1.63 7.09 1.99 6.73 2.24 6.48C2.58 6.2 2.88 5.89 3.24 5.61C3.49 5.41 3.67 5.28 3.8 5.28C3.93 5.28 4.03 5.38 4.18 5.59L6.4 7.96C6.51 8.09 6.71 8.14 6.91 8.14C7.09 8.14 7.27 8.09 7.37 7.98C7.63 7.83 9.11 6.48 9.52 6.12V10H10.33V5.43C10.43 5.36 10.54 5.31 10.64 5.31C10.77 5.31 10.89 5.38 11.05 5.59C11.15 5.74 13.04 7.7 13.27 7.96C13.37 8.09 13.57 8.14 13.75 8.14C13.95 8.14 14.13 8.09 14.23 7.98C14.44 7.83 18.6 3.29 18.93 2.91L18.98 2.83C19.13 2.68 19.29 2.5 19.29 2.32C19.29 2.24 19.26 2.17 19.16 2.09C18.98 1.96 18.8 1.89 18.62 1.89C18.44 1.89 18.29 1.96 18.16 2.07C17.88 2.3 16.12 4.49 15.82 4.77C15.61 4.95 15.48 5.03 15.36 5.03C15.18 5.03 15.03 4.9 14.9 4.77C14.69 4.57 13.01 2.47 12.76 2.24C12.53 2.04 12.32 1.89 12.12 1.89C11.91 1.89 11.79 1.94 11.56 2.12C11.33 2.3 11.15 2.55 10.97 2.76Z",
+        (OrnamentKind::Mordent, _) => {
+            "M8.22 5.18 5.77 2.14C5.57 1.9 5.41 1.68 4.91 1.62C4.72 1.62 4.55 1.68 4.3 1.87C3.03 3.25 1.68 4.82 0.45 6.37C0.24 6.53 0 6.72 0 7C0 7.17 0.14 7.28 0.55 7.28C0.55 7.28 0.55 7.28 0.58 7.28C0.8 7.28 1.05 7.19 1.35 6.92L3.03 5.43C3.12 5.34 3.23 5.32 3.34 5.32C3.48 5.32 3.59 5.43 3.78 5.65C3.89 5.79 5.93 7.91 6.15 8.19C6.26 8.32 6.48 8.38 6.7 8.38C6.92 8.38 7.12 8.32 7.23 8.24L10.21 5.54C10.4 5.37 10.54 5.32 10.62 5.32C10.76 5.32 10.84 5.43 11.06 5.65C11.2 5.79 13.21 7.91 13.46 8.19C13.57 8.32 13.79 8.38 14.01 8.38C14.23 8.38 14.43 8.32 14.54 8.24C14.73 8.08 19.26 3.17 19.61 2.75C19.78 2.53 20 2.23 20 2.12C20 2.03 19.94 1.92 19.83 1.84C19.64 1.7 19.45 1.62 19.26 1.62C19.09 1.62 18.92 1.7 18.76 1.81C18.46 2.06 16.55 4.46 16.25 4.77C16.03 4.96 15.86 5.04 15.72 5.04C15.53 5.04 15.39 4.9 15.26 4.77C15.01 4.52 13.19 2.28 12.91 2.03C12.69 1.81 12.47 1.65 12.28 1.65C12.03 1.65 11.86 1.68 11.61 1.87C11.37 2.09 11.17 2.34 10.98 2.56C10.21 3.41 9.38 4.3 8.5 5.18C8.41 5.29 8.3 5.29 8.22 5.18Z"
+        }
+        (OrnamentKind::InvertedMordent, _) => {
+            "M10.36 3.44V0H9.57V4.31L8.83 5.18C8.72 5.31 8.57 5.31 8.47 5.18C7.55 4.11 6.17 2.53 6.05 2.35C5.84 2.14 5.69 1.91 5.26 1.89C5.03 1.89 4.9 1.96 4.69 2.12L1.05 6.25C0.89 6.4 0.71 6.66 0.71 6.84C0.71 6.99 0.84 7.09 1.22 7.09C1.63 7.09 1.99 6.73 2.24 6.48C2.58 6.2 2.88 5.89 3.24 5.61C3.49 5.41 3.67 5.28 3.8 5.28C3.93 5.28 4.03 5.38 4.18 5.59L6.4 7.96C6.51 8.09 6.71 8.14 6.91 8.14C7.09 8.14 7.27 8.09 7.37 7.98C7.63 7.83 9.11 6.48 9.52 6.12V10H10.33V5.43C10.43 5.36 10.54 5.31 10.64 5.31C10.77 5.31 10.89 5.38 11.05 5.59C11.15 5.74 13.04 7.7 13.27 7.96C13.37 8.09 13.57 8.14 13.75 8.14C13.95 8.14 14.13 8.09 14.23 7.98C14.44 7.83 18.6 3.29 18.93 2.91L18.98 2.83C19.13 2.68 19.29 2.5 19.29 2.32C19.29 2.24 19.26 2.17 19.16 2.09C18.98 1.96 18.8 1.89 18.62 1.89C18.44 1.89 18.29 1.96 18.16 2.07C17.88 2.3 16.12 4.49 15.82 4.77C15.61 4.95 15.48 5.03 15.36 5.03C15.18 5.03 15.03 4.9 14.9 4.77C14.69 4.57 13.01 2.47 12.76 2.24C12.53 2.04 12.32 1.89 12.12 1.89C11.91 1.89 11.79 1.94 11.56 2.12C11.33 2.3 11.15 2.55 10.97 2.76Z"
+        }
     }
 }
 
 fn fermata_glyph(shape: FermataShape) -> &'static str {
     match shape {
-        FermataShape::Normal => "M8.94 3.27C15.31 3.27 16.59 7.99 16.89 9.13C16.92 9.22 16.92 9.31 16.95 9.34C17.16 9.75 17.28 9.96 17.58 9.96C17.85 9.96 18 9.84 18 9.54C18 9.46 18 9.37 17.97 9.25C16.12 0.1 9.87 0.04 9 0.04C8.04 0.04 1.85 0.1 0.03 9.25C0 9.37 0 9.49 0 9.57C0 9.87 0.15 9.96 0.39 9.96C0.66 9.96 0.81 9.75 0.99 9.34C1.02 9.31 1.05 9.19 1.08 9.07C1.44 7.84 2.78 3.27 8.94 3.27ZM10.61 8.32C10.61 7.45 9.87 6.7 8.97 6.7C8.1 6.7 7.36 7.45 7.36 8.32C7.36 9.22 8.1 9.96 8.97 9.96C9.87 9.96 10.61 9.22 10.61 8.32Z",
-        FermataShape::Angled => "M1.73 10C1.79 10 1.82 9.94 1.93 9.88C2.87 9.09 8.53 3.31 9 3.31C9.47 3.31 15.25 9.21 16.1 9.94C16.16 9.97 16.3 10 16.3 10H17.77C17.77 10 17.86 9.97 17.86 9.91C17.86 9.88 17.83 9.82 17.8 9.79C16.54 8.59 9.79 0 9 0C8.24 0 1.55 8.48 0.2 9.79C0.17 9.82 0.14 9.88 0.14 9.91C0.14 9.97 0.23 10 0.23 10ZM10.58 8.09C10.58 7.24 9.85 6.51 8.97 6.51C8.09 6.51 7.36 7.24 7.36 8.09C7.36 9 8.09 9.74 8.97 9.74C9.85 9.74 10.58 9 10.58 8.09Z",
-        FermataShape::Square => "M1.5 0C0.66 0 0 0.36 0 0.81V9.58C0 9.79 0.33 9.97 0.72 9.97C1.14 9.97 1.47 9.79 1.47 9.58V3.95C1.47 3.59 5.24 3.41 9.01 3.41C12.78 3.41 16.59 3.59 16.59 3.95V9.58C16.59 9.79 16.92 9.97 17.31 9.97C17.72 9.97 18.05 9.79 18.05 9.58V0.81C18.05 0.36 17.4 0 16.56 0ZM10.66 8.35C10.66 7.46 9.94 6.74 9.01 6.74C8.11 6.74 7.4 7.46 7.4 8.35C7.4 9.25 8.11 10 9.01 10C9.94 10 10.66 9.25 10.66 8.35Z",
-        FermataShape::DoubleAngled => "M1.63 10C1.69 10 1.72 9.93 1.83 9.89C2.76 9.09 8.76 2 8.89 2C9.07 2 15.15 9.2 15.99 9.93C16.06 9.98 16.19 10 16.19 10H17.02C17.02 10 17.08 9.98 17.08 9.91C17.08 9.89 17.08 9.84 17.04 9.8C15.79 8.6 9.2 0 8.89 0C8.71 0 2.32 8.49 0.96 9.8C0.92 9.84 0.92 9.87 0.92 9.89C0.92 9.96 1 10 1 10ZM4.59 10C4.63 10 4.66 9.96 4.75 9.91C5.44 9.33 8.55 6.35 8.89 6.35C9.24 6.35 12.45 9.42 13.08 9.96C13.12 9.98 13.23 10 13.23 10H14.3C14.3 10 14.37 9.98 14.37 9.93C14.37 9.91 14.35 9.87 14.32 9.84C13.39 8.95 9.13 3.67 8.89 3.67C8.6 3.67 4.46 8.86 3.48 9.84C3.45 9.87 3.43 9.91 3.43 9.93C3.43 9.98 3.5 10 3.5 10ZM10.07 8.6C10.07 7.95 9.53 7.42 8.89 7.42C8.22 7.42 7.69 7.95 7.69 8.6C7.69 9.27 8.22 9.8 8.89 9.8C9.53 9.8 10.07 9.27 10.07 8.6Z",
-        FermataShape::DoubleSquare => "M1.54 0C0.83 0 0.24 0.32 0.24 0.71V9.63C0.24 9.83 0.53 9.98 0.88 9.98C1.24 9.98 1.51 9.83 1.51 9.63V2.67C1.51 2.35 5.24 2.21 8.99 2.21C12.74 2.21 16.49 2.35 16.49 2.67V9.63C16.49 9.83 16.76 9.98 17.1 9.98C17.47 9.98 17.76 9.83 17.76 9.63V0.71C17.76 0.32 17.17 0 16.46 0ZM3.89 3.38C3.15 3.38 2.59 3.7 2.59 4.09V9.63C2.59 9.83 2.86 9.98 3.2 9.98C3.57 9.98 3.87 9.83 3.87 9.63V6.3C3.87 6 6.41 5.83 8.99 5.83C11.56 5.83 14.13 6 14.13 6.3V9.63C14.13 9.83 14.43 9.98 14.77 9.98C15.14 9.98 15.41 9.83 15.41 9.63V4.09C15.41 3.7 14.85 3.38 14.11 3.38ZM10.56 8.58C10.56 7.79 9.92 7.16 9.11 7.16C8.33 7.16 7.71 7.79 7.71 8.58C7.71 9.34 8.33 10 9.11 10C9.92 10 10.56 9.34 10.56 8.58Z",
+        FermataShape::Normal => {
+            "M8.94 3.27C15.31 3.27 16.59 7.99 16.89 9.13C16.92 9.22 16.92 9.31 16.95 9.34C17.16 9.75 17.28 9.96 17.58 9.96C17.85 9.96 18 9.84 18 9.54C18 9.46 18 9.37 17.97 9.25C16.12 0.1 9.87 0.04 9 0.04C8.04 0.04 1.85 0.1 0.03 9.25C0 9.37 0 9.49 0 9.57C0 9.87 0.15 9.96 0.39 9.96C0.66 9.96 0.81 9.75 0.99 9.34C1.02 9.31 1.05 9.19 1.08 9.07C1.44 7.84 2.78 3.27 8.94 3.27ZM10.61 8.32C10.61 7.45 9.87 6.7 8.97 6.7C8.1 6.7 7.36 7.45 7.36 8.32C7.36 9.22 8.1 9.96 8.97 9.96C9.87 9.96 10.61 9.22 10.61 8.32Z"
+        }
+        FermataShape::Angled => {
+            "M1.73 10C1.79 10 1.82 9.94 1.93 9.88C2.87 9.09 8.53 3.31 9 3.31C9.47 3.31 15.25 9.21 16.1 9.94C16.16 9.97 16.3 10 16.3 10H17.77C17.77 10 17.86 9.97 17.86 9.91C17.86 9.88 17.83 9.82 17.8 9.79C16.54 8.59 9.79 0 9 0C8.24 0 1.55 8.48 0.2 9.79C0.17 9.82 0.14 9.88 0.14 9.91C0.14 9.97 0.23 10 0.23 10ZM10.58 8.09C10.58 7.24 9.85 6.51 8.97 6.51C8.09 6.51 7.36 7.24 7.36 8.09C7.36 9 8.09 9.74 8.97 9.74C9.85 9.74 10.58 9 10.58 8.09Z"
+        }
+        FermataShape::Square => {
+            "M1.5 0C0.66 0 0 0.36 0 0.81V9.58C0 9.79 0.33 9.97 0.72 9.97C1.14 9.97 1.47 9.79 1.47 9.58V3.95C1.47 3.59 5.24 3.41 9.01 3.41C12.78 3.41 16.59 3.59 16.59 3.95V9.58C16.59 9.79 16.92 9.97 17.31 9.97C17.72 9.97 18.05 9.79 18.05 9.58V0.81C18.05 0.36 17.4 0 16.56 0ZM10.66 8.35C10.66 7.46 9.94 6.74 9.01 6.74C8.11 6.74 7.4 7.46 7.4 8.35C7.4 9.25 8.11 10 9.01 10C9.94 10 10.66 9.25 10.66 8.35Z"
+        }
+        FermataShape::DoubleAngled => {
+            "M1.63 10C1.69 10 1.72 9.93 1.83 9.89C2.76 9.09 8.76 2 8.89 2C9.07 2 15.15 9.2 15.99 9.93C16.06 9.98 16.19 10 16.19 10H17.02C17.02 10 17.08 9.98 17.08 9.91C17.08 9.89 17.08 9.84 17.04 9.8C15.79 8.6 9.2 0 8.89 0C8.71 0 2.32 8.49 0.96 9.8C0.92 9.84 0.92 9.87 0.92 9.89C0.92 9.96 1 10 1 10ZM4.59 10C4.63 10 4.66 9.96 4.75 9.91C5.44 9.33 8.55 6.35 8.89 6.35C9.24 6.35 12.45 9.42 13.08 9.96C13.12 9.98 13.23 10 13.23 10H14.3C14.3 10 14.37 9.98 14.37 9.93C14.37 9.91 14.35 9.87 14.32 9.84C13.39 8.95 9.13 3.67 8.89 3.67C8.6 3.67 4.46 8.86 3.48 9.84C3.45 9.87 3.43 9.91 3.43 9.93C3.43 9.98 3.5 10 3.5 10ZM10.07 8.6C10.07 7.95 9.53 7.42 8.89 7.42C8.22 7.42 7.69 7.95 7.69 8.6C7.69 9.27 8.22 9.8 8.89 9.8C9.53 9.8 10.07 9.27 10.07 8.6Z"
+        }
+        FermataShape::DoubleSquare => {
+            "M1.54 0C0.83 0 0.24 0.32 0.24 0.71V9.63C0.24 9.83 0.53 9.98 0.88 9.98C1.24 9.98 1.51 9.83 1.51 9.63V2.67C1.51 2.35 5.24 2.21 8.99 2.21C12.74 2.21 16.49 2.35 16.49 2.67V9.63C16.49 9.83 16.76 9.98 17.1 9.98C17.47 9.98 17.76 9.83 17.76 9.63V0.71C17.76 0.32 17.17 0 16.46 0ZM3.89 3.38C3.15 3.38 2.59 3.7 2.59 4.09V9.63C2.59 9.83 2.86 9.98 3.2 9.98C3.57 9.98 3.87 9.83 3.87 9.63V6.3C3.87 6 6.41 5.83 8.99 5.83C11.56 5.83 14.13 6 14.13 6.3V9.63C14.13 9.83 14.43 9.98 14.77 9.98C15.14 9.98 15.41 9.83 15.41 9.63V4.09C15.41 3.7 14.85 3.38 14.11 3.38ZM10.56 8.58C10.56 7.79 9.92 7.16 9.11 7.16C8.33 7.16 7.71 7.79 7.71 8.58C7.71 9.34 8.33 10 9.11 10C9.92 10 10.56 9.34 10.56 8.58Z"
+        }
     }
 }
 
@@ -10143,6 +10236,7 @@ fn plan_system_layout(
             local_barline_positions: Vec::new(),
             x_offsets: vec![0],
             gap_expansions: Vec::new(),
+            system_y_offsets: vec![0],
         });
     }
 
@@ -10252,19 +10346,60 @@ fn plan_system_layout(
         }
     }
 
+    let system_count = starts.len();
     Ok(SystemLayout {
         starts,
         measure_systems,
         local_barline_positions,
         x_offsets,
         gap_expansions,
+        system_y_offsets: vec![0; system_count],
     })
+}
+
+fn plan_page_layout(
+    system_layout: &mut SystemLayout,
+    page_break_before: &[bool],
+    part_count: usize,
+    page_height: i32,
+    system_bounds: &[VerticalBounds],
+    content_top: i32,
+) -> Result<i32, String> {
+    let printable_height = page_height - content_top - PAGE_MARGIN;
+    let system_height = part_count as i32 * SYSTEM_ROW_HEIGHT;
+    let mut page = 0;
+    let mut used_height = 0;
+    for (system_index, (system_start, bounds)) in system_layout
+        .starts
+        .iter()
+        .copied()
+        .zip(system_bounds.iter().copied())
+        .enumerate()
+    {
+        let occupied_height = system_height.max(bounds.bottom);
+        if occupied_height > printable_height {
+            return Err(format!(
+                "System {} is {occupied_height} units high and cannot fit within the printable Page height of {printable_height} units",
+                system_index + 1
+            ));
+        }
+        let forced_break = system_index > 0 && page_break_before[system_start];
+        if forced_break || used_height + occupied_height > printable_height {
+            page += 1;
+            used_height = 0;
+        }
+        system_layout.system_y_offsets[system_index] =
+            page * (page_height + PAGE_GUTTER) + used_height;
+        used_height += occupied_height;
+    }
+    Ok(page + 1)
 }
 
 fn render_svg_with_alignment(
     score: &Score,
     warnings: &mut Vec<String>,
     alignment: SystemAlignment,
+    page_size: PageSize,
 ) -> Result<String, String> {
     let provisional = score
         .parts
@@ -10293,8 +10428,84 @@ fn render_svg_with_alignment(
             .max()
             .expect("a score contains at least one Part");
     }
-    let system_layout =
-        plan_system_layout(&measure_barline_positions, alignment, SYSTEM_MAX_WIDTH, &[])?;
+    let page_break_before = (0..score.parts[0].measures.len())
+        .map(|measure_index| {
+            score
+                .parts
+                .iter()
+                .any(|part| part.measures[measure_index].new_page_before)
+        })
+        .collect::<Vec<_>>();
+    let explicit_page_breaks = page_break_before
+        .iter()
+        .enumerate()
+        .filter_map(|(index, forced)| (*forced).then_some(index))
+        .collect::<Vec<_>>();
+    let (page_width, page_height, page_width_mm, page_height_mm, physical_page_height) =
+        page_size.dimensions();
+    let content_left = PAGE_MARGIN
+        - provisional
+            .iter()
+            .map(|part| part.view_left)
+            .min()
+            .unwrap_or(0)
+            .min(0);
+    let printable_width = (page_width - PAGE_MARGIN * 2).min(SYSTEM_MAX_WIDTH);
+    let mut system_layout = plan_system_layout(
+        &measure_barline_positions,
+        alignment,
+        printable_width,
+        &explicit_page_breaks,
+    )?;
+    let measured_systems = score
+        .parts
+        .iter()
+        .enumerate()
+        .map(|(part_index, part)| {
+            let mut measure_warnings = Vec::new();
+            render_part_svg(
+                part,
+                &mut measure_warnings,
+                (score.parts.len() > 1).then_some(&system_layout.local_barline_positions),
+                Some(&system_layout),
+                part_index,
+                score.parts.len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let system_bounds = (0..system_layout.starts.len())
+        .map(|system_index| {
+            measured_systems.iter().enumerate().fold(
+                VerticalBounds {
+                    top: 0,
+                    bottom: score.parts.len() as i32 * SYSTEM_ROW_HEIGHT,
+                },
+                |bounds, (part_index, part)| {
+                    let part_bounds = part.system_vertical_bounds[system_index];
+                    let part_offset = part_index as i32 * SYSTEM_ROW_HEIGHT;
+                    VerticalBounds {
+                        top: bounds.top.min(part_bounds.top + part_offset),
+                        bottom: bounds.bottom.max(part_bounds.bottom + part_offset),
+                    }
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let content_top = PAGE_MARGIN
+        - system_bounds
+            .iter()
+            .map(|bounds| bounds.top)
+            .min()
+            .unwrap_or(0)
+            .min(0);
+    let page_count = plan_page_layout(
+        &mut system_layout,
+        &page_break_before,
+        score.parts.len(),
+        page_height,
+        &system_bounds,
+        content_top,
+    )?;
     let rendered = score
         .parts
         .iter()
@@ -10310,59 +10521,39 @@ fn render_svg_with_alignment(
             )
         })
         .collect::<Vec<_>>();
-    if score.parts.len() == 1 {
-        return Ok(rendered.into_iter().next().expect("score has one Part").svg);
-    }
-    let left = rendered
-        .iter()
-        .map(|part| part.view_box.left)
-        .min()
-        .unwrap_or(0);
-    let top = rendered
-        .iter()
-        .map(|part| part.view_box.top)
-        .min()
-        .unwrap_or(0);
-    let notation_right = rendered
-        .iter()
-        .map(|part| part.view_box.left + part.view_box.width)
-        .max()
-        .unwrap_or(128);
-    let part_name_right = score
-        .parts
-        .iter()
-        .map(|part| {
-            12.0 + part
-                .name
-                .chars()
-                .map(|character| {
-                    noto_sans_glyphs::glyph(character)
-                        .expect("Part name was checked against the bundled glyph repertoire")
-                        .advance
-                        * 12.0
-                        / noto_sans_glyphs::UNITS_PER_EM
-                })
-                .sum::<f64>()
-        })
-        .fold(0.0_f64, f64::max)
-        .ceil() as i32;
-    let right = notation_right.max(part_name_right);
-    let width = right - left;
-    let height = rendered
-        .iter()
-        .map(|part| part.view_box.height)
-        .max()
-        .unwrap_or(0);
+    let height = page_count * page_height + (page_count - 1) * PAGE_GUTTER;
+    let physical_height = if page_count == 1 {
+        page_height_mm.to_owned()
+    } else {
+        format!(
+            "{:.2}mm",
+            f64::from(page_count) * physical_page_height
+                + f64::from(page_count - 1) * (PAGE_GUTTER as f64 * 25.4 / 96.0)
+        )
+    };
     let mut svg = String::new();
-    writeln!(svg, "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{left} {top} {width} {height}\" role=\"img\">")
+    writeln!(svg, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{page_width_mm}\" height=\"{physical_height}\" viewBox=\"0 0 {page_width} {height}\" role=\"img\">")
         .expect("writing to a String cannot fail");
-    writeln!(svg, "<rect id=\"background\" x=\"{left}\" y=\"{top}\" width=\"{width}\" height=\"{height}\" fill=\"#fff\"/>")
+    writeln!(svg, "<rect id=\"background\" x=\"0\" y=\"0\" width=\"{page_width}\" height=\"{height}\" fill=\"#e5e5e5\"/>")
         .expect("writing to a String cannot fail");
+    for page in 0..page_count {
+        let page_top = page * (page_height + PAGE_GUTTER);
+        writeln!(svg, "<rect id=\"page-{}\" class=\"page\" x=\"0\" y=\"{page_top}\" width=\"{page_width}\" height=\"{page_height}\" fill=\"#fff\"/>", page + 1)
+            .expect("writing to a String cannot fail");
+    }
+    writeln!(
+        svg,
+        "<g transform=\"translate({content_left} {content_top})\">"
+    )
+    .expect("writing to a String cannot fail");
     for (part_index, (part, rendered_part)) in score.parts.iter().zip(rendered).enumerate() {
         let scale = 12.0 / noto_sans_glyphs::UNITS_PER_EM;
         for system_index in 0..system_layout.starts.len() {
-            let row_top =
-                (system_index * score.parts.len() + part_index) as i32 * SYSTEM_ROW_HEIGHT;
+            let row_top = system_layout.system_y_offsets[system_index]
+                + part_index as i32 * SYSTEM_ROW_HEIGHT;
+            if score.parts.len() == 1 {
+                continue;
+            }
             let mut name_x = 12.0;
             for (glyph_index, character) in part.name.chars().enumerate() {
                 let glyph = noto_sans_glyphs::glyph(character)
@@ -10386,19 +10577,35 @@ fn render_svg_with_alignment(
             .skip(2)
             .take_while(|line| *line != "</svg>")
         {
-            svg.push_str(&line.replace("id=\"", &format!("id=\"part-{part_index}-")));
+            if score.parts.len() > 1 {
+                svg.push_str(&line.replace("id=\"", &format!("id=\"part-{part_index}-")));
+            } else {
+                svg.push_str(line);
+            }
             svg.push('\n');
         }
         svg.push_str("</g>\n");
     }
-    svg.push_str("</svg>\n");
+    svg.push_str("</g>\n</svg>\n");
     Ok(svg)
 }
 
 #[cfg(test)]
 fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
-    render_svg_with_alignment(score, warnings, SystemAlignment::Left)
+    render_svg_with_alignment(score, warnings, SystemAlignment::Left, PageSize::A4)
         .expect("score fits the configured System width")
+}
+
+fn system_y_offset(
+    system_layout: Option<&SystemLayout>,
+    system_index: usize,
+    part_index: usize,
+    part_count: usize,
+) -> i32 {
+    system_layout.map_or(
+        (system_index * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT,
+        |layout| layout.system_y_offsets[system_index] + part_index as i32 * SYSTEM_ROW_HEIGHT,
+    )
 }
 
 fn measure_barline_position(
@@ -10651,6 +10858,14 @@ fn render_part_svg(
     let mut notation_bounds = Vec::new();
     let mut system_notation_bounds = Vec::new();
     let mut span_anchors = Vec::new();
+    let system_count = system_layout.map_or(1, |layout| layout.starts.len());
+    let mut system_vertical_bounds = vec![
+        VerticalBounds {
+            top: 0,
+            bottom: 128
+        };
+        system_count
+    ];
     let mut active_ending: Option<(i32, String)> = None;
     for (measure_index, measure) in part.measures.iter().enumerate() {
         let system_index = system_layout
@@ -10662,11 +10877,20 @@ fn render_part_svg(
             if measure_index > 0 {
                 system_notation_bounds.push(notation_bounds.clone());
                 notation_bounds.clear();
+                system_vertical_bounds[system_index - 1] = VerticalBounds {
+                    top: view_top,
+                    bottom: view_bottom,
+                };
+                view_top = 0;
+                view_bottom = 128;
             }
             x = 92 + system_layout.map_or(0, |layout| layout.x_offsets[system_index]);
-            scene.set_system_y_offset(
-                (system_index * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT,
-            );
+            scene.set_system_y_offset(system_y_offset(
+                system_layout,
+                system_index,
+                part_index,
+                part_count,
+            ));
             active_meter = None;
         }
         let measure_start_x = f64::from(x);
@@ -11914,6 +12138,20 @@ fn render_part_svg(
         right = right.max(barline_x + 12);
         x = barline_x + 4 + system_layout.map_or(0, |layout| layout.gap_expansions[measure_index]);
     }
+    system_vertical_bounds[system_count - 1] = VerticalBounds {
+        top: view_top,
+        bottom: view_bottom,
+    };
+    let mut view_top = system_vertical_bounds
+        .iter()
+        .map(|bounds| bounds.top)
+        .min()
+        .unwrap_or(0);
+    let mut view_bottom = system_vertical_bounds
+        .iter()
+        .map(|bounds| bounds.bottom)
+        .max()
+        .unwrap_or(128);
     system_notation_bounds.push(notation_bounds.clone());
     for (measure_index, measure) in part.measures.iter().enumerate() {
         let Some(multiple_rest) = &measure.multiple_rest else {
@@ -12023,7 +12261,7 @@ fn render_part_svg(
             .get(end.saturating_sub(1))
             .copied()
             .unwrap_or(final_barline_x);
-        let system_offset = (system_index * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT;
+        let system_offset = system_y_offset(system_layout, system_index, part_index, part_count);
         scene.set_system_y_offset(system_offset);
         for (staff_index, staff_y) in [28.0, 68.0, 108.0].into_iter().enumerate() {
             let id = if system_index == 0 {
@@ -12070,6 +12308,7 @@ fn render_part_svg(
         &system_ends,
         &barline_positions,
         &mut system_notation_bounds,
+        system_layout,
         part_index,
         part_count,
     );
@@ -12081,10 +12320,15 @@ fn render_part_svg(
         if current_text_system != Some(system_index) {
             occupied_text.clear();
             current_text_system = Some(system_index);
+            view_top = system_vertical_bounds[system_index].top;
+            view_bottom = system_vertical_bounds[system_index].bottom;
         }
-        scene.set_system_y_offset(
-            (system_index * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT,
-        );
+        scene.set_system_y_offset(system_y_offset(
+            system_layout,
+            system_index,
+            part_index,
+            part_count,
+        ));
         add_text_item(
             &mut scene,
             text,
@@ -12101,15 +12345,24 @@ fn render_part_svg(
                 view_bottom: &mut view_bottom,
             },
         );
+        system_vertical_bounds[system_index].top =
+            system_vertical_bounds[system_index].top.min(view_top);
+        system_vertical_bounds[system_index].bottom =
+            system_vertical_bounds[system_index].bottom.max(view_bottom);
     }
     for label in span_labels {
         if current_text_system != Some(label.system_index) {
             occupied_text.clear();
             current_text_system = Some(label.system_index);
+            view_top = system_vertical_bounds[label.system_index].top;
+            view_bottom = system_vertical_bounds[label.system_index].bottom;
         }
-        scene.set_system_y_offset(
-            (label.system_index * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT,
-        );
+        scene.set_system_y_offset(system_y_offset(
+            system_layout,
+            label.system_index,
+            part_index,
+            part_count,
+        ));
         let text = PositionedText {
             event_index: 0,
             input_staff: None,
@@ -12153,7 +12406,23 @@ fn render_part_svg(
                 view_bottom: &mut view_bottom,
             },
         );
+        system_vertical_bounds[label.system_index].top =
+            system_vertical_bounds[label.system_index].top.min(view_top);
+        system_vertical_bounds[label.system_index].bottom = system_vertical_bounds
+            [label.system_index]
+            .bottom
+            .max(view_bottom);
     }
+    view_top = system_vertical_bounds
+        .iter()
+        .map(|bounds| bounds.top)
+        .min()
+        .unwrap_or(0);
+    view_bottom = system_vertical_bounds
+        .iter()
+        .map(|bounds| bounds.bottom)
+        .max()
+        .unwrap_or(128);
     let view_width = right + 12 - left;
     let row_count = system_count * part_count;
     let system_height = if row_count == 1 {
@@ -12165,17 +12434,12 @@ fn render_part_svg(
     scene.view_top = view_top;
     scene.view_width = view_width;
     scene.view_height = system_height;
-    let view_box = SvgViewBox {
-        left,
-        top: view_top,
-        width: view_width,
-        height: system_height,
-    };
     scene.set_system_y_offset(0);
     RenderedPart {
         svg: scene.to_svg(),
-        view_box,
         barline_positions,
+        view_left: left,
+        system_vertical_bounds,
     }
 }
 
@@ -12185,6 +12449,7 @@ fn add_note_span_paths(
     system_ends: &[usize],
     barline_positions: &[i32],
     system_notation_bounds: &mut [Vec<ComponentBounds>],
+    system_layout: Option<&SystemLayout>,
     part_index: usize,
     part_count: usize,
 ) -> Vec<NoteSpanLabel> {
@@ -12335,7 +12600,8 @@ fn add_note_span_paths(
                 "wavy" => PathStyle::MediumStroke,
                 _ => PathStyle::MediumOutline,
             };
-            let system_offset = (system_index * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT;
+            let system_offset =
+                system_y_offset(system_layout, system_index, part_index, part_count);
             scene.set_system_y_offset(system_offset);
             scene.add_path(
                 DrawLayer::Tie,
@@ -12645,34 +12911,64 @@ fn beam_segment_path(
 
 fn glyph_path(value: u8) -> &'static str {
     match value {
-        0 => "M6 1C2.8 1 1 3.5 1 9S2.8 17 6 17 11 14.5 11 9 9.2 1 6 1ZM6 3.5C7.7 3.5 8.4 5.2 8.4 9S7.7 14.5 6 14.5 3.6 12.8 3.6 9 4.3 3.5 6 3.5Z",
+        0 => {
+            "M6 1C2.8 1 1 3.5 1 9S2.8 17 6 17 11 14.5 11 9 9.2 1 6 1ZM6 3.5C7.7 3.5 8.4 5.2 8.4 9S7.7 14.5 6 14.5 3.6 12.8 3.6 9 4.3 3.5 6 3.5Z"
+        }
         1 => "M2 5.1L6.1 1.5H8.8V16.5H5.9V5.1L3.3 7.2Z",
-        2 => "M2 4.7C2 2.6 3.8 1 6.2 1S10.5 2.4 10.5 4.8C10.5 7.2 9.2 8.8 7.2 10.7L4.7 14.2H10.8V16.5H1.2V14.6L5.5 9.7C7.2 7.8 8 6.5 8 4.9 8 3.8 7.3 3.3 6.2 3.3S4.4 4 4.4 5.2V6H2Z",
-        3 => "M2 3.1C3 1.7 4.3 1 6.3 1 9 1 10.6 2.4 10.6 4.7 10.6 6.3 9.8 7.4 8.4 8 10 8.5 11 9.8 11 11.8 11 14.8 9 17 6 17 4 17 2.6 16.1 1.4 14.5L3.2 13C3.9 14 4.8 14.5 6 14.5 7.6 14.5 8.4 13.6 8.4 11.8 8.4 10.1 7.6 9.3 5.7 9.3H4.5V7H5.8C7.4 7 8.1 6.3 8.1 4.9 8.1 3.7 7.5 3.3 6.2 3.3 5.2 3.3 4.4 3.7 3.8 4.6Z",
+        2 => {
+            "M2 4.7C2 2.6 3.8 1 6.2 1S10.5 2.4 10.5 4.8C10.5 7.2 9.2 8.8 7.2 10.7L4.7 14.2H10.8V16.5H1.2V14.6L5.5 9.7C7.2 7.8 8 6.5 8 4.9 8 3.8 7.3 3.3 6.2 3.3S4.4 4 4.4 5.2V6H2Z"
+        }
+        3 => {
+            "M2 3.1C3 1.7 4.3 1 6.3 1 9 1 10.6 2.4 10.6 4.7 10.6 6.3 9.8 7.4 8.4 8 10 8.5 11 9.8 11 11.8 11 14.8 9 17 6 17 4 17 2.6 16.1 1.4 14.5L3.2 13C3.9 14 4.8 14.5 6 14.5 7.6 14.5 8.4 13.6 8.4 11.8 8.4 10.1 7.6 9.3 5.7 9.3H4.5V7H5.8C7.4 7 8.1 6.3 8.1 4.9 8.1 3.7 7.5 3.3 6.2 3.3 5.2 3.3 4.4 3.7 3.8 4.6Z"
+        }
         4 => "M7.2 1H9.8V10.4H11V12.8H9.8V16.5H7.1V12.8H1V10.4ZM7.1 5.2L3.6 10.4H7.1Z",
-        5 => "M2.1 1.5H10.7V3.9H4.4V6.9C5.1 6.4 6 6.1 7 6.1 9.6 6.1 11 8 11 11.2 11 14.8 9.2 17 6.2 17 4.2 17 2.8 16.2 1.6 14.7L3.4 13.1C4.1 14 5 14.5 6.2 14.5 7.7 14.5 8.4 13.4 8.4 11.3 8.4 9.3 7.8 8.4 6.5 8.4 5.6 8.4 4.9 8.8 4.4 9.5H2.1Z",
-        6 => "M8.9 1.3L10.3 3.2C8.4 4.4 6.7 5.8 5.4 7.5 6 7.1 6.8 6.9 7.5 6.9 9.8 6.9 11 8.7 11 11.5 11 14.9 9.1 17 6.1 17 3 17 1 14.9 1 11.5 1 7.2 4.2 3.4 8.9 1.3ZM6.1 9.2C4.5 9.2 3.6 10.1 3.6 11.9 3.6 13.7 4.4 14.6 6.1 14.6 7.7 14.6 8.4 13.7 8.4 11.9 8.4 10.1 7.7 9.2 6.1 9.2Z",
+        5 => {
+            "M2.1 1.5H10.7V3.9H4.4V6.9C5.1 6.4 6 6.1 7 6.1 9.6 6.1 11 8 11 11.2 11 14.8 9.2 17 6.2 17 4.2 17 2.8 16.2 1.6 14.7L3.4 13.1C4.1 14 5 14.5 6.2 14.5 7.7 14.5 8.4 13.4 8.4 11.3 8.4 9.3 7.8 8.4 6.5 8.4 5.6 8.4 4.9 8.8 4.4 9.5H2.1Z"
+        }
+        6 => {
+            "M8.9 1.3L10.3 3.2C8.4 4.4 6.7 5.8 5.4 7.5 6 7.1 6.8 6.9 7.5 6.9 9.8 6.9 11 8.7 11 11.5 11 14.9 9.1 17 6.1 17 3 17 1 14.9 1 11.5 1 7.2 4.2 3.4 8.9 1.3ZM6.1 9.2C4.5 9.2 3.6 10.1 3.6 11.9 3.6 13.7 4.4 14.6 6.1 14.6 7.7 14.6 8.4 13.7 8.4 11.9 8.4 10.1 7.7 9.2 6.1 9.2Z"
+        }
         7 => "M1.5 1.5H11V3.6L5.6 16.5H2.7L8 3.9H1.5Z",
-        8 => "M6 1C9 1 10.7 2.4 10.7 4.8 10.7 6.3 9.9 7.4 8.6 8 10.2 8.6 11 9.8 11 11.8 11 15.1 9.2 17 6 17 2.8 17 1 15.1 1 11.8 1 9.8 1.8 8.6 3.4 8 2.1 7.4 1.3 6.3 1.3 4.8 1.3 2.4 3 1 6 1ZM6 3.3C4.7 3.3 4 3.9 4 5.1 4 6.3 4.7 7 6 7S8 6.3 8 5.1C8 3.9 7.3 3.3 6 3.3ZM6 9.3C4.4 9.3 3.6 10.1 3.6 11.9 3.6 13.7 4.4 14.6 6 14.6S8.4 13.7 8.4 11.9C8.4 10.1 7.6 9.3 6 9.3Z",
-        9 => "M3.1 16.7L1.7 14.8C3.6 13.6 5.3 12.2 6.6 10.5 6 10.9 5.2 11.1 4.5 11.1 2.2 11.1 1 9.3 1 6.5 1 3.1 2.9 1 5.9 1 9 1 11 3.1 11 6.5 11 10.8 7.8 14.6 3.1 16.7ZM5.9 8.8C7.5 8.8 8.4 7.9 8.4 6.1 8.4 4.3 7.6 3.4 5.9 3.4 4.3 3.4 3.6 4.3 3.6 6.1 3.6 7.9 4.3 8.8 5.9 8.8Z",
+        8 => {
+            "M6 1C9 1 10.7 2.4 10.7 4.8 10.7 6.3 9.9 7.4 8.6 8 10.2 8.6 11 9.8 11 11.8 11 15.1 9.2 17 6 17 2.8 17 1 15.1 1 11.8 1 9.8 1.8 8.6 3.4 8 2.1 7.4 1.3 6.3 1.3 4.8 1.3 2.4 3 1 6 1ZM6 3.3C4.7 3.3 4 3.9 4 5.1 4 6.3 4.7 7 6 7S8 6.3 8 5.1C8 3.9 7.3 3.3 6 3.3ZM6 9.3C4.4 9.3 3.6 10.1 3.6 11.9 3.6 13.7 4.4 14.6 6 14.6S8.4 13.7 8.4 11.9C8.4 10.1 7.6 9.3 6 9.3Z"
+        }
+        9 => {
+            "M3.1 16.7L1.7 14.8C3.6 13.6 5.3 12.2 6.6 10.5 6 10.9 5.2 11.1 4.5 11.1 2.2 11.1 1 9.3 1 6.5 1 3.1 2.9 1 5.9 1 9 1 11 3.1 11 6.5 11 10.8 7.8 14.6 3.1 16.7ZM5.9 8.8C7.5 8.8 8.4 7.9 8.4 6.1 8.4 4.3 7.6 3.4 5.9 3.4 4.3 3.4 3.6 4.3 3.6 6.1 3.6 7.9 4.3 8.8 5.9 8.8Z"
+        }
         10 => glyph_path(2),
-        11 => "M10 3.1C9 1.7 7.7 1 5.7 1 3 1 1.4 2.4 1.4 4.7 1.4 6.3 2.2 7.4 3.6 8 2 8.5 1 9.8 1 11.8 1 14.8 3 17 6 17 8 17 9.4 16.1 10.6 14.5L8.8 13C8.1 14 7.2 14.5 6 14.5 4.4 14.5 3.6 13.6 3.6 11.8 3.6 10.1 4.4 9.3 6.3 9.3H7.5V7H6.2C4.6 7 3.9 6.3 3.9 4.9 3.9 3.7 4.5 3.3 5.8 3.3 6.8 3.3 7.6 3.7 8.2 4.6Z",
+        11 => {
+            "M10 3.1C9 1.7 7.7 1 5.7 1 3 1 1.4 2.4 1.4 4.7 1.4 6.3 2.2 7.4 3.6 8 2 8.5 1 9.8 1 11.8 1 14.8 3 17 6 17 8 17 9.4 16.1 10.6 14.5L8.8 13C8.1 14 7.2 14.5 6 14.5 4.4 14.5 3.6 13.6 3.6 11.8 3.6 10.1 4.4 9.3 6.3 9.3H7.5V7H6.2C4.6 7 3.9 6.3 3.9 4.9 3.9 3.7 4.5 3.3 5.8 3.3 6.8 3.3 7.6 3.7 8.2 4.6Z"
+        }
         _ => unreachable!("tone values are reduced to one dozenal digit"),
     }
 }
 
 fn time_signature_glyph_path(value: u8) -> &'static str {
     match value {
-        0 => "M6 1C2.7 1 1 3.5 1 9S2.7 17 6 17 11 14.5 11 9 9.3 1 6 1ZM6 3.8C7.4 3.8 8.1 5.4 8.1 9S7.4 14.2 6 14.2 3.9 12.6 3.9 9 4.6 3.8 6 3.8Z",
+        0 => {
+            "M6 1C2.7 1 1 3.5 1 9S2.7 17 6 17 11 14.5 11 9 9.3 1 6 1ZM6 3.8C7.4 3.8 8.1 5.4 8.1 9S7.4 14.2 6 14.2 3.9 12.6 3.9 9 4.6 3.8 6 3.8Z"
+        }
         1 => "M2 4L6 1H9V14.5H11V17H1V14.5H4V5.1L2 6.4Z",
-        2 => "M1.2 4.8C1.2 2.4 3.1 1 6.1 1 9.2 1 10.8 2.4 10.8 4.8 10.8 7.3 9.3 9.1 7.2 11.1L4.4 14.3H11V17H1V14.8L5.2 10C7.1 7.9 8 6.5 8 4.9 8 3.7 7.3 3.3 6.1 3.3 4.8 3.3 4.1 3.9 4.1 5.2V6H1.2Z",
-        3 => "M1.5 3.3C2.6 1.7 4.1 1 6.3 1 9.1 1 10.7 2.4 10.7 4.7 10.7 6.3 9.9 7.4 8.4 8 10.1 8.6 11 9.9 11 11.9 11 15.1 9.2 17 6.1 17 4 17 2.5 16.2 1.2 14.5L3.3 12.9C4 13.9 4.9 14.4 6.1 14.4 7.7 14.4 8.4 13.6 8.4 11.9 8.4 10.2 7.7 9.3 5.8 9.3H4.6V7H5.8C7.4 7 8.1 6.3 8.1 4.9 8.1 3.8 7.5 3.4 6.3 3.4 5.2 3.4 4.5 3.8 3.8 4.8Z",
+        2 => {
+            "M1.2 4.8C1.2 2.4 3.1 1 6.1 1 9.2 1 10.8 2.4 10.8 4.8 10.8 7.3 9.3 9.1 7.2 11.1L4.4 14.3H11V17H1V14.8L5.2 10C7.1 7.9 8 6.5 8 4.9 8 3.7 7.3 3.3 6.1 3.3 4.8 3.3 4.1 3.9 4.1 5.2V6H1.2Z"
+        }
+        3 => {
+            "M1.5 3.3C2.6 1.7 4.1 1 6.3 1 9.1 1 10.7 2.4 10.7 4.7 10.7 6.3 9.9 7.4 8.4 8 10.1 8.6 11 9.9 11 11.9 11 15.1 9.2 17 6.1 17 4 17 2.5 16.2 1.2 14.5L3.3 12.9C4 13.9 4.9 14.4 6.1 14.4 7.7 14.4 8.4 13.6 8.4 11.9 8.4 10.2 7.7 9.3 5.8 9.3H4.6V7H5.8C7.4 7 8.1 6.3 8.1 4.9 8.1 3.8 7.5 3.4 6.3 3.4 5.2 3.4 4.5 3.8 3.8 4.8Z"
+        }
         4 => "M7.3 1H10V10.2H11.5V12.8H10V17H7.2V12.8H0.8V10.3ZM7.2 5.2L3.7 10.2H7.2Z",
-        5 => "M1.4 1.5H10.8V4.1H4.2V7C5 6.4 5.9 6.1 7 6.1 9.6 6.1 11 8 11 11.4 11 15 9.2 17 6.1 17 4 17 2.5 16.2 1.2 14.6L3.3 12.9C4 13.9 4.9 14.4 6.1 14.4 7.6 14.4 8.4 13.4 8.4 11.4 8.4 9.4 7.8 8.5 6.5 8.5 5.6 8.5 4.8 8.9 4.3 9.7H1.4Z",
-        6 => "M8.9 1.2L10.8 3.2C8.5 4.8 6.6 6.5 5.2 8.1 5.8 7.6 6.7 7.3 7.6 7.3 9.8 7.3 11 9.1 11 11.8 11 15.1 9.2 17 6.1 17 2.9 17 1 15 1 11.6 1 7.1 4.1 3.3 8.9 1.2ZM6.1 9.5C4.5 9.5 3.7 10.4 3.7 12 3.7 13.7 4.5 14.5 6.1 14.5 7.6 14.5 8.4 13.7 8.4 12 8.4 10.4 7.6 9.5 6.1 9.5Z",
+        5 => {
+            "M1.4 1.5H10.8V4.1H4.2V7C5 6.4 5.9 6.1 7 6.1 9.6 6.1 11 8 11 11.4 11 15 9.2 17 6.1 17 4 17 2.5 16.2 1.2 14.6L3.3 12.9C4 13.9 4.9 14.4 6.1 14.4 7.6 14.4 8.4 13.4 8.4 11.4 8.4 9.4 7.8 8.5 6.5 8.5 5.6 8.5 4.8 8.9 4.3 9.7H1.4Z"
+        }
+        6 => {
+            "M8.9 1.2L10.8 3.2C8.5 4.8 6.6 6.5 5.2 8.1 5.8 7.6 6.7 7.3 7.6 7.3 9.8 7.3 11 9.1 11 11.8 11 15.1 9.2 17 6.1 17 2.9 17 1 15 1 11.6 1 7.1 4.1 3.3 8.9 1.2ZM6.1 9.5C4.5 9.5 3.7 10.4 3.7 12 3.7 13.7 4.5 14.5 6.1 14.5 7.6 14.5 8.4 13.7 8.4 12 8.4 10.4 7.6 9.5 6.1 9.5Z"
+        }
         7 => "M0.8 1.5H11V4L5.4 17H2.3L7.9 4.1H0.8Z",
-        8 => "M6 1C9.1 1 10.8 2.4 10.8 4.8 10.8 6.3 10 7.4 8.6 8 10.2 8.6 11 9.9 11 11.9 11 15.1 9.2 17 6 17S1 15.1 1 11.9C1 9.9 1.8 8.6 3.4 8 2 7.4 1.2 6.3 1.2 4.8 1.2 2.4 2.9 1 6 1ZM6 3.4C4.7 3.4 4 4 4 5.2S4.7 7 6 7 8 6.4 8 5.2 7.3 3.4 6 3.4ZM6 9.4C4.4 9.4 3.6 10.2 3.6 12S4.4 14.5 6 14.5 8.4 13.7 8.4 12 7.6 9.4 6 9.4Z",
-        9 => "M3.1 16.8L1.2 14.8C3.5 13.2 5.4 11.5 6.8 9.9 6.2 10.4 5.3 10.7 4.4 10.7 2.2 10.7 1 8.9 1 6.2 1 3 2.9 1 6 1 9.2 1 11 3.1 11 6.5 11 10.9 7.9 14.7 3.1 16.8ZM6 8.3C7.6 8.3 8.4 7.4 8.4 5.9 8.4 4.3 7.6 3.5 6 3.5 4.4 3.5 3.6 4.3 3.6 5.9 3.6 7.4 4.4 8.3 6 8.3Z",
+        8 => {
+            "M6 1C9.1 1 10.8 2.4 10.8 4.8 10.8 6.3 10 7.4 8.6 8 10.2 8.6 11 9.9 11 11.9 11 15.1 9.2 17 6 17S1 15.1 1 11.9C1 9.9 1.8 8.6 3.4 8 2 7.4 1.2 6.3 1.2 4.8 1.2 2.4 2.9 1 6 1ZM6 3.4C4.7 3.4 4 4 4 5.2S4.7 7 6 7 8 6.4 8 5.2 7.3 3.4 6 3.4ZM6 9.4C4.4 9.4 3.6 10.2 3.6 12S4.4 14.5 6 14.5 8.4 13.7 8.4 12 7.6 9.4 6 9.4Z"
+        }
+        9 => {
+            "M3.1 16.8L1.2 14.8C3.5 13.2 5.4 11.5 6.8 9.9 6.2 10.4 5.3 10.7 4.4 10.7 2.2 10.7 1 8.9 1 6.2 1 3 2.9 1 6 1 9.2 1 11 3.1 11 6.5 11 10.9 7.9 14.7 3.1 16.8ZM6 8.3C7.6 8.3 8.4 7.4 8.4 5.9 8.4 4.3 7.6 3.5 6 3.5 4.4 3.5 3.6 4.3 3.6 5.9 3.6 7.4 4.4 8.3 6 8.3Z"
+        }
         10 => glyph_path(10),
         11 => glyph_path(11),
         _ => unreachable!("time signatures are validated before rendering"),
