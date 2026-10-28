@@ -89,6 +89,252 @@ fn wraps_complete_measures_into_systems() {
 }
 
 #[test]
+fn composes_systems_onto_multiple_a4_pages() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("pages.musicxml");
+    let measures = (1..=96)
+        .map(|number| {
+            let divisions = if number == 1 {
+                "<attributes><divisions>1</divisions></attributes>"
+            } else {
+                ""
+            };
+            format!(
+                "<measure number=\"{number}\">{divisions}<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure>"
+            )
+        })
+        .collect::<String>();
+    let fixture = format!(
+        "<?xml version=\"1.0\"?><score-partwise version=\"4.0\"><part-list><score-part id=\"P1\"><part-name>Music</part-name></score-part></part-list><part id=\"P1\">{measures}</part></score-partwise>"
+    );
+    fs::write(&input, fixture).expect("write multi-page score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "page layout failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("pages.svg")).expect("read SVG");
+    assert!(svg.contains("width=\"210mm\" height=\"600.35mm\""), "{svg}");
+    assert!(svg.contains("viewBox=\"0 0 794 2270\""), "{svg}");
+    assert_eq!(svg.matches("class=\"page\"").count(), 2, "{svg}");
+    assert!(svg.contains("fill=\"#e5e5e5\""), "{svg}");
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 96, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn musicxml_new_page_print_creates_a_hard_page_break() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("explicit-page.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "</measure>",
+        "</measure><measure number=\"2\"><print new-page=\"yes\"/><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure>",
+    );
+    fs::write(&input, fixture).expect("write explicit page break score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "explicit page break failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("explicit-page.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"page\"").count(), 2, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn aligns_multiple_parts_across_a_forced_page_break() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("aligned-page-break.musicxml");
+    let parts = ["P1", "P2"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, id)| {
+            let page_break = if index == 1 {
+                "<print new-page=\"yes\"/>"
+            } else {
+                ""
+            };
+            format!(
+                "<part id=\"{id}\"><measure number=\"1\"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure><measure number=\"2\">{page_break}<note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part>"
+            )
+        })
+        .collect::<String>();
+    let fixture = format!(
+        "<score-partwise version=\"4.0\"><part-list><score-part id=\"P1\"><part-name>Flute</part-name></score-part><score-part id=\"P2\"><part-name>Oboe</part-name></score-part></part-list>{parts}</score-partwise>"
+    );
+    fs::write(&input, fixture).expect("write aligned page-break score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "multi-part page layout failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("aligned-page-break.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"page\"").count(), 2, "{svg}");
+    assert!(svg.contains("viewBox=\"0 0 794 2270\""), "{svg}");
+    let first_part_first_system = svg
+        .lines()
+        .find(|line| line.contains("id=\"part-0-staff-line-1\""))
+        .expect("first Part first System staff");
+    let second_part_first_system = svg
+        .lines()
+        .find(|line| line.contains("id=\"part-1-staff-line-1\""))
+        .expect("second Part first System staff");
+    let first_part_second_system = svg
+        .lines()
+        .find(|line| line.contains("id=\"part-0-system-1-staff-line-1\""))
+        .expect("first Part second System staff");
+    assert!(!first_part_first_system.contains("transform="));
+    assert_eq!(path_translation(second_part_first_system).1, 160);
+    assert_eq!(path_translation(first_part_second_system).1, 1147);
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn supports_letter_page_size() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("letter.musicxml");
+    fs::write(&input, include_str!("fixtures/minimal.musicxml")).expect("write Letter page score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--page-size")
+        .arg("letter")
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "Letter page layout failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("letter.svg")).expect("read SVG");
+    assert!(
+        svg.contains("width=\"215.9mm\" height=\"279.4mm\""),
+        "{svg}"
+    );
+    assert!(svg.contains("viewBox=\"0 0 816 1056\""), "{svg}");
+    assert_eq!(svg.matches("class=\"page\"").count(), 1, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_a_system_taller_than_the_page() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("too-tall.musicxml");
+    let part_list = (1..=7)
+        .map(|number| {
+            format!(
+                "<score-part id=\"P{number}\"><part-name>Part {number}</part-name></score-part>"
+            )
+        })
+        .collect::<String>();
+    let parts = (1..=7)
+        .map(|number| {
+            format!(
+                "<part id=\"P{number}\"><measure number=\"1\"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part>"
+            )
+        })
+        .collect::<String>();
+    fs::write(
+        &input,
+        format!("<score-partwise version=\"4.0\"><part-list>{part_list}</part-list>{parts}</score-partwise>"),
+    )
+    .expect("write overheight score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("cannot fit within the printable Page height"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!directory.join("too-tall.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_a_system_with_positioned_text_beyond_page_height() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("tall-text.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<measure number=\"1\">",
+        "<measure number=\"1\"><direction><direction-type><words default-y=\"1200\">Too high</words></direction-type></direction>",
+    );
+    fs::write(&input, fixture).expect("write overheight text score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("cannot fit within the printable Page height"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!directory.join("tall-text.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_multi_page_layout_example() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("multi-page-layout.musicxml");
+    fs::write(
+        &input,
+        include_str!("../examples/multi-page-layout/multi-page-layout.musicxml"),
+    )
+    .expect("write multi-page example");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "example render failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("multi-page-layout.svg")).expect("read SVG");
+    assert_eq!(svg.matches("class=\"page\"").count(), 2, "{svg}");
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 74, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn rejects_a_measure_wider_than_the_configured_system() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
@@ -2094,6 +2340,22 @@ fn svg_view_box_left(svg: &str) -> f64 {
         .unwrap_or_else(|| panic!("missing SVG viewBox left: {svg}"))
 }
 
+fn svg_content_offset(svg: &str) -> (f64, f64) {
+    let translation = svg
+        .lines()
+        .find(|line| line.starts_with("<g transform=\"translate("))
+        .and_then(|line| line.split("translate(").nth(1))
+        .and_then(|value| value.split(')').next())
+        .expect("page content group translation");
+    let mut coordinates = translation
+        .split_whitespace()
+        .map(|value| value.parse::<f64>().expect("page content group coordinate"));
+    (
+        coordinates.next().expect("content x offset"),
+        coordinates.next().expect("content y offset"),
+    )
+}
+
 fn text_path_x(svg: &str, id: &str) -> f64 {
     svg.lines()
         .find(|line| line.contains(&format!("id=\"{id}\"")))
@@ -2597,14 +2859,15 @@ fn includes_expanded_rehearsal_enclosure_in_svg_view_box() {
     );
     let svg = fs::read_to_string(directory.join("wide-rehearsal.svg")).expect("read SVG");
     let view_box_top = svg_view_box_top(&svg);
-    let enclosure_top = path_move_y(&svg, "text-0-enclosure");
+    let enclosure_top = path_move_y(&svg, "text-0-enclosure") + svg_content_offset(&svg).1;
     assert!(
         view_box_top <= enclosure_top - 0.75,
         "viewBox top {view_box_top} must contain the enclosure stroke above {enclosure_top}"
     );
     let view_box_bottom = svg_view_box_bottom(&svg);
     assert!(
-        view_box_bottom >= path_move_y(&svg, "text-0-enclosure") + 0.75,
+        view_box_bottom
+            >= path_move_y(&svg, "text-0-enclosure") + svg_content_offset(&svg).1 + 0.75,
         "viewBox bottom {view_box_bottom} must contain the enclosure stroke below"
     );
 
@@ -2633,7 +2896,7 @@ fn includes_negative_text_coordinates_in_svg_view_box() {
     );
     let svg = fs::read_to_string(directory.join("negative-text-coordinate.svg")).expect("read SVG");
     let view_box_left = svg_view_box_left(&svg);
-    let text_left = text_path_x(&svg, "text-1-glyph-0");
+    let text_left = text_path_x(&svg, "text-1-glyph-0") + svg_content_offset(&svg).0;
     assert!(
         view_box_left <= text_left,
         "viewBox left {view_box_left} must include text path at x={text_left}"
@@ -3705,17 +3968,8 @@ fn renders_fixture_to_default_and_explicit_svg_paths() {
         .expect("viewBox");
     let background_geometry = view_box.split_whitespace().collect::<Vec<_>>();
     assert_eq!(background_geometry.len(), 3);
-    assert_eq!(
-        svg.lines().nth(1),
-        Some(
-            format!(
-                "<rect id=\"background\" x=\"0\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#fff\"/>",
-                background_geometry[0], background_geometry[1], background_geometry[2]
-            )
-            .as_str()
-        ),
-        "opaque white background must fill the viewBox behind the score"
-    );
+    assert!(svg.lines().nth(1).unwrap().contains("fill=\"#e5e5e5\""));
+    assert!(svg.contains("class=\"page\""));
     assert_eq!(svg.matches("id=\"staff-line-").count(), 3);
     assert!(svg.contains("id=\"octave-4\""));
     assert!(svg.contains("id=\"octave-5\""));
