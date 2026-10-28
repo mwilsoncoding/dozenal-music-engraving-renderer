@@ -115,6 +115,291 @@ fn musicxml_new_page_print_creates_a_hard_page_break() {
 }
 
 #[test]
+fn musicxml_new_system_print_creates_a_hard_system_break() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("explicit-system.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Explicit System</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure><measure number="2"><print new-system="yes"/><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write explicit System break score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "explicit System break failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("explicit-system.svg")).expect("read SVG");
+    assert!(svg.contains("id=\"system-1-staff-line-1\""), "{svg}");
+    let first = svg
+        .lines()
+        .find(|line| line.contains("id=\"tonehead\""))
+        .expect("first measure Tonehead");
+    let second = svg
+        .lines()
+        .find(|line| line.contains("id=\"tonehead-1\""))
+        .expect("second measure Tonehead");
+    assert!(path_translation_f64(second).1 > path_translation_f64(first).1);
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn musicxml_measure_distance_sets_a_minimum_inter_measure_advance() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("measure-distance.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Measure Distance</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure><measure number="2"><print><measure-layout><measure-distance>120</measure-distance></measure-layout></print><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write measure-distance score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "measure-distance failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("measure-distance.svg")).expect("read SVG");
+    let barline_x = |id: &str| {
+        svg.lines()
+            .find(|line| line.contains(&format!("id=\"{id}\"")))
+            .and_then(|line| line.split_once("d=\"M"))
+            .and_then(|(_, path)| path.split_once(' '))
+            .and_then(|(x, _)| x.parse::<i32>().ok())
+            .unwrap_or_else(|| panic!("missing barline path {id}"))
+    };
+    assert!(
+        barline_x("barline-2") - barline_x("barline-1") >= 240,
+        "{svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn musicxml_scaling_converts_measure_distance_to_renderer_units() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("scaled-measure-distance.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><defaults><scaling><millimeters>7</millimeters><tenths>40</tenths></scaling></defaults><part-list><score-part id="P1"><part-name>Scaled Distance</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure><measure number="2"><print><measure-layout><measure-distance>120</measure-distance></measure-layout></print><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write scaled measure-distance score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "scaled measure-distance failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("scaled-measure-distance.svg")).expect("read SVG");
+    let barline_x = |id: &str| {
+        svg.lines()
+            .find(|line| line.contains(&format!("id=\"{id}\"")))
+            .and_then(|line| line.split_once("d=\"M"))
+            .and_then(|(_, path)| path.split_once(' '))
+            .and_then(|(x, _)| x.parse::<i32>().ok())
+            .unwrap_or_else(|| panic!("missing barline path {id}"))
+    };
+    assert!(
+        barline_x("barline-2") - barline_x("barline-1") >= 80,
+        "{svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_conflicting_system_break_hints_across_parts() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("conflicting-system-breaks.musicxml");
+    let parts = [
+        ("P1", "<print new-system=\"yes\"/>"),
+        ("P2", "<print new-system=\"no\"/>"),
+    ]
+    .into_iter()
+    .map(|(id, print)| {
+        format!(
+            "<part id=\"{id}\"><measure number=\"1\"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure><measure number=\"2\">{print}<note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part>"
+        )
+    })
+    .collect::<String>();
+    let fixture = format!(
+        "<?xml version=\"1.0\"?><score-partwise version=\"4.0\"><part-list><score-part id=\"P1\"><part-name>First</part-name></score-part><score-part id=\"P2\"><part-name>Second</part-name></score-part></part-list>{parts}</score-partwise>"
+    );
+    fs::write(&input, fixture).expect("write conflicting break score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("conflicting System break instructions before measure 2"),
+        "{stderr}"
+    );
+    assert!(!directory.join("conflicting-system-breaks.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_conflicting_system_break_hints_within_a_part() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("contradictory-system-hints.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Contradictory Hints</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure><measure number="2"><print new-system="yes"/><print new-system="no"/><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write contradictory hint score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("conflicting new-system hints in one Measure"),
+        "{stderr}"
+    );
+    assert!(!directory.join("contradictory-system-hints.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn aligned_parts_use_the_largest_measure_distance_minimum() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("aligned-measure-distance.musicxml");
+    let parts = [("P1", "30"), ("P2", "120")]
+        .into_iter()
+        .map(|(id, distance)| {
+            format!(
+                "<part id=\"{id}\"><measure number=\"1\"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure><measure number=\"2\"><print><measure-layout><measure-distance>{distance}</measure-distance></measure-layout></print><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part>"
+            )
+        })
+        .collect::<String>();
+    let fixture = format!(
+        "<?xml version=\"1.0\"?><score-partwise version=\"4.0\"><part-list><score-part id=\"P1\"><part-name>First</part-name></score-part><score-part id=\"P2\"><part-name>Second</part-name></score-part></part-list>{parts}</score-partwise>"
+    );
+    fs::write(&input, fixture).expect("write aligned measure-distance score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "aligned measure-distance failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("aligned-measure-distance.svg")).expect("read SVG");
+    let barline_x = |id: &str| {
+        svg.lines()
+            .find(|line| line.contains(&format!("id=\"{id}\"")))
+            .and_then(|line| line.split_once("d=\"M"))
+            .and_then(|(_, path)| path.split_once(' '))
+            .and_then(|(x, _)| x.parse::<i32>().ok())
+            .unwrap_or_else(|| panic!("missing barline path {id}"))
+    };
+    let first_part_gap = barline_x("part-0-barline-2") - barline_x("part-0-barline-1");
+    let second_part_gap = barline_x("part-1-barline-2") - barline_x("part-1-barline-1");
+    assert!(first_part_gap >= 240, "{svg}");
+    assert_eq!(first_part_gap, second_part_gap, "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_width_break_forbidden_by_new_system_no() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("forbidden-system-break.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Forbidden Break</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure><measure number="2"><print new-system="no"><measure-layout><measure-distance>600</measure-distance></measure-layout></print><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write forbidden-break score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("new-system=\"no\" before measure 2 prevents the required System break"),
+        "{stderr}"
+    );
+    assert!(!directory.join("forbidden-system-break.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn warns_when_ignoring_unsupported_print_geometry() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("unsupported-print-geometry.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><defaults><system-layout><system-distance>80</system-distance></system-layout><staff-layout><staff-distance>55</staff-distance></staff-layout></defaults><part-list><score-part id="P1"><part-name>Print Geometry</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><print staff-spacing="18"><system-layout><system-margins><left-margin>10</left-margin></system-margins></system-layout><staff-layout><staff-distance>50</staff-distance></staff-layout></print><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write unsupported print geometry score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "unsupported geometry should be ignored: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for warning in [
+        "deprecated print staff-spacing is ignored",
+        "unsupported <system-layout> geometry is ignored",
+        "unsupported <staff-layout> geometry is ignored",
+        "unsupported defaults <system-layout> geometry is ignored",
+        "unsupported defaults <staff-layout> geometry is ignored",
+    ] {
+        assert!(stderr.contains(warning), "missing {warning:?} in {stderr}");
+    }
+    assert!(directory.join("unsupported-print-geometry.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_malformed_measure_distance_with_xml_context() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("malformed-measure-distance.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Bad Distance</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure><measure number="2"><print><measure-layout><measure-distance>wide</measure-distance></measure-layout></print><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write malformed measure-distance score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("measure-distance must be a finite nonnegative number"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("measure[@number='2']/print/measure-layout/measure-distance"),
+        "{stderr}"
+    );
+    assert!(!directory.join("malformed-measure-distance.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn aligns_multiple_parts_across_a_forced_page_break() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
