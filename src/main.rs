@@ -309,6 +309,7 @@ struct Measure {
     beat_repeat_segments: Vec<BeatRepeatSegment>,
     input_staff_states: Vec<InputStaffState>,
     barlines: Vec<MeasureBarline>,
+    new_page_before: bool,
 }
 
 #[derive(Clone)]
@@ -400,17 +401,17 @@ struct ScorePart {
     instrument_ids: Vec<String>,
 }
 
-struct SvgViewBox {
-    left: i32,
-    top: i32,
-    width: i32,
-    height: i32,
-}
-
 struct RenderedPart {
     svg: String,
-    view_box: SvgViewBox,
     barline_positions: Vec<i32>,
+    view_left: i32,
+    system_vertical_bounds: Vec<VerticalBounds>,
+}
+
+#[derive(Clone, Copy)]
+struct VerticalBounds {
+    top: i32,
+    bottom: i32,
 }
 
 const SYSTEM_MAX_WIDTH: i32 = 680;
@@ -422,6 +423,7 @@ struct SystemLayout {
     local_barline_positions: Vec<i32>,
     x_offsets: Vec<i32>,
     gap_expansions: Vec<i32>,
+    system_y_offsets: Vec<i32>,
 }
 
 #[derive(Clone)]
@@ -558,6 +560,7 @@ struct CliOptions {
     output_path: Option<PathBuf>,
     input_staff_mode: InputStaffMode,
     system_alignment: SystemAlignment,
+    page_size: PageSize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -573,6 +576,24 @@ enum SystemAlignment {
     Right,
     Centered,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PageSize {
+    A4,
+    Letter,
+}
+
+impl PageSize {
+    fn dimensions(self) -> (i32, i32, &'static str, &'static str, f64) {
+        match self {
+            Self::A4 => (794, 1123, "210mm", "297mm", 297.0),
+            Self::Letter => (816, 1056, "215.9mm", "279.4mm", 279.4),
+        }
+    }
+}
+
+const PAGE_MARGIN: i32 = 57;
+const PAGE_GUTTER: i32 = 24;
 
 fn main() {
     if let Err(message) = run() {
@@ -602,7 +623,12 @@ fn run() -> Result<(), String> {
 
     let rendered_outputs = match options.input_staff_mode {
         InputStaffMode::Combine => {
-            let svg = render_svg_with_alignment(&score, &mut warnings, options.system_alignment)?;
+            let svg = render_svg_with_alignment(
+                &score,
+                &mut warnings,
+                options.system_alignment,
+                options.page_size,
+            )?;
             vec![(output_path, svg)]
         }
         InputStaffMode::Separate => {
@@ -620,6 +646,7 @@ fn run() -> Result<(), String> {
                     &staff_score,
                     &mut warnings,
                     options.system_alignment,
+                    options.page_size,
                 )?;
                 outputs.push((path, svg));
             }
@@ -646,6 +673,7 @@ fn parse_args() -> Result<CliOptions, String> {
     let mut output = None;
     let mut input_staff_mode = None;
     let mut system_alignment = None;
+    let mut page_size = None;
 
     while let Some(argument) = args.next() {
         if argument == "--output" {
@@ -700,6 +728,26 @@ fn parse_args() -> Result<CliOptions, String> {
                     }
                 },
             );
+        } else if argument == "--page-size" {
+            if page_size.is_some() {
+                return Err("--page-size may only be specified once".to_owned());
+            }
+            page_size = Some(
+                match args
+                    .next()
+                    .ok_or_else(|| "--page-size requires a4 or letter".to_owned())?
+                    .to_string_lossy()
+                    .as_ref()
+                {
+                    "a4" => PageSize::A4,
+                    "letter" => PageSize::Letter,
+                    value => {
+                        return Err(format!(
+                            "--page-size must be 'a4' or 'letter', not {value:?}"
+                        ));
+                    }
+                },
+            );
         } else if argument.to_string_lossy().starts_with('-') {
             return Err(format!("unsupported option {}", argument.to_string_lossy()));
         } else if input.replace(PathBuf::from(argument)).is_some() {
@@ -708,13 +756,14 @@ fn parse_args() -> Result<CliOptions, String> {
     }
 
     let input = input.ok_or_else(|| {
-        "usage: domunor INPUT [--output FILE.svg] [--input-staff-mode combine|separate] [--system-alignment justified|left|right|centered]".to_owned()
+        "usage: domunor INPUT [--output FILE.svg] [--input-staff-mode combine|separate] [--system-alignment justified|left|right|centered] [--page-size a4|letter]".to_owned()
     })?;
     Ok(CliOptions {
         input_path: input,
         output_path: output,
         input_staff_mode: input_staff_mode.unwrap_or(InputStaffMode::Combine),
         system_alignment: system_alignment.unwrap_or(SystemAlignment::Justified),
+        page_size: page_size.unwrap_or(PageSize::A4),
     })
 }
 
@@ -848,6 +897,7 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
                             transposition: staff_state.transposition,
                         }],
                         barlines,
+                        new_page_before: measure.new_page_before,
                     }
                 })
                 .collect();
@@ -1387,6 +1437,18 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
             for child in &measure_element.children {
                 let element = &elements[*child];
                 match element.name.as_str() {
+                    "print" => {
+                        validate_attributes(element, &["new-page"])?;
+                        require_container_text(element)?;
+                        if let Some(value) = optional_attribute(element, "new-page") {
+                            if !matches!(value, "yes" | "no") {
+                                return Err(element_diagnostic(
+                                    element,
+                                    format!("print new-page must be 'yes' or 'no', not {value:?}"),
+                                ));
+                            }
+                        }
+                    }
                     "attributes" => {
                         require_no_attributes(element)?;
                         require_container_text(element)?;
@@ -2215,6 +2277,10 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                 beat_repeat_segments,
                 input_staff_states: active_staff_states.clone(),
                 barlines,
+                new_page_before: measure_element.children.iter().any(|child| {
+                    elements[*child].name == "print"
+                        && optional_attribute(&elements[*child], "new-page") == Some("yes")
+                }),
             });
         }
         if measures.is_empty() {
@@ -9871,6 +9937,7 @@ fn plan_system_layout(
             local_barline_positions: Vec::new(),
             x_offsets: vec![0],
             gap_expansions: Vec::new(),
+            system_y_offsets: vec![0],
         });
     }
 
@@ -9980,19 +10047,60 @@ fn plan_system_layout(
         }
     }
 
+    let system_count = starts.len();
     Ok(SystemLayout {
         starts,
         measure_systems,
         local_barline_positions,
         x_offsets,
         gap_expansions,
+        system_y_offsets: vec![0; system_count],
     })
+}
+
+fn plan_page_layout(
+    system_layout: &mut SystemLayout,
+    page_break_before: &[bool],
+    part_count: usize,
+    page_height: i32,
+    system_bounds: &[VerticalBounds],
+    content_top: i32,
+) -> Result<i32, String> {
+    let printable_height = page_height - content_top - PAGE_MARGIN;
+    let system_height = part_count as i32 * SYSTEM_ROW_HEIGHT;
+    let mut page = 0;
+    let mut used_height = 0;
+    for (system_index, (system_start, bounds)) in system_layout
+        .starts
+        .iter()
+        .copied()
+        .zip(system_bounds.iter().copied())
+        .enumerate()
+    {
+        let occupied_height = system_height.max(bounds.bottom);
+        if occupied_height > printable_height {
+            return Err(format!(
+                "System {} is {occupied_height} units high and cannot fit within the printable Page height of {printable_height} units",
+                system_index + 1
+            ));
+        }
+        let forced_break = system_index > 0 && page_break_before[system_start];
+        if forced_break || used_height + occupied_height > printable_height {
+            page += 1;
+            used_height = 0;
+        }
+        system_layout.system_y_offsets[system_index] =
+            page * (page_height + PAGE_GUTTER) + used_height;
+        used_height += occupied_height;
+    }
+    Ok(page + 1)
 }
 
 fn render_svg_with_alignment(
     score: &Score,
     warnings: &mut Vec<String>,
     alignment: SystemAlignment,
+    page_size: PageSize,
 ) -> Result<String, String> {
     let provisional = score
         .parts
@@ -10021,8 +10129,84 @@ fn render_svg_with_alignment(
             .max()
             .expect("a score contains at least one Part");
     }
-    let system_layout =
-        plan_system_layout(&measure_barline_positions, alignment, SYSTEM_MAX_WIDTH, &[])?;
+    let page_break_before = (0..score.parts[0].measures.len())
+        .map(|measure_index| {
+            score
+                .parts
+                .iter()
+                .any(|part| part.measures[measure_index].new_page_before)
+        })
+        .collect::<Vec<_>>();
+    let explicit_page_breaks = page_break_before
+        .iter()
+        .enumerate()
+        .filter_map(|(index, forced)| (*forced).then_some(index))
+        .collect::<Vec<_>>();
+    let (page_width, page_height, page_width_mm, page_height_mm, physical_page_height) =
+        page_size.dimensions();
+    let content_left = PAGE_MARGIN
+        - provisional
+            .iter()
+            .map(|part| part.view_left)
+            .min()
+            .unwrap_or(0)
+            .min(0);
+    let printable_width = (page_width - PAGE_MARGIN * 2).min(SYSTEM_MAX_WIDTH);
+    let mut system_layout = plan_system_layout(
+        &measure_barline_positions,
+        alignment,
+        printable_width,
+        &explicit_page_breaks,
+    )?;
+    let measured_systems = score
+        .parts
+        .iter()
+        .enumerate()
+        .map(|(part_index, part)| {
+            let mut measure_warnings = Vec::new();
+            render_part_svg(
+                part,
+                &mut measure_warnings,
+                (score.parts.len() > 1).then_some(&system_layout.local_barline_positions),
+                Some(&system_layout),
+                part_index,
+                score.parts.len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let system_bounds = (0..system_layout.starts.len())
+        .map(|system_index| {
+            measured_systems.iter().enumerate().fold(
+                VerticalBounds {
+                    top: 0,
+                    bottom: score.parts.len() as i32 * SYSTEM_ROW_HEIGHT,
+                },
+                |bounds, (part_index, part)| {
+                    let part_bounds = part.system_vertical_bounds[system_index];
+                    let part_offset = part_index as i32 * SYSTEM_ROW_HEIGHT;
+                    VerticalBounds {
+                        top: bounds.top.min(part_bounds.top + part_offset),
+                        bottom: bounds.bottom.max(part_bounds.bottom + part_offset),
+                    }
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let content_top = PAGE_MARGIN
+        - system_bounds
+            .iter()
+            .map(|bounds| bounds.top)
+            .min()
+            .unwrap_or(0)
+            .min(0);
+    let page_count = plan_page_layout(
+        &mut system_layout,
+        &page_break_before,
+        score.parts.len(),
+        page_height,
+        &system_bounds,
+        content_top,
+    )?;
     let rendered = score
         .parts
         .iter()
@@ -10038,59 +10222,39 @@ fn render_svg_with_alignment(
             )
         })
         .collect::<Vec<_>>();
-    if score.parts.len() == 1 {
-        return Ok(rendered.into_iter().next().expect("score has one Part").svg);
-    }
-    let left = rendered
-        .iter()
-        .map(|part| part.view_box.left)
-        .min()
-        .unwrap_or(0);
-    let top = rendered
-        .iter()
-        .map(|part| part.view_box.top)
-        .min()
-        .unwrap_or(0);
-    let notation_right = rendered
-        .iter()
-        .map(|part| part.view_box.left + part.view_box.width)
-        .max()
-        .unwrap_or(128);
-    let part_name_right = score
-        .parts
-        .iter()
-        .map(|part| {
-            12.0 + part
-                .name
-                .chars()
-                .map(|character| {
-                    noto_sans_glyphs::glyph(character)
-                        .expect("Part name was checked against the bundled glyph repertoire")
-                        .advance
-                        * 12.0
-                        / noto_sans_glyphs::UNITS_PER_EM
-                })
-                .sum::<f64>()
-        })
-        .fold(0.0_f64, f64::max)
-        .ceil() as i32;
-    let right = notation_right.max(part_name_right);
-    let width = right - left;
-    let height = rendered
-        .iter()
-        .map(|part| part.view_box.height)
-        .max()
-        .unwrap_or(0);
+    let height = page_count * page_height + (page_count - 1) * PAGE_GUTTER;
+    let physical_height = if page_count == 1 {
+        page_height_mm.to_owned()
+    } else {
+        format!(
+            "{:.2}mm",
+            f64::from(page_count) * physical_page_height
+                + f64::from(page_count - 1) * (PAGE_GUTTER as f64 * 25.4 / 96.0)
+        )
+    };
     let mut svg = String::new();
-    writeln!(svg, "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{left} {top} {width} {height}\" role=\"img\">")
+    writeln!(svg, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{page_width_mm}\" height=\"{physical_height}\" viewBox=\"0 0 {page_width} {height}\" role=\"img\">")
         .expect("writing to a String cannot fail");
-    writeln!(svg, "<rect id=\"background\" x=\"{left}\" y=\"{top}\" width=\"{width}\" height=\"{height}\" fill=\"#fff\"/>")
+    writeln!(svg, "<rect id=\"background\" x=\"0\" y=\"0\" width=\"{page_width}\" height=\"{height}\" fill=\"#e5e5e5\"/>")
         .expect("writing to a String cannot fail");
+    for page in 0..page_count {
+        let page_top = page * (page_height + PAGE_GUTTER);
+        writeln!(svg, "<rect id=\"page-{}\" class=\"page\" x=\"0\" y=\"{page_top}\" width=\"{page_width}\" height=\"{page_height}\" fill=\"#fff\"/>", page + 1)
+            .expect("writing to a String cannot fail");
+    }
+    writeln!(
+        svg,
+        "<g transform=\"translate({content_left} {content_top})\">"
+    )
+    .expect("writing to a String cannot fail");
     for (part_index, (part, rendered_part)) in score.parts.iter().zip(rendered).enumerate() {
         let scale = 12.0 / noto_sans_glyphs::UNITS_PER_EM;
         for system_index in 0..system_layout.starts.len() {
-            let row_top =
-                (system_index * score.parts.len() + part_index) as i32 * SYSTEM_ROW_HEIGHT;
+            let row_top = system_layout.system_y_offsets[system_index]
+                + part_index as i32 * SYSTEM_ROW_HEIGHT;
+            if score.parts.len() == 1 {
+                continue;
+            }
             let mut name_x = 12.0;
             for (glyph_index, character) in part.name.chars().enumerate() {
                 let glyph = noto_sans_glyphs::glyph(character)
@@ -10114,19 +10278,35 @@ fn render_svg_with_alignment(
             .skip(2)
             .take_while(|line| *line != "</svg>")
         {
-            svg.push_str(&line.replace("id=\"", &format!("id=\"part-{part_index}-")));
+            if score.parts.len() > 1 {
+                svg.push_str(&line.replace("id=\"", &format!("id=\"part-{part_index}-")));
+            } else {
+                svg.push_str(line);
+            }
             svg.push('\n');
         }
         svg.push_str("</g>\n");
     }
-    svg.push_str("</svg>\n");
+    svg.push_str("</g>\n</svg>\n");
     Ok(svg)
 }
 
 #[cfg(test)]
 fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
-    render_svg_with_alignment(score, warnings, SystemAlignment::Left)
+    render_svg_with_alignment(score, warnings, SystemAlignment::Left, PageSize::A4)
         .expect("score fits the configured System width")
+}
+
+fn system_y_offset(
+    system_layout: Option<&SystemLayout>,
+    system_index: usize,
+    part_index: usize,
+    part_count: usize,
+) -> i32 {
+    system_layout.map_or(
+        (system_index * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT,
+        |layout| layout.system_y_offsets[system_index] + part_index as i32 * SYSTEM_ROW_HEIGHT,
+    )
 }
 
 fn measure_barline_position(
@@ -10378,6 +10558,14 @@ fn render_part_svg(
     let mut pending_texts = Vec::new();
     let mut notation_bounds = Vec::new();
     let mut system_notation_bounds = Vec::new();
+    let system_count = system_layout.map_or(1, |layout| layout.starts.len());
+    let mut system_vertical_bounds = vec![
+        VerticalBounds {
+            top: 0,
+            bottom: 128
+        };
+        system_count
+    ];
     let mut active_ending: Option<(i32, String)> = None;
     for (measure_index, measure) in part.measures.iter().enumerate() {
         let system_index = system_layout
@@ -10389,11 +10577,20 @@ fn render_part_svg(
             if measure_index > 0 {
                 system_notation_bounds.push(notation_bounds.clone());
                 notation_bounds.clear();
+                system_vertical_bounds[system_index - 1] = VerticalBounds {
+                    top: view_top,
+                    bottom: view_bottom,
+                };
+                view_top = 0;
+                view_bottom = 128;
             }
             x = 92 + system_layout.map_or(0, |layout| layout.x_offsets[system_index]);
-            scene.set_system_y_offset(
-                (system_index * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT,
-            );
+            scene.set_system_y_offset(system_y_offset(
+                system_layout,
+                system_index,
+                part_index,
+                part_count,
+            ));
             active_meter = None;
         }
         let measure_start_x = f64::from(x);
@@ -11616,6 +11813,20 @@ fn render_part_svg(
         right = right.max(barline_x + 12);
         x = barline_x + 4 + system_layout.map_or(0, |layout| layout.gap_expansions[measure_index]);
     }
+    system_vertical_bounds[system_count - 1] = VerticalBounds {
+        top: view_top,
+        bottom: view_bottom,
+    };
+    let mut view_top = system_vertical_bounds
+        .iter()
+        .map(|bounds| bounds.top)
+        .min()
+        .unwrap_or(0);
+    let mut view_bottom = system_vertical_bounds
+        .iter()
+        .map(|bounds| bounds.bottom)
+        .max()
+        .unwrap_or(128);
     system_notation_bounds.push(notation_bounds.clone());
     for (measure_index, measure) in part.measures.iter().enumerate() {
         let Some(multiple_rest) = &measure.multiple_rest else {
@@ -11725,7 +11936,7 @@ fn render_part_svg(
             .get(end.saturating_sub(1))
             .copied()
             .unwrap_or(final_barline_x);
-        let system_offset = (system_index * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT;
+        let system_offset = system_y_offset(system_layout, system_index, part_index, part_count);
         scene.set_system_y_offset(system_offset);
         for (staff_index, staff_y) in [28.0, 68.0, 108.0].into_iter().enumerate() {
             let id = if system_index == 0 {
@@ -11774,10 +11985,15 @@ fn render_part_svg(
         if current_text_system != Some(system_index) {
             occupied_text.clear();
             current_text_system = Some(system_index);
+            view_top = system_vertical_bounds[system_index].top;
+            view_bottom = system_vertical_bounds[system_index].bottom;
         }
-        scene.set_system_y_offset(
-            (system_index * part_count + part_index) as i32 * SYSTEM_ROW_HEIGHT,
-        );
+        scene.set_system_y_offset(system_y_offset(
+            system_layout,
+            system_index,
+            part_index,
+            part_count,
+        ));
         add_text_item(
             &mut scene,
             text,
@@ -11794,7 +12010,21 @@ fn render_part_svg(
                 view_bottom: &mut view_bottom,
             },
         );
+        system_vertical_bounds[system_index].top =
+            system_vertical_bounds[system_index].top.min(view_top);
+        system_vertical_bounds[system_index].bottom =
+            system_vertical_bounds[system_index].bottom.max(view_bottom);
     }
+    view_top = system_vertical_bounds
+        .iter()
+        .map(|bounds| bounds.top)
+        .min()
+        .unwrap_or(0);
+    view_bottom = system_vertical_bounds
+        .iter()
+        .map(|bounds| bounds.bottom)
+        .max()
+        .unwrap_or(128);
     let view_width = right + 12 - left;
     let row_count = system_count * part_count;
     let system_height = if row_count == 1 {
@@ -11806,17 +12036,12 @@ fn render_part_svg(
     scene.view_top = view_top;
     scene.view_width = view_width;
     scene.view_height = system_height;
-    let view_box = SvgViewBox {
-        left,
-        top: view_top,
-        width: view_width,
-        height: system_height,
-    };
     scene.set_system_y_offset(0);
     RenderedPart {
         svg: scene.to_svg(),
-        view_box,
         barline_positions,
+        view_left: left,
+        system_vertical_bounds,
     }
 }
 
