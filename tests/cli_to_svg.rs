@@ -115,6 +115,31 @@ fn musicxml_new_page_print_creates_a_hard_page_break() {
 }
 
 #[test]
+fn musicxml_defaults_page_layout_overrides_cli_page_size() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("defaults-page-layout.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><defaults><scaling><millimeters>7</millimeters><tenths>40</tenths></scaling><page-layout><page-height>1697.142857</page-height><page-width>1200</page-width></page-layout></defaults><part-list><score-part id="P1"><part-name>Page Layout</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write defaults page-layout score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--page-size")
+        .arg("letter")
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "defaults page layout failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("defaults-page-layout.svg")).expect("read SVG");
+    assert!(svg.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"210mm\" height=\"297mm\" viewBox=\"0 0 794 1123\""), "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn musicxml_new_system_print_creates_a_hard_system_break() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");

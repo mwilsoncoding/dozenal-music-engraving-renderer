@@ -689,6 +689,7 @@ struct InputClef {
 struct Score {
     parts: Vec<Part>,
     warnings: Vec<String>,
+    page_size_hint: Option<PageSize>,
 }
 
 struct CliOptions {
@@ -750,6 +751,7 @@ fn run() -> Result<(), String> {
         path.set_extension("svg");
         path
     });
+    let page_size = score.page_size_hint.unwrap_or(options.page_size);
     if output_path
         .extension()
         .is_none_or(|extension| extension != "svg")
@@ -763,7 +765,7 @@ fn run() -> Result<(), String> {
                 &score,
                 &mut warnings,
                 options.system_alignment,
-                options.page_size,
+                page_size,
             )?;
             vec![(output_path, svg)]
         }
@@ -782,7 +784,7 @@ fn run() -> Result<(), String> {
                     &staff_score,
                     &mut warnings,
                     options.system_alignment,
-                    options.page_size,
+                    page_size,
                 )?;
                 outputs.push((path, svg));
             }
@@ -1052,6 +1054,7 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
     Score {
         parts,
         warnings: score.warnings.clone(),
+        page_size_hint: score.page_size_hint,
     }
 }
 
@@ -1218,7 +1221,7 @@ fn parse_note_size_defaults(
     }
     for child in &defaults_element.children {
         match elements[*child].name.as_str() {
-            "appearance" | "scaling" => {}
+            "appearance" | "scaling" | "page-layout" => {}
             "system-layout" | "staff-layout" => warnings.push(element_diagnostic(
                 &elements[*child],
                 format!(
@@ -1295,6 +1298,101 @@ fn parse_note_size_defaults(
         }
     }
     Ok(scales)
+}
+
+fn parse_page_size_defaults(
+    elements: &[Element],
+    defaults: Option<usize>,
+    tenths_to_pixels: f64,
+    warnings: &mut Vec<String>,
+) -> Result<Option<PageSize>, String> {
+    let Some(defaults) = defaults else {
+        return Ok(None);
+    };
+    let page_layouts = elements[defaults]
+        .children
+        .iter()
+        .filter(|child| elements[**child].name == "page-layout")
+        .copied()
+        .collect::<Vec<_>>();
+    let Some(page_layout) = page_layouts.first().copied() else {
+        return Ok(None);
+    };
+    if page_layouts.len() > 1 {
+        return Err(element_diagnostic(
+            &elements[page_layouts[1]],
+            "duplicate <page-layout> in defaults".to_owned(),
+        ));
+    }
+    require_no_attributes(&elements[page_layout])?;
+    require_container_text(&elements[page_layout])?;
+    let mut width = None;
+    let mut height = None;
+    for child in &elements[page_layout].children {
+        let element = &elements[*child];
+        match element.name.as_str() {
+            "page-width" | "page-height" => {
+                require_no_attributes(element)?;
+                if !element.children.is_empty() {
+                    return Err(element_diagnostic(
+                        element,
+                        format!("<{}> must contain a positive number", element.name),
+                    ));
+                }
+                let value = element
+                    .text
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|value| value.is_finite() && *value > 0.0)
+                    .ok_or_else(|| {
+                        element_diagnostic(
+                            element,
+                            format!("<{}> must be positive and finite", element.name),
+                        )
+                    })?;
+                let target = if element.name == "page-width" {
+                    &mut width
+                } else {
+                    &mut height
+                };
+                if target.replace(value).is_some() {
+                    return Err(element_diagnostic(
+                        element,
+                        format!("duplicate <{}> in <page-layout>", element.name),
+                    ));
+                }
+            }
+            "page-margins" => warnings.push(element_diagnostic(
+                element,
+                "explicit page margins are ignored; renderer defaults are used".to_owned(),
+            )),
+            _ => warnings.push(element_diagnostic(
+                element,
+                format!("unsupported page-layout <{}> is ignored", element.name),
+            )),
+        }
+    }
+    let (Some(width), Some(height)) = (width, height) else {
+        return Ok(None);
+    };
+    let dimensions = (
+        (width * tenths_to_pixels).round() as i32,
+        (height * tenths_to_pixels).round() as i32,
+    );
+    let page_size = [PageSize::A4, PageSize::Letter]
+        .into_iter()
+        .find(|page_size| {
+            let (page_width, page_height, _, _, _) = page_size.dimensions();
+            dimensions == (page_width, page_height)
+        });
+    if page_size.is_none() {
+        warnings.push(element_diagnostic(
+            &elements[page_layout],
+            "custom page dimensions are ignored; renderer defaults are used".to_owned(),
+        ));
+    }
+    Ok(page_size)
 }
 
 fn parse_musicxml_tenths_scale(
@@ -1485,6 +1583,8 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
         .transpose()?
         .unwrap_or_default();
     let tenths_to_pixels = parse_musicxml_tenths_scale(&elements, defaults)?;
+    let page_size_hint =
+        parse_page_size_defaults(&elements, defaults, tenths_to_pixels, &mut warnings)?;
     let part_list = root_children[part_list_index];
     require_no_attributes(&elements[part_list])?;
     require_container_text(&elements[part_list])?;
@@ -2749,7 +2849,11 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
         });
     }
 
-    Ok(Score { parts, warnings })
+    Ok(Score {
+        parts,
+        warnings,
+        page_size_hint,
+    })
 }
 
 fn validate_tremolo_pairs(
