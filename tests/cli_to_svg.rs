@@ -374,7 +374,7 @@ fn deferred_print_layout_fields_warn_and_are_ignored() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
     let input = directory.join("deferred-print-layout.musicxml");
-    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Deferred Layout</part-name></score-part></part-list><part id="P1"><measure number="1"><print><system-layout><system-distance>120</system-distance></system-layout><staff-layout number="1"><staff-distance>80</staff-distance></staff-layout></print><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Deferred Layout</part-name></score-part></part-list><part id="P1"><measure number="1"><print blank-page="1" page-number="iv"><system-layout><system-distance>120</system-distance></system-layout><staff-layout number="1"><staff-distance>80</staff-distance></staff-layout></print><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
     fs::write(&input, fixture).expect("write deferred print-layout score");
 
     let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
@@ -395,6 +395,8 @@ fn deferred_print_layout_fields_warn_and_are_ignored() {
         stderr.contains("unsupported <staff-layout> geometry is ignored"),
         "{stderr}"
     );
+    assert!(stderr.contains("print blank-page is ignored"), "{stderr}");
+    assert!(stderr.contains("print page-number is ignored"), "{stderr}");
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
@@ -479,6 +481,57 @@ fn malformed_deferred_layout_values_fail_with_context() {
         "{stderr}"
     );
     assert!(!directory.join("malformed-system-layout.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn malformed_page_margins_fail_with_element_context() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("malformed-page-margins.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><defaults><page-layout><page-margins type="both"><left-margin>20</left-margin></page-margins></page-layout></defaults><part-list><score-part id="P1"><part-name>Malformed Margins</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write malformed page-margins score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("page-margins requires left, right, top, and bottom margins"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("/defaults/page-layout/page-margins"),
+        "{stderr}"
+    );
+    assert!(!directory.join("malformed-page-margins.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn malformed_deferred_print_attributes_fail_with_context() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("malformed-print-attributes.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Malformed Print</part-name></score-part></part-list><part id="P1"><measure number="1"><print blank-page="0"/><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write malformed print-attribute score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("print blank-page must be a positive integer"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("/print"), "{stderr}");
+    assert!(!directory.join("malformed-print-attributes.svg").exists());
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }

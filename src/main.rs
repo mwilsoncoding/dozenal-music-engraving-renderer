@@ -1409,6 +1409,12 @@ fn parse_page_size_layout(
                     seen.push(margin_element.name.as_str());
                     validate_layout_number(margin_element, true)?;
                 }
+                if seen.len() != 4 {
+                    return Err(element_diagnostic(
+                        element,
+                        "page-margins requires left, right, top, and bottom margins".to_owned(),
+                    ));
+                }
                 warnings.push(element_diagnostic(
                     element,
                     "explicit page margins are ignored; renderer defaults are used".to_owned(),
@@ -2126,7 +2132,16 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                 let element = &elements[*child];
                 match element.name.as_str() {
                     "print" => {
-                        validate_attributes(element, &["new-page", "new-system", "staff-spacing"])?;
+                        validate_attributes(
+                            element,
+                            &[
+                                "new-page",
+                                "new-system",
+                                "staff-spacing",
+                                "blank-page",
+                                "page-number",
+                            ],
+                        )?;
                         require_container_text(element)?;
                         for attribute in ["new-page", "new-system"] {
                             if let Some(value) = optional_attribute(element, attribute) {
@@ -2137,6 +2152,30 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                     ));
                                 }
                             }
+                        }
+                        if let Some(value) = optional_attribute(element, "blank-page") {
+                            if value.parse::<u32>().ok().is_none_or(|number| number == 0) {
+                                return Err(element_diagnostic(
+                                    element,
+                                    "print blank-page must be a positive integer".to_owned(),
+                                ));
+                            }
+                            warnings.push(element_diagnostic(
+                                element,
+                                "print blank-page is ignored".to_owned(),
+                            ));
+                        }
+                        if let Some(value) = optional_attribute(element, "page-number") {
+                            if value.trim().is_empty() {
+                                return Err(element_diagnostic(
+                                    element,
+                                    "print page-number must not be empty".to_owned(),
+                                ));
+                            }
+                            warnings.push(element_diagnostic(
+                                element,
+                                "print page-number is ignored".to_owned(),
+                            ));
                         }
                         if let Some(value) = optional_attribute(element, "new-page") {
                             let hint = value == "yes";
