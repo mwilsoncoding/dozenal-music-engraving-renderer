@@ -140,6 +140,296 @@ fn musicxml_defaults_page_layout_overrides_cli_page_size() {
 }
 
 #[test]
+fn musicxml_print_page_layout_overrides_defaults() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("print-page-layout.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><defaults><scaling><millimeters>7</millimeters><tenths>40</tenths></scaling><page-layout><page-height>1697.142857</page-height><page-width>1200</page-width></page-layout></defaults><part-list><score-part id="P1"><part-name>Page Layout</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure><measure number="2"><print new-page="yes"><page-layout><page-height>1596.571429</page-height><page-width>1233.714286</page-width></page-layout></print><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure><measure number="3"><print new-page="yes"/><note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write print page-layout score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "print page layout failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("print-page-layout.svg")).expect("read SVG");
+    assert!(
+        svg.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"215.9mm\""),
+        "{svg}"
+    );
+    assert!(
+        svg.contains("id=\"page-1\" class=\"page\" x=\"0\" y=\"0\" width=\"794\" height=\"1123\""),
+        "{svg}"
+    );
+    assert!(
+        svg.contains(
+            "id=\"page-2\" class=\"page\" x=\"0\" y=\"1147\" width=\"816\" height=\"1056\""
+        ),
+        "{svg}"
+    );
+    assert!(
+        svg.contains(
+            "id=\"page-3\" class=\"page\" x=\"0\" y=\"2227\" width=\"794\" height=\"1123\""
+        ),
+        "{svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn musicxml_new_page_no_rejects_an_automatic_page_break() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("prohibited-page-break.musicxml");
+    let measures = (1..=10)
+        .map(|number| {
+            let print = if number == 7 {
+                "<print new-system=\"yes\" new-page=\"no\"/>"
+            } else {
+                "<print new-system=\"yes\"/>"
+            };
+            let divisions = if number == 1 {
+                "<attributes><divisions>1</divisions></attributes>"
+            } else {
+                ""
+            };
+            format!(
+                "<measure number=\"{number}\">{print}{divisions}<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure>"
+            )
+        })
+        .collect::<String>();
+    let fixture = format!(
+        "<?xml version=\"1.0\"?><score-partwise version=\"4.0\"><part-list><score-part id=\"P1\"><part-name>Page Break</part-name></score-part></part-list><part id=\"P1\">{measures}</part></score-partwise>"
+    );
+    fs::write(&input, fixture).expect("write prohibited page-break score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("hard no-page-break constraint"), "{stderr}");
+    assert!(!directory.join("prohibited-page-break.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn musicxml_print_page_layout_inherits_omitted_default_dimensions() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("inherited-page-layout.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><defaults><scaling><millimeters>7</millimeters><tenths>40</tenths></scaling><page-layout><page-height>1697.142857</page-height><page-width>1200</page-width></page-layout></defaults><part-list><score-part id="P1"><part-name>Inherited Layout</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure><measure number="2"><print><page-layout/></print><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write inherited page-layout score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--page-size")
+        .arg("letter")
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "inherited page layout failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("inherited-page-layout.svg")).expect("read SVG");
+    assert!(svg.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"210mm\" height=\"297mm\" viewBox=\"0 0 794 1123\""), "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn partial_custom_print_dimensions_warn_and_use_renderer_default() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("partial-custom-page-layout.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><defaults><scaling><millimeters>7</millimeters><tenths>40</tenths></scaling><page-layout><page-height>1697.142857</page-height><page-width>1200</page-width></page-layout></defaults><part-list><score-part id="P1"><part-name>Partial Layout</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure><measure number="2"><print new-page="yes"><page-layout><page-width>1300</page-width></page-layout></print><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write partial custom page-layout score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--page-size")
+        .arg("letter")
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "partial custom page layout failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("custom page dimensions are ignored"),
+        "{stderr}"
+    );
+    let svg =
+        fs::read_to_string(directory.join("partial-custom-page-layout.svg")).expect("read SVG");
+    assert!(
+        svg.contains(
+            "id=\"page-2\" class=\"page\" x=\"0\" y=\"1147\" width=\"816\" height=\"1056\""
+        ),
+        "{svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn custom_page_dimensions_and_margins_warn_and_use_cli_size() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("custom-page-layout.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><defaults><page-layout><page-height>1500</page-height><page-width>1100</page-width><page-margins type="both"><left-margin>20</left-margin><right-margin>20</right-margin><top-margin>20</top-margin><bottom-margin>20</bottom-margin></page-margins></page-layout></defaults><part-list><score-part id="P1"><part-name>Custom Layout</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write custom page-layout score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--page-size")
+        .arg("letter")
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "custom page layout failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("custom page dimensions are ignored"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("explicit page margins are ignored"),
+        "{stderr}"
+    );
+    let svg = fs::read_to_string(directory.join("custom-page-layout.svg")).expect("read SVG");
+    assert!(svg.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"215.9mm\" height=\"279.4mm\" viewBox=\"0 0 816 1056\""), "{svg}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn deferred_print_layout_fields_warn_and_are_ignored() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("deferred-print-layout.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Deferred Layout</part-name></score-part></part-list><part id="P1"><measure number="1"><print><system-layout><system-distance>120</system-distance></system-layout><staff-layout number="1"><staff-distance>80</staff-distance></staff-layout></print><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write deferred print-layout score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "deferred print fields failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unsupported <system-layout> geometry is ignored"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("unsupported <staff-layout> geometry is ignored"),
+        "{stderr}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn malformed_page_layout_dimensions_fail_with_element_context() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("malformed-page-layout.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><defaults><page-layout><page-height>1200</page-height><page-width>0</page-width></page-layout></defaults><part-list><score-part id="P1"><part-name>Malformed Layout</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write malformed page-layout score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("page-width"), "{stderr}");
+    assert!(
+        stderr.contains("/defaults/page-layout/page-width"),
+        "{stderr}"
+    );
+    assert!(!directory.join("malformed-page-layout.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_conflicting_new_page_hints_across_parts() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("conflicting-page-breaks.musicxml");
+    let parts = [
+        ("P1", "First", "yes"),
+        ("P2", "Second", "no"),
+    ]
+    .into_iter()
+    .map(|(id, _name, hint)| {
+        format!(
+            "<part id=\"{id}\"><measure number=\"1\"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure><measure number=\"2\"><print new-page=\"{hint}\"/><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part>"
+        )
+    })
+    .collect::<String>();
+    let fixture = format!(
+        "<?xml version=\"1.0\"?><score-partwise version=\"4.0\"><part-list><score-part id=\"P1\"><part-name>First</part-name></score-part><score-part id=\"P2\"><part-name>Second</part-name></score-part></part-list>{parts}</score-partwise>"
+    );
+    fs::write(&input, fixture).expect("write conflicting page-break score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("conflicting Page break instructions before measure 2"),
+        "{stderr}"
+    );
+    assert!(!directory.join("conflicting-page-breaks.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn malformed_deferred_layout_values_fail_with_context() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("malformed-system-layout.musicxml");
+    let fixture = r#"<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Malformed Layout</part-name></score-part></part-list><part id="P1"><measure number="1"><print><system-layout><system-distance>wide</system-distance></system-layout></print><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part></score-partwise>"#;
+    fs::write(&input, fixture).expect("write malformed deferred layout score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("system-distance"), "{stderr}");
+    assert!(
+        stderr.contains("/print/system-layout/system-distance"),
+        "{stderr}"
+    );
+    assert!(!directory.join("malformed-system-layout.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn musicxml_new_system_print_creates_a_hard_system_break() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
@@ -256,6 +546,42 @@ fn rejects_conflicting_system_break_hints_across_parts() {
         "{stderr}"
     );
     assert!(!directory.join("conflicting-system-breaks.svg").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_conflicting_page_sizes_across_parts() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("conflicting-page-sizes.musicxml");
+    let parts = [
+        ("P1", "First", "1200", "1697.142857"),
+        ("P2", "Second", "1233.714286", "1596.571429"),
+    ]
+    .into_iter()
+    .map(|(id, _name, width, height)| {
+        format!(
+            "<part id=\"{id}\"><measure number=\"1\"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure><measure number=\"2\"><print><page-layout><page-height>{height}</page-height><page-width>{width}</page-width></page-layout></print><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part>"
+        )
+    })
+    .collect::<String>();
+    let fixture = format!(
+        "<?xml version=\"1.0\"?><score-partwise version=\"4.0\"><defaults><scaling><millimeters>7</millimeters><tenths>40</tenths></scaling></defaults><part-list><score-part id=\"P1\"><part-name>First</part-name></score-part><score-part id=\"P2\"><part-name>Second</part-name></score-part></part-list>{parts}</score-partwise>"
+    );
+    fs::write(&input, fixture).expect("write conflicting page-size score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("conflicting page sizes across Parts before measure 2"),
+        "{stderr}"
+    );
+    assert!(!directory.join("conflicting-page-sizes.svg").exists());
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }

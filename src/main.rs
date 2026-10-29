@@ -388,7 +388,8 @@ struct Measure {
     beat_repeat_segments: Vec<BeatRepeatSegment>,
     input_staff_states: Vec<InputStaffState>,
     barlines: Vec<MeasureBarline>,
-    new_page_before: bool,
+    new_page_before: Option<bool>,
+    page_layout_before: Option<PageLayoutHint>,
     system_break_before: Option<bool>,
     minimum_measure_advance: Option<f64>,
 }
@@ -689,7 +690,14 @@ struct InputClef {
 struct Score {
     parts: Vec<Part>,
     warnings: Vec<String>,
-    page_size_hint: Option<PageSize>,
+    page_layout_hint: Option<PageLayoutHint>,
+}
+
+#[derive(Clone)]
+struct PageLayoutHint {
+    width: Option<i32>,
+    height: Option<i32>,
+    source_path: String,
 }
 
 struct CliOptions {
@@ -751,7 +759,7 @@ fn run() -> Result<(), String> {
         path.set_extension("svg");
         path
     });
-    let page_size = score.page_size_hint.unwrap_or(options.page_size);
+    let page_size = options.page_size;
     if output_path
         .extension()
         .is_none_or(|extension| extension != "svg")
@@ -1037,6 +1045,7 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
                         }],
                         barlines,
                         new_page_before: measure.new_page_before,
+                        page_layout_before: measure.page_layout_before.clone(),
                         system_break_before: measure.system_break_before,
                         minimum_measure_advance: measure.minimum_measure_advance,
                     }
@@ -1054,7 +1063,7 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
     Score {
         parts,
         warnings: score.warnings.clone(),
-        page_size_hint: score.page_size_hint,
+        page_layout_hint: score.page_layout_hint.clone(),
     }
 }
 
@@ -1222,13 +1231,16 @@ fn parse_note_size_defaults(
     for child in &defaults_element.children {
         match elements[*child].name.as_str() {
             "appearance" | "scaling" | "page-layout" => {}
-            "system-layout" | "staff-layout" => warnings.push(element_diagnostic(
-                &elements[*child],
-                format!(
-                    "unsupported defaults <{}> geometry is ignored",
-                    elements[*child].name
-                ),
-            )),
+            "system-layout" | "staff-layout" => {
+                validate_deferred_print_layout(elements, *child)?;
+                warnings.push(element_diagnostic(
+                    &elements[*child],
+                    format!(
+                        "unsupported defaults <{}> geometry is ignored",
+                        elements[*child].name
+                    ),
+                ));
+            }
             _ => {
                 return Err(element_diagnostic(
                     &elements[*child],
@@ -1300,30 +1312,12 @@ fn parse_note_size_defaults(
     Ok(scales)
 }
 
-fn parse_page_size_defaults(
+fn parse_page_size_layout(
     elements: &[Element],
-    defaults: Option<usize>,
+    page_layout: usize,
     tenths_to_pixels: f64,
     warnings: &mut Vec<String>,
-) -> Result<Option<PageSize>, String> {
-    let Some(defaults) = defaults else {
-        return Ok(None);
-    };
-    let page_layouts = elements[defaults]
-        .children
-        .iter()
-        .filter(|child| elements[**child].name == "page-layout")
-        .copied()
-        .collect::<Vec<_>>();
-    let Some(page_layout) = page_layouts.first().copied() else {
-        return Ok(None);
-    };
-    if page_layouts.len() > 1 {
-        return Err(element_diagnostic(
-            &elements[page_layouts[1]],
-            "duplicate <page-layout> in defaults".to_owned(),
-        ));
-    }
+) -> Result<PageLayoutHint, String> {
     require_no_attributes(&elements[page_layout])?;
     require_container_text(&elements[page_layout])?;
     let mut width = None;
@@ -1363,36 +1357,282 @@ fn parse_page_size_defaults(
                     ));
                 }
             }
-            "page-margins" => warnings.push(element_diagnostic(
-                element,
-                "explicit page margins are ignored; renderer defaults are used".to_owned(),
-            )),
-            _ => warnings.push(element_diagnostic(
-                element,
-                format!("unsupported page-layout <{}> is ignored", element.name),
-            )),
+            "page-margins" => {
+                validate_attributes(element, &["type"])?;
+                if optional_attribute(element, "type")
+                    .is_some_and(|value| !matches!(value, "both" | "odd" | "even"))
+                {
+                    return Err(element_diagnostic(
+                        element,
+                        "page-margins type must be 'both', 'odd', or 'even'".to_owned(),
+                    ));
+                }
+                require_container_text(element)?;
+                let mut seen = Vec::new();
+                for margin in &element.children {
+                    let margin_element = &elements[*margin];
+                    if !matches!(
+                        margin_element.name.as_str(),
+                        "left-margin" | "right-margin" | "top-margin" | "bottom-margin"
+                    ) {
+                        return Err(element_diagnostic(
+                            margin_element,
+                            format!("unsupported page margin <{}>", margin_element.name),
+                        ));
+                    }
+                    if seen.contains(&margin_element.name.as_str()) {
+                        return Err(element_diagnostic(
+                            margin_element,
+                            format!("duplicate <{}> in <page-margins>", margin_element.name),
+                        ));
+                    }
+                    seen.push(margin_element.name.as_str());
+                    validate_layout_number(margin_element, true)?;
+                }
+                warnings.push(element_diagnostic(
+                    element,
+                    "explicit page margins are ignored; renderer defaults are used".to_owned(),
+                ));
+            }
+            _ => {
+                return Err(element_diagnostic(
+                    element,
+                    format!("unsupported page-layout child <{}>", element.name),
+                ));
+            }
         }
     }
-    let (Some(width), Some(height)) = (width, height) else {
+    Ok(PageLayoutHint {
+        width: width.map(|value| (value * tenths_to_pixels).round() as i32),
+        height: height.map(|value| (value * tenths_to_pixels).round() as i32),
+        source_path: elements[page_layout].path.clone(),
+    })
+}
+
+fn validate_layout_number(element: &Element, allow_zero: bool) -> Result<(), String> {
+    require_no_attributes(element)?;
+    if !element.children.is_empty() {
+        return Err(element_diagnostic(
+            element,
+            format!("<{}> must contain a numeric value", element.name),
+        ));
+    }
+    let value = element.text.trim().parse::<f64>().ok().filter(|value| {
+        value.is_finite()
+            && if allow_zero {
+                *value >= 0.0
+            } else {
+                *value > 0.0
+            }
+    });
+    if value.is_none() {
+        return Err(element_diagnostic(
+            element,
+            format!("<{}> must be positive and finite", element.name),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_deferred_print_layout(elements: &[Element], layout: usize) -> Result<(), String> {
+    let element = &elements[layout];
+    match element.name.as_str() {
+        "system-layout" => {
+            require_no_attributes(element)?;
+            require_container_text(element)?;
+            let mut seen = Vec::new();
+            for child in &element.children {
+                let child_element = &elements[*child];
+                match child_element.name.as_str() {
+                    "system-distance" | "top-system-distance" => {
+                        if seen.contains(&child_element.name.as_str()) {
+                            return Err(element_diagnostic(
+                                child_element,
+                                format!("duplicate <{}> in <system-layout>", child_element.name),
+                            ));
+                        }
+                        seen.push(child_element.name.as_str());
+                        validate_layout_number(child_element, true)?;
+                    }
+                    "system-margins" => {
+                        require_no_attributes(child_element)?;
+                        require_container_text(child_element)?;
+                        let mut margin_seen = Vec::new();
+                        for margin in &child_element.children {
+                            let margin_element = &elements[*margin];
+                            if !matches!(
+                                margin_element.name.as_str(),
+                                "left-margin" | "right-margin"
+                            ) {
+                                return Err(element_diagnostic(
+                                    margin_element,
+                                    format!("unsupported system margin <{}>", margin_element.name),
+                                ));
+                            }
+                            if margin_seen.contains(&margin_element.name.as_str()) {
+                                return Err(element_diagnostic(
+                                    margin_element,
+                                    format!(
+                                        "duplicate <{}> in <system-margins>",
+                                        margin_element.name
+                                    ),
+                                ));
+                            }
+                            margin_seen.push(margin_element.name.as_str());
+                            validate_layout_number(margin_element, true)?;
+                        }
+                    }
+                    "system-dividers" => {
+                        require_no_attributes(child_element)?;
+                        require_container_text(child_element)?;
+                        for divider in &child_element.children {
+                            let divider_element = &elements[*divider];
+                            if !matches!(
+                                divider_element.name.as_str(),
+                                "left-divider" | "right-divider"
+                            ) {
+                                return Err(element_diagnostic(
+                                    divider_element,
+                                    format!(
+                                        "unsupported system divider <{}>",
+                                        divider_element.name
+                                    ),
+                                ));
+                            }
+                            validate_attributes(divider_element, &["print-object"])?;
+                            if divider_element.children.len() > 0
+                                || (!divider_element.text.trim().is_empty())
+                                || optional_attribute(divider_element, "print-object")
+                                    .is_some_and(|value| !matches!(value, "yes" | "no"))
+                            {
+                                return Err(element_diagnostic(
+                                    divider_element,
+                                    "system divider must be empty with print-object 'yes' or 'no'"
+                                        .to_owned(),
+                                ));
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(element_diagnostic(
+                            child_element,
+                            format!("unsupported system-layout child <{}>", child_element.name),
+                        ));
+                    }
+                }
+            }
+        }
+        "staff-layout" => {
+            validate_attributes(element, &["number"])?;
+            if let Some(number) = optional_attribute(element, "number") {
+                if number.parse::<u32>().ok().is_none_or(|value| value == 0) {
+                    return Err(element_diagnostic(
+                        element,
+                        "staff-layout number must be a positive integer".to_owned(),
+                    ));
+                }
+            }
+            require_container_text(element)?;
+            let mut saw_distance = false;
+            for child in &element.children {
+                let child_element = &elements[*child];
+                if child_element.name != "staff-distance" {
+                    return Err(element_diagnostic(
+                        child_element,
+                        format!("unsupported staff-layout child <{}>", child_element.name),
+                    ));
+                }
+                if saw_distance {
+                    return Err(element_diagnostic(
+                        child_element,
+                        "duplicate <staff-distance> in <staff-layout>".to_owned(),
+                    ));
+                }
+                saw_distance = true;
+                validate_layout_number(child_element, true)?;
+            }
+        }
+        _ => unreachable!("only deferred print layout elements are validated"),
+    }
+    Ok(())
+}
+
+fn parse_page_size_defaults(
+    elements: &[Element],
+    defaults: Option<usize>,
+    tenths_to_pixels: f64,
+    warnings: &mut Vec<String>,
+) -> Result<Option<PageLayoutHint>, String> {
+    let Some(defaults) = defaults else {
         return Ok(None);
     };
-    let dimensions = (
-        (width * tenths_to_pixels).round() as i32,
-        (height * tenths_to_pixels).round() as i32,
-    );
-    let page_size = [PageSize::A4, PageSize::Letter]
+    let page_layouts = elements[defaults]
+        .children
+        .iter()
+        .filter(|child| elements[**child].name == "page-layout")
+        .copied()
+        .collect::<Vec<_>>();
+    let Some(page_layout) = page_layouts.first().copied() else {
+        return Ok(None);
+    };
+    if page_layouts.len() > 1 {
+        return Err(element_diagnostic(
+            &elements[page_layouts[1]],
+            "duplicate <page-layout> in defaults".to_owned(),
+        ));
+    }
+    parse_page_size_layout(elements, page_layout, tenths_to_pixels, warnings).map(Some)
+}
+
+fn merge_page_layout_hint(
+    existing: &mut Option<PageLayoutHint>,
+    incoming: PageLayoutHint,
+    element: &Element,
+) -> Result<(), String> {
+    let Some(existing) = existing else {
+        *existing = Some(incoming);
+        return Ok(());
+    };
+    for (current, next) in [
+        (&mut existing.width, incoming.width),
+        (&mut existing.height, incoming.height),
+    ] {
+        if current.is_some_and(|value| next.is_some_and(|next| value != next)) {
+            return Err(element_diagnostic(
+                element,
+                "conflicting page dimensions in one Measure".to_owned(),
+            ));
+        }
+        if current.is_none() {
+            *current = next;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_page_layout_hint(
+    hint: &PageLayoutHint,
+    inherited: PageSize,
+    renderer_default: PageSize,
+    warnings: &mut Vec<String>,
+) -> PageSize {
+    let (inherited_width, inherited_height, _, _, _) = inherited.dimensions();
+    let width = hint.width.unwrap_or(inherited_width);
+    let height = hint.height.unwrap_or(inherited_height);
+    if let Some(page_size) = [PageSize::A4, PageSize::Letter]
         .into_iter()
         .find(|page_size| {
             let (page_width, page_height, _, _, _) = page_size.dimensions();
-            dimensions == (page_width, page_height)
-        });
-    if page_size.is_none() {
-        warnings.push(element_diagnostic(
-            &elements[page_layout],
-            "custom page dimensions are ignored; renderer defaults are used".to_owned(),
-        ));
+            (width, height) == (page_width, page_height)
+        })
+    {
+        return page_size;
     }
-    Ok(page_size)
+    warnings.push(format!(
+        "custom page dimensions are ignored; renderer defaults are used (XML path {})",
+        hint.source_path
+    ));
+    renderer_default
 }
 
 fn parse_musicxml_tenths_scale(
@@ -1449,12 +1689,29 @@ fn parse_print_measure_distance(
     print: usize,
     tenths_to_pixels: f64,
     warnings: &mut Vec<String>,
-) -> Result<Option<f64>, String> {
+) -> Result<(Option<f64>, Option<PageLayoutHint>), String> {
     let mut distance = None;
     let mut saw_measure_layout = false;
+    let mut saw_page_layout = false;
+    let mut page_size = None;
     for child in &elements[print].children {
         let element = &elements[*child];
         match element.name.as_str() {
+            "page-layout" => {
+                if saw_page_layout {
+                    return Err(element_diagnostic(
+                        element,
+                        "duplicate <page-layout> in <print>".to_owned(),
+                    ));
+                }
+                saw_page_layout = true;
+                page_size = Some(parse_page_size_layout(
+                    elements,
+                    *child,
+                    tenths_to_pixels,
+                    warnings,
+                )?);
+            }
             "measure-layout" => {
                 if saw_measure_layout {
                     return Err(element_diagnostic(
@@ -1510,10 +1767,13 @@ fn parse_print_measure_distance(
                     distance = Some(pixels);
                 }
             }
-            "system-layout" | "staff-layout" => warnings.push(element_diagnostic(
-                element,
-                format!("unsupported <{}> geometry is ignored", element.name),
-            )),
+            "system-layout" | "staff-layout" => {
+                validate_deferred_print_layout(elements, *child)?;
+                warnings.push(element_diagnostic(
+                    element,
+                    format!("unsupported <{}> geometry is ignored", element.name),
+                ));
+            }
             _ => {
                 return Err(element_diagnostic(
                     element,
@@ -1522,7 +1782,7 @@ fn parse_print_measure_distance(
             }
         }
     }
-    Ok(distance)
+    Ok((distance, page_size))
 }
 
 fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Result<Score, String> {
@@ -1834,6 +2094,8 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
             let mut measure_repeat_marker = None;
             let mut beat_repeat_markers = Vec::new();
             let mut minimum_measure_advance = None;
+            let mut page_layout_before = None;
+            let mut new_page_before = None;
             let mut system_break_before = None;
             let mut event_sources = Vec::new();
             let mut cursor_units = 0.0;
@@ -1855,6 +2117,16 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                     ));
                                 }
                             }
+                        }
+                        if let Some(value) = optional_attribute(element, "new-page") {
+                            let hint = value == "yes";
+                            if new_page_before.is_some_and(|existing| existing != hint) {
+                                return Err(element_diagnostic(
+                                    element,
+                                    "conflicting new-page hints in one Measure".to_owned(),
+                                ));
+                            }
+                            new_page_before = Some(hint);
                         }
                         if let Some(value) = optional_attribute(element, "new-system") {
                             let hint = value == "yes";
@@ -1882,12 +2154,16 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                 "deprecated print staff-spacing is ignored".to_owned(),
                             ));
                         }
-                        if let Some(distance) = parse_print_measure_distance(
+                        let (distance, page_size) = parse_print_measure_distance(
                             &elements,
                             *child,
                             tenths_to_pixels,
                             &mut warnings,
-                        )? {
+                        )?;
+                        if let Some(page_size) = page_size {
+                            merge_page_layout_hint(&mut page_layout_before, page_size, element)?;
+                        }
+                        if let Some(distance) = distance {
                             if minimum_measure_advance
                                 .is_some_and(|existing: f64| existing != distance)
                             {
@@ -2742,10 +3018,8 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                 beat_repeat_segments,
                 input_staff_states: active_staff_states.clone(),
                 barlines,
-                new_page_before: measure_element.children.iter().any(|child| {
-                    elements[*child].name == "print"
-                        && optional_attribute(&elements[*child], "new-page") == Some("yes")
-                }),
+                new_page_before,
+                page_layout_before,
                 system_break_before,
                 minimum_measure_advance,
             });
@@ -2852,7 +3126,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
     Ok(Score {
         parts,
         warnings,
-        page_size_hint,
+        page_layout_hint: page_size_hint,
     })
 }
 
@@ -11089,14 +11363,18 @@ fn plan_system_layout(
 fn plan_page_layout(
     system_layout: &mut SystemLayout,
     page_break_before: &[bool],
+    prohibited_page_break_before: &[bool],
+    page_size_before_system: &[Option<PageSize>],
     part_count: usize,
-    page_height: i32,
+    default_page_size: PageSize,
     system_bounds: &[VerticalBounds],
     content_top: i32,
-) -> Result<i32, String> {
-    let printable_height = page_height - content_top - PAGE_MARGIN;
+) -> Result<Vec<PageSize>, String> {
     let system_height = part_count as i32 * SYSTEM_ROW_HEIGHT;
-    let mut page = 0;
+    let mut page_sizes = vec![default_page_size];
+    let mut system_pages = Vec::new();
+    let mut system_offsets = Vec::new();
+    let mut page = 0_usize;
     let mut used_height = 0;
     for (system_index, (system_start, bounds)) in system_layout
         .starts
@@ -11106,22 +11384,50 @@ fn plan_page_layout(
         .enumerate()
     {
         let occupied_height = system_height.max(bounds.bottom);
+        let forced_break = system_index > 0 && page_break_before[system_start];
+        let inherited_page_size = if forced_break {
+            default_page_size
+        } else {
+            page_sizes[page]
+        };
+        let requested_size = page_size_before_system[system_index].unwrap_or(inherited_page_size);
+        let (_, page_height, _, _, _) = requested_size.dimensions();
+        let printable_height = page_height - content_top - PAGE_MARGIN;
         if occupied_height > printable_height {
             return Err(format!(
                 "System {} is {occupied_height} units high and cannot fit within the printable Page height of {printable_height} units",
                 system_index + 1
             ));
         }
-        let forced_break = system_index > 0 && page_break_before[system_start];
-        if forced_break || used_height + occupied_height > printable_height {
-            page += 1;
-            used_height = 0;
+        let must_break = forced_break || used_height + occupied_height > printable_height;
+        if must_break && prohibited_page_break_before[system_start] {
+            return Err(format!(
+                "hard no-page-break constraint before measure {} makes Page fit impossible",
+                system_start + 1
+            ));
         }
-        system_layout.system_y_offsets[system_index] =
-            page * (page_height + PAGE_GUTTER) + used_height;
+        if must_break {
+            page += 1;
+            page_sizes.push(requested_size);
+            used_height = 0;
+        } else {
+            page_sizes[page] = requested_size;
+        }
+        system_pages.push(page);
+        system_offsets.push(used_height);
         used_height += occupied_height;
     }
-    Ok(page + 1)
+    let mut page_tops = Vec::with_capacity(page_sizes.len());
+    let mut page_top = 0;
+    for page_size in &page_sizes {
+        page_tops.push(page_top);
+        let (_, page_height, _, _, _) = page_size.dimensions();
+        page_top += page_height + PAGE_GUTTER;
+    }
+    for (system_index, (page, offset)) in system_pages.into_iter().zip(system_offsets).enumerate() {
+        system_layout.system_y_offsets[system_index] = page_tops[page] + offset;
+    }
+    Ok(page_sizes)
 }
 
 fn render_svg_with_alignment(
@@ -11180,12 +11486,44 @@ fn render_svg_with_alignment(
             score
                 .parts
                 .iter()
-                .any(|part| part.measures[measure_index].new_page_before)
+                .any(|part| part.measures[measure_index].new_page_before == Some(true))
+        })
+        .collect::<Vec<_>>();
+    let prohibited_page_break_before = (0..score.parts[0].measures.len())
+        .map(|measure_index| {
+            score
+                .parts
+                .iter()
+                .any(|part| part.measures[measure_index].new_page_before == Some(false))
         })
         .collect::<Vec<_>>();
     let mut explicit_system_breaks = Vec::new();
     let mut prohibited_system_breaks = Vec::new();
     for (measure_index, page_break) in page_break_before.iter().copied().enumerate() {
+        let page_break_parts = score
+            .parts
+            .iter()
+            .filter(|part| part.measures[measure_index].new_page_before == Some(true))
+            .map(|part| part.name.as_str())
+            .collect::<Vec<_>>();
+        let prohibiting_page_parts = score
+            .parts
+            .iter()
+            .filter(|part| part.measures[measure_index].new_page_before == Some(false))
+            .map(|part| part.name.as_str())
+            .collect::<Vec<_>>();
+        if !page_break_parts.is_empty() && !prohibiting_page_parts.is_empty() {
+            return Err(format!(
+                "conflicting Page break instructions before measure {} (Parts: {})",
+                measure_index + 1,
+                page_break_parts
+                    .iter()
+                    .chain(prohibiting_page_parts.iter())
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         let affirmative_parts = score
             .parts
             .iter()
@@ -11219,8 +11557,31 @@ fn render_svg_with_alignment(
             explicit_system_breaks.push(measure_index);
         }
     }
-    let (page_width, page_height, page_width_mm, page_height_mm, physical_page_height) =
-        page_size.dimensions();
+    let default_page_size = score
+        .page_layout_hint
+        .as_ref()
+        .map(|hint| resolve_page_layout_hint(hint, page_size, page_size, warnings))
+        .unwrap_or(page_size);
+    let mut measure_page_size_hints = vec![None; score.parts[0].measures.len()];
+    for measure_index in 0..score.parts[0].measures.len() {
+        for part in &score.parts {
+            if let Some(hint) = &part.measures[measure_index].page_layout_before {
+                let resolved =
+                    resolve_page_layout_hint(hint, default_page_size, page_size, warnings);
+                if measure_page_size_hints[measure_index]
+                    .is_some_and(|existing| existing != resolved)
+                {
+                    return Err(format!(
+                        "conflicting page sizes across Parts before measure {}",
+                        measure_index + 1
+                    ));
+                }
+                measure_page_size_hints[measure_index] = Some(resolved);
+            }
+        }
+    }
+    let page_size = default_page_size;
+    let (page_width, _, _, _, _) = page_size.dimensions();
     let content_left = PAGE_MARGIN
         - provisional
             .iter()
@@ -11228,7 +11589,12 @@ fn render_svg_with_alignment(
             .min()
             .unwrap_or(0)
             .min(0);
-    let printable_width = (page_width - PAGE_MARGIN * 2).min(SYSTEM_MAX_WIDTH);
+    let minimum_page_width = measure_page_size_hints
+        .iter()
+        .flatten()
+        .map(|page_size_hint| page_size_hint.dimensions().0)
+        .fold(page_width, i32::min);
+    let printable_width = (minimum_page_width - PAGE_MARGIN * 2).min(SYSTEM_MAX_WIDTH);
     let mut system_layout = plan_system_layout(
         &measure_barline_positions,
         alignment,
@@ -11237,6 +11603,13 @@ fn render_svg_with_alignment(
         &prohibited_system_breaks,
         &measure_advance_expansions,
     )?;
+    let mut page_size_before_system = vec![None; system_layout.starts.len()];
+    for (measure_index, page_size_hint) in measure_page_size_hints.into_iter().enumerate() {
+        if let Some(page_size_hint) = page_size_hint {
+            page_size_before_system[system_layout.measure_systems[measure_index]] =
+                Some(page_size_hint);
+        }
+    }
     let measured_systems = score
         .parts
         .iter()
@@ -11279,11 +11652,13 @@ fn render_svg_with_alignment(
             .min()
             .unwrap_or(0)
             .min(0);
-    let page_count = plan_page_layout(
+    let page_sizes = plan_page_layout(
         &mut system_layout,
         &page_break_before,
+        &prohibited_page_break_before,
+        &page_size_before_system,
         score.parts.len(),
-        page_height,
+        page_size,
         &system_bounds,
         content_top,
     )?;
@@ -11303,25 +11678,44 @@ fn render_svg_with_alignment(
             )
         })
         .collect::<Vec<_>>();
-    let height = page_count * page_height + (page_count - 1) * PAGE_GUTTER;
-    let physical_height = if page_count == 1 {
-        page_height_mm.to_owned()
+    let page_width = page_sizes
+        .iter()
+        .map(|page_size| page_size.dimensions().0)
+        .max()
+        .unwrap_or(page_width);
+    let height = page_sizes
+        .iter()
+        .map(|page_size| page_size.dimensions().1)
+        .sum::<i32>()
+        + (page_sizes.len() as i32 - 1) * PAGE_GUTTER;
+    let physical_height = if page_sizes.len() == 1 {
+        page_sizes[0].dimensions().3.to_owned()
     } else {
         format!(
             "{:.2}mm",
-            f64::from(page_count) * physical_page_height
-                + f64::from(page_count - 1) * (PAGE_GUTTER as f64 * 25.4 / 96.0)
+            page_sizes
+                .iter()
+                .map(|page_size| page_size.dimensions().4)
+                .sum::<f64>()
+                + (page_sizes.len() as f64 - 1.0) * (PAGE_GUTTER as f64 * 25.4 / 96.0)
         )
+    };
+    let page_width_mm = if page_width == 816 {
+        "215.9mm"
+    } else {
+        "210mm"
     };
     let mut svg = String::new();
     writeln!(svg, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{page_width_mm}\" height=\"{physical_height}\" viewBox=\"0 0 {page_width} {height}\" role=\"img\">")
         .expect("writing to a String cannot fail");
     writeln!(svg, "<rect id=\"background\" x=\"0\" y=\"0\" width=\"{page_width}\" height=\"{height}\" fill=\"#e5e5e5\"/>")
         .expect("writing to a String cannot fail");
-    for page in 0..page_count {
-        let page_top = page * (page_height + PAGE_GUTTER);
-        writeln!(svg, "<rect id=\"page-{}\" class=\"page\" x=\"0\" y=\"{page_top}\" width=\"{page_width}\" height=\"{page_height}\" fill=\"#fff\"/>", page + 1)
+    let mut page_top = 0;
+    for (page_index, page_size) in page_sizes.iter().enumerate() {
+        let (page_width, page_height, _, _, _) = page_size.dimensions();
+        writeln!(svg, "<rect id=\"page-{}\" class=\"page\" x=\"0\" y=\"{page_top}\" width=\"{page_width}\" height=\"{page_height}\" fill=\"#fff\"/>", page_index + 1)
             .expect("writing to a String cannot fail");
+        page_top += page_height + PAGE_GUTTER;
     }
     writeln!(
         svg,
