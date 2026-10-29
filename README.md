@@ -23,7 +23,12 @@ self-contained SVG. Without `--output`, the input extension is replaced with
 Output uses A4 portrait Pages by default with 15 mm margins. Use
 `--page-size letter` for Letter paper. Complete Systems are placed top-down
 without vertical rebalancing; MusicXML `<print new-page="yes"/>` starts a new
-Page. Multi-page SVG output stacks white Page surfaces on a gray canvas.
+Page. Supported MusicXML page dimensions in `<defaults>` or `<print>` select A4
+or Letter paper under the score's scaling; print-level dimensions apply to the
+Page they begin, and omitted dimensions inherit the score defaults. These hints
+take precedence over `--page-size`. Custom dimensions and explicit margins warn
+and use renderer defaults. Multi-page SVG output stacks white Page surfaces on
+a gray canvas.
 
 This SVG-only MVP accepts uncompressed, no-namespace MusicXML 4.0
 `score-partwise` scores with one or more Parts, each represented by one Dozenal
