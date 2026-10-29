@@ -221,6 +221,60 @@ fn musicxml_new_page_no_rejects_an_automatic_page_break() {
 }
 
 #[test]
+fn automatic_next_page_inherits_score_defaults_after_print_override() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("automatic-page-size-reset.musicxml");
+    let measures = (1..=7)
+        .map(|number| {
+            let print = if number == 1 {
+                ""
+            } else if number == 2 {
+                "<print new-system=\"yes\"><page-layout><page-height>1596.571429</page-height><page-width>1233.714286</page-width></page-layout></print>"
+            } else {
+                "<print new-system=\"yes\"/>"
+            };
+            let attributes = if number == 1 {
+                "<attributes><divisions>1</divisions></attributes>"
+            } else {
+                ""
+            };
+            format!(
+                "<measure number=\"{number}\">{print}{attributes}<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure>"
+            )
+        })
+        .collect::<String>();
+    let fixture = format!(
+        "<?xml version=\"1.0\"?><score-partwise version=\"4.0\"><defaults><scaling><millimeters>7</millimeters><tenths>40</tenths></scaling><page-layout><page-height>1697.142857</page-height><page-width>1200</page-width></page-layout></defaults><part-list><score-part id=\"P1\"><part-name>Automatic Page Reset</part-name></score-part></part-list><part id=\"P1\">{measures}</part></score-partwise>"
+    );
+    fs::write(&input, fixture).expect("write automatic page-size reset score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "automatic pagination failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg =
+        fs::read_to_string(directory.join("automatic-page-size-reset.svg")).expect("read SVG");
+    assert!(
+        svg.contains("id=\"page-1\" class=\"page\" x=\"0\" y=\"0\" width=\"816\" height=\"1056\""),
+        "{svg}"
+    );
+    assert!(
+        svg.contains(
+            "id=\"page-2\" class=\"page\" x=\"0\" y=\"1080\" width=\"794\" height=\"1123\""
+        ),
+        "{svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn musicxml_print_page_layout_inherits_omitted_default_dimensions() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");

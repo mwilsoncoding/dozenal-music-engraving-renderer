@@ -729,12 +729,32 @@ enum PageSize {
 }
 
 impl PageSize {
-    fn dimensions(self) -> (i32, i32, &'static str, &'static str, f64) {
+    fn dimensions(self) -> PageDimensions {
         match self {
-            Self::A4 => (794, 1123, "210mm", "297mm", 297.0),
-            Self::Letter => (816, 1056, "215.9mm", "279.4mm", 279.4),
+            Self::A4 => PageDimensions {
+                width: 794,
+                height: 1123,
+                width_mm: "210mm",
+                height_mm: "297mm",
+                physical_height_mm: 297.0,
+            },
+            Self::Letter => PageDimensions {
+                width: 816,
+                height: 1056,
+                width_mm: "215.9mm",
+                height_mm: "279.4mm",
+                physical_height_mm: 279.4,
+            },
         }
     }
+}
+
+struct PageDimensions {
+    width: i32,
+    height: i32,
+    width_mm: &'static str,
+    height_mm: &'static str,
+    physical_height_mm: f64,
 }
 
 const PAGE_MARGIN: i32 = 57;
@@ -1500,7 +1520,7 @@ fn validate_deferred_print_layout(elements: &[Element], layout: usize) -> Result
                                 ));
                             }
                             validate_attributes(divider_element, &["print-object"])?;
-                            if divider_element.children.len() > 0
+                            if !divider_element.children.is_empty()
                                 || (!divider_element.text.trim().is_empty())
                                 || optional_attribute(divider_element, "print-object")
                                     .is_some_and(|value| !matches!(value, "yes" | "no"))
@@ -1616,14 +1636,14 @@ fn resolve_page_layout_hint(
     renderer_default: PageSize,
     warnings: &mut Vec<String>,
 ) -> PageSize {
-    let (inherited_width, inherited_height, _, _, _) = inherited.dimensions();
-    let width = hint.width.unwrap_or(inherited_width);
-    let height = hint.height.unwrap_or(inherited_height);
+    let inherited_dimensions = inherited.dimensions();
+    let width = hint.width.unwrap_or(inherited_dimensions.width);
+    let height = hint.height.unwrap_or(inherited_dimensions.height);
     if let Some(page_size) = [PageSize::A4, PageSize::Letter]
         .into_iter()
         .find(|page_size| {
-            let (page_width, page_height, _, _, _) = page_size.dimensions();
-            (width, height) == (page_width, page_height)
+            let dimensions = page_size.dimensions();
+            (width, height) == (dimensions.width, dimensions.height)
         })
     {
         return page_size;
@@ -11360,18 +11380,22 @@ fn plan_system_layout(
     })
 }
 
-fn plan_page_layout(
-    system_layout: &mut SystemLayout,
-    page_break_before: &[bool],
-    prohibited_page_break_before: &[bool],
-    page_size_before_system: &[Option<PageSize>],
+struct PageLayoutOptions<'a> {
+    page_break_before: &'a [bool],
+    prohibited_page_break_before: &'a [bool],
+    page_size_before_system: &'a [Option<PageSize>],
     part_count: usize,
     default_page_size: PageSize,
-    system_bounds: &[VerticalBounds],
+    system_bounds: &'a [VerticalBounds],
     content_top: i32,
+}
+
+fn plan_page_layout(
+    system_layout: &mut SystemLayout,
+    options: PageLayoutOptions<'_>,
 ) -> Result<Vec<PageSize>, String> {
-    let system_height = part_count as i32 * SYSTEM_ROW_HEIGHT;
-    let mut page_sizes = vec![default_page_size];
+    let system_height = options.part_count as i32 * SYSTEM_ROW_HEIGHT;
+    let mut page_sizes = vec![options.default_page_size];
     let mut system_pages = Vec::new();
     let mut system_offsets = Vec::new();
     let mut page = 0_usize;
@@ -11380,19 +11404,20 @@ fn plan_page_layout(
         .starts
         .iter()
         .copied()
-        .zip(system_bounds.iter().copied())
+        .zip(options.system_bounds.iter().copied())
         .enumerate()
     {
         let occupied_height = system_height.max(bounds.bottom);
-        let forced_break = system_index > 0 && page_break_before[system_start];
+        let forced_break = system_index > 0 && options.page_break_before[system_start];
         let inherited_page_size = if forced_break {
-            default_page_size
+            options.default_page_size
         } else {
             page_sizes[page]
         };
-        let requested_size = page_size_before_system[system_index].unwrap_or(inherited_page_size);
-        let (_, page_height, _, _, _) = requested_size.dimensions();
-        let printable_height = page_height - content_top - PAGE_MARGIN;
+        let requested_size =
+            options.page_size_before_system[system_index].unwrap_or(inherited_page_size);
+        let page_height = requested_size.dimensions().height;
+        let printable_height = page_height - options.content_top - PAGE_MARGIN;
         if occupied_height > printable_height {
             return Err(format!(
                 "System {} is {occupied_height} units high and cannot fit within the printable Page height of {printable_height} units",
@@ -11400,7 +11425,7 @@ fn plan_page_layout(
             ));
         }
         let must_break = forced_break || used_height + occupied_height > printable_height;
-        if must_break && prohibited_page_break_before[system_start] {
+        if must_break && options.prohibited_page_break_before[system_start] {
             return Err(format!(
                 "hard no-page-break constraint before measure {} makes Page fit impossible",
                 system_start + 1
@@ -11408,7 +11433,9 @@ fn plan_page_layout(
         }
         if must_break {
             page += 1;
-            page_sizes.push(requested_size);
+            page_sizes.push(
+                options.page_size_before_system[system_index].unwrap_or(options.default_page_size),
+            );
             used_height = 0;
         } else {
             page_sizes[page] = requested_size;
@@ -11421,7 +11448,7 @@ fn plan_page_layout(
     let mut page_top = 0;
     for page_size in &page_sizes {
         page_tops.push(page_top);
-        let (_, page_height, _, _, _) = page_size.dimensions();
+        let page_height = page_size.dimensions().height;
         page_top += page_height + PAGE_GUTTER;
     }
     for (system_index, (page, offset)) in system_pages.into_iter().zip(system_offsets).enumerate() {
@@ -11563,25 +11590,23 @@ fn render_svg_with_alignment(
         .map(|hint| resolve_page_layout_hint(hint, page_size, page_size, warnings))
         .unwrap_or(page_size);
     let mut measure_page_size_hints = vec![None; score.parts[0].measures.len()];
-    for measure_index in 0..score.parts[0].measures.len() {
+    for (measure_index, page_size_hint) in measure_page_size_hints.iter_mut().enumerate() {
         for part in &score.parts {
             if let Some(hint) = &part.measures[measure_index].page_layout_before {
                 let resolved =
                     resolve_page_layout_hint(hint, default_page_size, page_size, warnings);
-                if measure_page_size_hints[measure_index]
-                    .is_some_and(|existing| existing != resolved)
-                {
+                if page_size_hint.is_some_and(|existing| existing != resolved) {
                     return Err(format!(
                         "conflicting page sizes across Parts before measure {}",
                         measure_index + 1
                     ));
                 }
-                measure_page_size_hints[measure_index] = Some(resolved);
+                *page_size_hint = Some(resolved);
             }
         }
     }
     let page_size = default_page_size;
-    let (page_width, _, _, _, _) = page_size.dimensions();
+    let page_width = page_size.dimensions().width;
     let content_left = PAGE_MARGIN
         - provisional
             .iter()
@@ -11592,7 +11617,7 @@ fn render_svg_with_alignment(
     let minimum_page_width = measure_page_size_hints
         .iter()
         .flatten()
-        .map(|page_size_hint| page_size_hint.dimensions().0)
+        .map(|page_size_hint| page_size_hint.dimensions().width)
         .fold(page_width, i32::min);
     let printable_width = (minimum_page_width - PAGE_MARGIN * 2).min(SYSTEM_MAX_WIDTH);
     let mut system_layout = plan_system_layout(
@@ -11654,13 +11679,15 @@ fn render_svg_with_alignment(
             .min(0);
     let page_sizes = plan_page_layout(
         &mut system_layout,
-        &page_break_before,
-        &prohibited_page_break_before,
-        &page_size_before_system,
-        score.parts.len(),
-        page_size,
-        &system_bounds,
-        content_top,
+        PageLayoutOptions {
+            page_break_before: &page_break_before,
+            prohibited_page_break_before: &prohibited_page_break_before,
+            page_size_before_system: &page_size_before_system,
+            part_count: score.parts.len(),
+            default_page_size: page_size,
+            system_bounds: &system_bounds,
+            content_top,
+        },
     )?;
     let rendered = score
         .parts
@@ -11680,31 +11707,32 @@ fn render_svg_with_alignment(
         .collect::<Vec<_>>();
     let page_width = page_sizes
         .iter()
-        .map(|page_size| page_size.dimensions().0)
+        .map(|page_size| page_size.dimensions().width)
         .max()
         .unwrap_or(page_width);
     let height = page_sizes
         .iter()
-        .map(|page_size| page_size.dimensions().1)
+        .map(|page_size| page_size.dimensions().height)
         .sum::<i32>()
         + (page_sizes.len() as i32 - 1) * PAGE_GUTTER;
     let physical_height = if page_sizes.len() == 1 {
-        page_sizes[0].dimensions().3.to_owned()
+        page_sizes[0].dimensions().height_mm.to_owned()
     } else {
         format!(
             "{:.2}mm",
             page_sizes
                 .iter()
-                .map(|page_size| page_size.dimensions().4)
+                .map(|page_size| page_size.dimensions().physical_height_mm)
                 .sum::<f64>()
                 + (page_sizes.len() as f64 - 1.0) * (PAGE_GUTTER as f64 * 25.4 / 96.0)
         )
     };
-    let page_width_mm = if page_width == 816 {
-        "215.9mm"
-    } else {
-        "210mm"
-    };
+    let page_width_mm = page_sizes
+        .iter()
+        .map(|page_size| page_size.dimensions())
+        .max_by_key(|dimensions| dimensions.width)
+        .expect("a score contains at least one Page")
+        .width_mm;
     let mut svg = String::new();
     writeln!(svg, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{page_width_mm}\" height=\"{physical_height}\" viewBox=\"0 0 {page_width} {height}\" role=\"img\">")
         .expect("writing to a String cannot fail");
@@ -11712,7 +11740,9 @@ fn render_svg_with_alignment(
         .expect("writing to a String cannot fail");
     let mut page_top = 0;
     for (page_index, page_size) in page_sizes.iter().enumerate() {
-        let (page_width, page_height, _, _, _) = page_size.dimensions();
+        let dimensions = page_size.dimensions();
+        let page_width = dimensions.width;
+        let page_height = dimensions.height;
         writeln!(svg, "<rect id=\"page-{}\" class=\"page\" x=\"0\" y=\"{page_top}\" width=\"{page_width}\" height=\"{page_height}\" fill=\"#fff\"/>", page_index + 1)
             .expect("writing to a String cannot fail");
         page_top += page_height + PAGE_GUTTER;
