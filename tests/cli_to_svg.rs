@@ -89,6 +89,100 @@ fn wraps_complete_measures_into_systems() {
 }
 
 #[test]
+fn exports_composed_pages_as_vector_pdf_with_metadata() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("vector-export.musicxml");
+    fs::write(
+        &input,
+        include_str!("../examples/vector-pdf-export/vector-pdf-export.musicxml"),
+    )
+    .expect("write PDF export score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--output")
+        .arg(directory.join("vector-export.pdf"))
+        .arg("--page-size")
+        .arg("letter")
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "PDF export failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let pdf = fs::read(directory.join("vector-export.pdf")).expect("read PDF");
+    assert!(pdf.starts_with(b"%PDF-"));
+    let pdf_text = String::from_utf8_lossy(&pdf);
+    assert_eq!(pdf_text.matches("/MediaBox").count(), 2, "{pdf_text}");
+    assert!(pdf_text.contains("/MediaBox [0 0 612 792]"), "{pdf_text}");
+    assert!(pdf_text.contains("/Subtype /Form"), "{pdf_text}");
+    assert!(pdf_text.contains("612 0 0 1602"), "{pdf_text}");
+    assert!(!pdf_text.contains("/Subtype /Image"), "{pdf_text}");
+    assert!(pdf_text.contains("/Title (vector-export)"), "{pdf_text}");
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn exports_a4_pdf_with_physical_page_geometry() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("a4-export.musicxml");
+    fs::write(&input, include_str!("fixtures/minimal.musicxml")).expect("write A4 PDF score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--output")
+        .arg(directory.join("a4-export.pdf"))
+        .arg("--page-size")
+        .arg("a4")
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "A4 PDF export failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let pdf = fs::read(directory.join("a4-export.pdf")).expect("read A4 PDF");
+    let pdf_text = String::from_utf8_lossy(&pdf);
+    assert_eq!(pdf_text.matches("/MediaBox").count(), 1, "{pdf_text}");
+    assert!(
+        pdf_text.contains("/MediaBox [0 0 595.2756 841.8898]"),
+        "{pdf_text}"
+    );
+    assert!(
+        pdf_text.contains("595.2756 0 0 841.8898 0 0 cm"),
+        "{pdf_text}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_unsupported_output_extensions_with_clear_diagnostic() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("unsupported-output.musicxml");
+    fs::write(&input, include_str!("fixtures/minimal.musicxml"))
+        .expect("write unsupported-output score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--output")
+        .arg(directory.join("unsupported-output.png"))
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("output path must have the .svg or .pdf extension"));
+    assert!(!directory.join("unsupported-output.png").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn musicxml_new_page_print_creates_a_hard_page_break() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");

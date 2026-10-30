@@ -8,29 +8,32 @@ Any source code found therein is exploratory and local to that repo, not a recom
 
 ## Dependencies
 
-The runtime dependency set is currently empty. Prefer a small, deliberate
-runtime dependency footprint: add a dependency when its product value justifies
-its maintenance, security, and distribution costs. Development and repository
-automation tools may use external dependencies without changing this runtime
-policy.
+The renderer uses pure-Rust dependencies for vector PDF export. Prefer a small,
+deliberate runtime dependency footprint: add a dependency when its product value
+justifies its maintenance, security, and distribution costs. Development and
+repository automation tools may use external dependencies without changing this
+runtime policy.
 
 ## Bootstrap CLI
 
-`cargo run -- path/to/score.musicxml [--output path/to/score.svg]` writes a
-self-contained SVG. Without `--output`, the input extension is replaced with
-`.svg` beside the input.
+`cargo run -- path/to/score.musicxml [--output path/to/score.svg|path/to/score.pdf]`
+writes a self-contained SVG or vector PDF, selected by the output extension.
+Without `--output`, the input extension is replaced with `.svg` beside the
+input. PDF output contains one PDF Page per composed score Page, with A4 or
+Letter physical geometry and basic title/producer metadata.
 
 Output uses A4 portrait Pages by default with 15 mm margins. Use
 `--page-size letter` for Letter paper. Complete Systems are placed top-down
 without vertical rebalancing; MusicXML `<print new-page="yes"/>` starts a new
-Page. Supported MusicXML page dimensions in `<defaults>` or `<print>` select A4
-or Letter paper under the score's scaling; print-level dimensions apply to the
-Page they begin, and omitted dimensions inherit the score defaults. These hints
+Page. Multi-page SVG stacks white Page surfaces on a gray canvas, while PDF
+exports each Page individually. Supported MusicXML page dimensions in
+`<defaults>` or `<print>` select A4 or Letter paper under the score's scaling;
+print-level dimensions apply to the Page they begin, and omitted dimensions
+inherit the score defaults. These hints
 take precedence over `--page-size`. Custom dimensions and explicit margins warn
-and use renderer defaults. Multi-page SVG output stacks white Page surfaces on
-a gray canvas.
+and use renderer defaults.
 
-This SVG-only MVP accepts uncompressed, no-namespace MusicXML 4.0
+This MVP accepts uncompressed, no-namespace MusicXML 4.0
 `score-partwise` scores with one or more Parts, each represented by one Dozenal
 Staff and one voice. Part order and names follow the score's part-list, and
 measures align by ordinal position across Parts. Supported content includes
