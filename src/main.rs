@@ -1,8 +1,11 @@
+use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref, TextStr};
+use std::collections::HashMap;
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 use std::process;
+use svg2pdf::{usvg, ConversionOptions};
 
 mod bravura_glyphs;
 mod noto_sans_glyphs;
@@ -735,6 +738,7 @@ impl PageSize {
                 width: 794,
                 height: 1123,
                 width_mm: "210mm",
+                physical_width_mm: 210.0,
                 height_mm: "297mm",
                 physical_height_mm: 297.0,
             },
@@ -742,6 +746,7 @@ impl PageSize {
                 width: 816,
                 height: 1056,
                 width_mm: "215.9mm",
+                physical_width_mm: 215.9,
                 height_mm: "279.4mm",
                 physical_height_mm: 279.4,
             },
@@ -753,8 +758,24 @@ struct PageDimensions {
     width: i32,
     height: i32,
     width_mm: &'static str,
+    physical_width_mm: f64,
     height_mm: &'static str,
     physical_height_mm: f64,
+}
+
+struct RenderedPage {
+    top: i32,
+    width: i32,
+    height: i32,
+    width_points: f32,
+    height_points: f32,
+}
+
+struct RenderedSvg {
+    svg: String,
+    view_width: i32,
+    view_height: i32,
+    pages: Vec<RenderedPage>,
 }
 
 const PAGE_MARGIN: i32 = 57;
@@ -780,12 +801,14 @@ fn run() -> Result<(), String> {
         path
     });
     let page_size = options.page_size;
-    if output_path
+    let output_format = match output_path
         .extension()
-        .is_none_or(|extension| extension != "svg")
+        .and_then(|extension| extension.to_str())
     {
-        return Err("output path must have the .svg extension".to_owned());
-    }
+        Some("svg") => OutputFormat::Svg,
+        Some("pdf") => OutputFormat::Pdf,
+        _ => return Err("output path must have the .svg or .pdf extension".to_owned()),
+    };
 
     let rendered_outputs = match options.input_staff_mode {
         InputStaffMode::Combine => {
@@ -826,11 +849,87 @@ fn run() -> Result<(), String> {
             options.input_path.display()
         );
     }
-    for (path, svg) in rendered_outputs {
-        fs::write(&path, svg)
+    for (path, rendered) in rendered_outputs {
+        let output = match output_format {
+            OutputFormat::Svg => rendered.svg.into_bytes(),
+            OutputFormat::Pdf => {
+                let title = options
+                    .input_path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy();
+                render_pdf(&rendered, &title)?
+            }
+        };
+        fs::write(&path, output)
             .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum OutputFormat {
+    Svg,
+    Pdf,
+}
+
+fn render_pdf(rendered: &RenderedSvg, title: &str) -> Result<Vec<u8>, String> {
+    let svg_options = usvg::Options::default();
+    let tree = usvg::Tree::from_str(&rendered.svg, &svg_options)
+        .map_err(|error| format!("cannot parse rendered SVG for PDF export: {error}"))?;
+    let (svg_chunk, svg_ref) = svg2pdf::to_chunk(&tree, ConversionOptions::default())
+        .map_err(|error| format!("cannot convert rendered SVG to PDF: {error}"))?;
+
+    let mut alloc = Ref::new(1);
+    let catalog_ref = alloc.bump();
+    let pages_ref = alloc.bump();
+    let info_ref = alloc.bump();
+    let page_refs = rendered
+        .pages
+        .iter()
+        .map(|_| (alloc.bump(), alloc.bump()))
+        .collect::<Vec<_>>();
+    let mut ref_map = HashMap::new();
+    let svg_chunk = svg_chunk.renumber(|old| *ref_map.entry(old).or_insert_with(|| alloc.bump()));
+    let svg_ref = *ref_map
+        .get(&svg_ref)
+        .ok_or_else(|| "PDF conversion did not return its SVG form object".to_owned())?;
+
+    let mut pdf = Pdf::new();
+    pdf.catalog(catalog_ref).pages(pages_ref);
+    pdf.pages(pages_ref)
+        .kids(page_refs.iter().map(|(page_ref, _)| *page_ref))
+        .count(page_refs.len() as i32);
+    pdf.document_info(info_ref)
+        .title(TextStr(title))
+        .producer(TextStr("domunor"));
+
+    let xobject_name = Name(b"SVG");
+    for (page, (page_ref, content_ref)) in rendered.pages.iter().zip(page_refs) {
+        let bottom = rendered.view_height - page.top - page.height;
+        let x_scale = page.width_points * rendered.view_width as f32 / page.width as f32;
+        let y_scale = page.height_points * rendered.view_height as f32 / page.height as f32;
+        let y_offset = -(page.height_points * bottom as f32 / page.height as f32);
+        let mut content = Content::new();
+        content
+            .save_state()
+            .transform([x_scale, 0.0, 0.0, y_scale, 0.0, y_offset])
+            .x_object(xobject_name)
+            .restore_state();
+
+        let mut pdf_page = pdf.page(page_ref);
+        pdf_page
+            .parent(pages_ref)
+            .media_box(Rect::new(0.0, 0.0, page.width_points, page.height_points))
+            .contents(content_ref);
+        let mut resources = pdf_page.resources();
+        resources.x_objects().pair(xobject_name, svg_ref);
+        resources.finish();
+        pdf_page.finish();
+        pdf.stream(content_ref, &content.finish());
+    }
+    pdf.extend(&svg_chunk);
+    Ok(pdf.finish())
 }
 
 fn parse_args() -> Result<CliOptions, String> {
@@ -922,7 +1021,7 @@ fn parse_args() -> Result<CliOptions, String> {
     }
 
     let input = input.ok_or_else(|| {
-        "usage: domunor INPUT [--output FILE.svg] [--input-staff-mode combine|separate] [--system-alignment justified|left|right|centered] [--page-size a4|letter]".to_owned()
+        "usage: domunor INPUT [--output FILE.svg|FILE.pdf] [--input-staff-mode combine|separate] [--system-alignment justified|left|right|centered] [--page-size a4|letter]".to_owned()
     })?;
     Ok(CliOptions {
         input_path: input,
@@ -11501,7 +11600,7 @@ fn render_svg_with_alignment(
     warnings: &mut Vec<String>,
     alignment: SystemAlignment,
     page_size: PageSize,
-) -> Result<String, String> {
+) -> Result<RenderedSvg, String> {
     let provisional = score
         .parts
         .iter()
@@ -11778,13 +11877,24 @@ fn render_svg_with_alignment(
     writeln!(svg, "<rect id=\"background\" x=\"0\" y=\"0\" width=\"{page_width}\" height=\"{height}\" fill=\"#e5e5e5\"/>")
         .expect("writing to a String cannot fail");
     let mut page_top = 0;
-    for (page_index, page_size) in page_sizes.iter().enumerate() {
-        let dimensions = page_size.dimensions();
-        let page_width = dimensions.width;
-        let page_height = dimensions.height;
-        writeln!(svg, "<rect id=\"page-{}\" class=\"page\" x=\"0\" y=\"{page_top}\" width=\"{page_width}\" height=\"{page_height}\" fill=\"#fff\"/>", page_index + 1)
+    let rendered_pages = page_sizes
+        .iter()
+        .map(|page_size| {
+            let dimensions = page_size.dimensions();
+            let page = RenderedPage {
+                top: page_top,
+                width: dimensions.width,
+                height: dimensions.height,
+                width_points: (dimensions.physical_width_mm * 72.0 / 25.4) as f32,
+                height_points: (dimensions.physical_height_mm * 72.0 / 25.4) as f32,
+            };
+            page_top += dimensions.height + PAGE_GUTTER;
+            page
+        })
+        .collect::<Vec<_>>();
+    for (page_index, page) in rendered_pages.iter().enumerate() {
+        writeln!(svg, "<rect id=\"page-{}\" class=\"page\" x=\"0\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#fff\"/>", page_index + 1, page.top, page.width, page.height)
             .expect("writing to a String cannot fail");
-        page_top += page_height + PAGE_GUTTER;
     }
     writeln!(
         svg,
@@ -11832,13 +11942,19 @@ fn render_svg_with_alignment(
         svg.push_str("</g>\n");
     }
     svg.push_str("</g>\n</svg>\n");
-    Ok(svg)
+    Ok(RenderedSvg {
+        svg,
+        view_width: page_width,
+        view_height: height,
+        pages: rendered_pages,
+    })
 }
 
 #[cfg(test)]
 fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
     render_svg_with_alignment(score, warnings, SystemAlignment::Left, PageSize::A4)
         .expect("score fits the configured System width")
+        .svg
 }
 
 fn system_y_offset(
