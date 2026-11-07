@@ -110,7 +110,7 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 name = "domunor"
 version = "0.1.0"
 dependencies = [
- "pdf-writer",
+ "pdf-writer 0.15.0",
  "svg2pdf",
 ]
 
@@ -376,6 +376,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdf-writer"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5e456864a7a304047bff84977dc6fb162bd956475d40ba50b2dcecaada7f753"
+dependencies = [
+ "bitflags 2.13.2",
+ "itoa",
+ "memchr",
+ "ryu",
+]
+
+[[package]]
 name = "pico-args"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -596,7 +608,7 @@ dependencies = [
  "log",
  "miniz_oxide 0.8.9",
  "once_cell",
- "pdf-writer",
+ "pdf-writer 0.12.1",
  "resvg",
  "siphasher",
  "subsetter",
