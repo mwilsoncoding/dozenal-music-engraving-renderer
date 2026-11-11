@@ -40,6 +40,13 @@ measures align by ordinal position across Parts. Supported content includes
 concert pitches in octaves 0 through 9, the implemented duration and dotted
 forms, rests, ties, explicit beams, representable meters, and in-staff chords.
 Unsupported score content is rejected with contextual diagnostics.
+Pitched events and chord-symbol roots and bass tones use the active input-staff
+transposition and are engraved at sounding pitch.
+Time signatures are rendered where explicitly notated rather than repeated
+automatically at each System start; the Dozenal Clef appears at the score start.
+Later Systems begin with a barline and align in-measure content with the
+Dozenal Clef's horizontal position, reclaiming the remaining space when
+annotations are absent.
 
 The renderer-owned XML 1.0 processor handles UTF-8 and UTF-16 input and the
 conventional MusicXML DOCTYPE and internal subset. It does not resolve external

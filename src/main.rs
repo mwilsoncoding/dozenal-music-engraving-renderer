@@ -385,6 +385,7 @@ struct Measure {
     texts: Vec<PositionedText>,
     direction_spans: Vec<DirectionSpanMark>,
     meter: Option<Meter>,
+    meter_notated: Vec<bool>,
     multiple_rest: Option<MultipleRest>,
     measure_repeat_marker: Option<MeasureRepeatMarker>,
     measure_repeat_display: Option<MeasureRepeatDisplay>,
@@ -499,6 +500,12 @@ struct VerticalBounds {
     bottom: i32,
 }
 
+const STAFF_START_X: i32 = 12;
+const DOZENAL_CLEF_X: i32 = 26;
+const DEFAULT_SYSTEM_START_EVENT_X: i32 = 92;
+const TIME_SIGNATURE_ADVANCE: i32 = 28;
+const TIME_SIGNATURE_LEFT_OFFSET: i32 = 34;
+const SYSTEM_START_RIGHT_PADDING: i32 = 36;
 const SYSTEM_MAX_WIDTH: i32 = 680;
 const SYSTEM_ROW_HEIGHT: i32 = 160;
 const NOTE_SPAN_TONEHEAD_INSET: i32 = 8;
@@ -507,6 +514,7 @@ struct SystemLayout {
     starts: Vec<usize>,
     measure_systems: Vec<usize>,
     local_barline_positions: Vec<i32>,
+    system_start_event_xs: Vec<i32>,
     x_offsets: Vec<i32>,
     gap_expansions: Vec<i32>,
     system_y_offsets: Vec<i32>,
@@ -1152,6 +1160,11 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
                         texts,
                         direction_spans: measure.direction_spans.clone(),
                         meter: staff_state.meter,
+                        meter_notated: vec![measure
+                            .meter_notated
+                            .get(staff_number as usize - 1)
+                            .copied()
+                            .unwrap_or(false)],
                         multiple_rest: measure.multiple_rest.clone(),
                         measure_repeat_marker: measure.measure_repeat_marker.clone(),
                         measure_repeat_display,
@@ -2218,6 +2231,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
             let mut multiple_rest = None;
             let mut measure_repeat_marker = None;
             let mut beat_repeat_markers = Vec::new();
+            let mut meter_notated = vec![false; input_staff_count as usize];
             let mut minimum_measure_advance = None;
             let mut page_layout_before = None;
             let mut new_page_before = None;
@@ -2361,6 +2375,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                 })?;
                             active_staff_states
                                 .resize(input_staff_count as usize, InputStaffState::default());
+                            meter_notated.resize(input_staff_count as usize, false);
                         }
                         let mut saw_divisions = false;
                         let mut saw_staves = false;
@@ -2468,10 +2483,12 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                                             input_staff_count,
                                         )?;
                                         active_staff_states[staff_number].meter = Some(meter);
+                                        meter_notated[staff_number] = true;
                                     } else {
                                         for state in &mut active_staff_states {
                                             state.meter = Some(meter);
                                         }
+                                        meter_notated.fill(true);
                                     }
                                 }
                                 "key" => {
@@ -2851,6 +2868,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                             &mut warnings,
                             divisions,
                             input_staff_count,
+                            &active_staff_states,
                         )? {
                             harmonies.push(PositionedHarmony {
                                 event_index: events.len(),
@@ -3170,6 +3188,7 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
                 texts,
                 direction_spans,
                 meter: active_staff_states.first().and_then(|state| state.meter),
+                meter_notated,
                 multiple_rest,
                 measure_repeat_marker,
                 measure_repeat_display,
@@ -5246,6 +5265,7 @@ fn parse_chord_symbol(
     warnings: &mut Vec<String>,
     divisions: Option<u32>,
     input_staff_count: u32,
+    input_staff_states: &[InputStaffState],
 ) -> Result<Option<(ChordSymbol, f64, Option<u32>)>, String> {
     let element = &elements[harmony];
     validate_attributes(
@@ -5443,7 +5463,7 @@ fn parse_chord_symbol(
             "root-based harmony requires <kind> after <root>".to_owned(),
         ));
     }
-    let root = parse_harmony_pitch(elements, children[0], "root-step", "root-alter")?;
+    let mut root = parse_harmony_pitch(elements, children[0], "root-step", "root-alter")?;
     let kind_element = &elements[children[1]];
     validate_attributes(
         kind_element,
@@ -5588,7 +5608,7 @@ fn parse_chord_symbol(
         ));
         next_child += 1;
     }
-    let bass = if children
+    let mut bass = if children
         .get(next_child)
         .is_some_and(|child| elements[*child].name == "bass")
     {
@@ -5738,6 +5758,17 @@ fn parse_chord_symbol(
             "unsupported harmony content".to_owned(),
         ));
     }
+    let input_staff_index = input_staff.map_or(0, |staff| staff as usize - 1);
+    let staff_state = input_staff_states.get(input_staff_index).ok_or_else(|| {
+        element_diagnostic(
+            element,
+            "harmony staff has no active input state".to_owned(),
+        )
+    })?;
+    let transpose_pitch_class =
+        |pitch: u8| (i64::from(pitch) + i64::from(staff_state.transposition)).rem_euclid(12) as u8;
+    root = transpose_pitch_class(root);
+    bass = bass.map(transpose_pitch_class);
     let mut tones = degrees
         .iter()
         .map(|degree| ChordTone {
@@ -11368,6 +11399,7 @@ fn text_enclosure_path(shape: &str, left: f64, top: f64, right: f64, bottom: f64
 
 fn plan_system_layout(
     barline_positions: &[i32],
+    candidate_system_start_event_xs: &[i32],
     alignment: SystemAlignment,
     max_width: i32,
     explicit_breaks: &[usize],
@@ -11379,6 +11411,7 @@ fn plan_system_layout(
             starts: vec![0],
             measure_systems: Vec::new(),
             local_barline_positions: Vec::new(),
+            system_start_event_xs: vec![DEFAULT_SYSTEM_START_EVENT_X],
             x_offsets: vec![0],
             gap_expansions: Vec::new(),
             system_y_offsets: vec![0],
@@ -11389,7 +11422,9 @@ fn plan_system_layout(
         if index == 0 {
             barline_positions[index] + 12
         } else {
-            128 + barline_positions[index]
+            candidate_system_start_event_xs[index]
+                + SYSTEM_START_RIGHT_PADDING
+                + barline_positions[index]
                 - barline_positions[index - 1]
                 - measure_advance_expansions
                     .get(index)
@@ -11434,12 +11469,14 @@ fn plan_system_layout(
     let mut starts = Vec::with_capacity(ranges.len());
     let mut measure_systems = vec![0; barline_positions.len()];
     let mut local_barline_positions = vec![0; barline_positions.len()];
+    let mut system_start_event_xs = Vec::with_capacity(ranges.len());
     let mut x_offsets = vec![0; ranges.len()];
     let mut gap_expansions = vec![0; barline_positions.len()];
     for (system_index, (system_start, system_end, system_width, ended_by_width)) in
         ranges.iter().copied().enumerate()
     {
         starts.push(system_start);
+        system_start_event_xs.push(candidate_system_start_event_xs[system_start]);
         for system in measure_systems
             .iter_mut()
             .take(system_end)
@@ -11457,7 +11494,8 @@ fn plan_system_layout(
         if system_start == 0 {
             local_barline_positions[system_start] = barline_positions[system_start] + x_offset;
         } else {
-            local_barline_positions[system_start] = 92 + barline_positions[system_start]
+            local_barline_positions[system_start] = system_start_event_xs[system_index]
+                + barline_positions[system_start]
                 - barline_positions[system_start - 1]
                 - 4
                 - measure_advance_expansions
@@ -11512,6 +11550,7 @@ fn plan_system_layout(
         starts,
         measure_systems,
         local_barline_positions,
+        system_start_event_xs,
         x_offsets,
         gap_expansions,
         system_y_offsets: vec![0; system_count],
@@ -11758,8 +11797,32 @@ fn render_svg_with_alignment(
         .map(|page_size_hint| page_size_hint.dimensions().width)
         .fold(page_width, i32::min);
     let printable_width = (minimum_page_width - PAGE_MARGIN * 2).min(SYSTEM_MAX_WIDTH);
+    let system_start_event_xs = (0..score.parts[0].measures.len())
+        .map(|measure_index| {
+            let meter_notated = score.parts.iter().any(|part| {
+                part.measures[measure_index]
+                    .meter_notated
+                    .first()
+                    .copied()
+                    .unwrap_or(false)
+            });
+            if measure_index == 0 || score.parts.len() > 1 {
+                DEFAULT_SYSTEM_START_EVENT_X
+                    + if meter_notated {
+                        TIME_SIGNATURE_ADVANCE
+                    } else {
+                        0
+                    }
+            } else if meter_notated {
+                DOZENAL_CLEF_X + TIME_SIGNATURE_LEFT_OFFSET + TIME_SIGNATURE_ADVANCE
+            } else {
+                DOZENAL_CLEF_X
+            }
+        })
+        .collect::<Vec<_>>();
     let mut system_layout = plan_system_layout(
         &measure_barline_positions,
+        &system_start_event_xs,
         alignment,
         printable_width,
         &explicit_system_breaks,
@@ -12198,13 +12261,12 @@ fn render_part_svg(
 ) -> RenderedPart {
     let mut scene = Scene::new(0, 0, 0);
     let group_stem_directions = beamed_group_stem_directions(part);
-    let mut x = 92;
+    let mut x = DEFAULT_SYSTEM_START_EVENT_X;
     let mut left = 0;
     let mut right = 128;
     let mut view_top = 0;
     let mut view_bottom = 128;
     let mut index = 0;
-    let mut active_meter = None;
     let mut meter_index = 0;
     let mut pending_tie_paths: VoiceTiePaths = Vec::new();
     let mut pending_tremolo_stems: VoiceState<Option<TremoloStemStart>> = Vec::new();
@@ -12247,14 +12309,24 @@ fn render_part_svg(
                 view_top = 0;
                 view_bottom = 128;
             }
-            x = 92 + system_layout.map_or(0, |layout| layout.x_offsets[system_index]);
+            x = DEFAULT_SYSTEM_START_EVENT_X
+                + system_layout.map_or(0, |layout| layout.x_offsets[system_index]);
+            if let Some(layout) = system_layout {
+                if measure_index > 0 && part_count == 1 {
+                    let meter_advance = measure
+                        .meter
+                        .filter(|_| measure.meter_notated.first().copied().unwrap_or(false))
+                        .map_or(0, |_| TIME_SIGNATURE_ADVANCE);
+                    x = layout.system_start_event_xs[system_index] - meter_advance
+                        + layout.x_offsets[system_index];
+                }
+            }
             scene.set_system_y_offset(system_y_offset(
                 system_layout,
                 system_index,
                 part_index,
                 part_count,
             ));
-            active_meter = None;
         } else if let Some(expansions) = measure_advance_expansions {
             x += expansions.get(measure_index).copied().unwrap_or_default();
         }
@@ -12264,61 +12336,65 @@ fn render_part_svg(
         let mut harmony_index = 0;
         let mut text_index = 0;
         let mut measure_harmony_right = None;
-        if let Some(meter) = measure.meter {
-            if active_meter != Some(meter) {
-                let numerator_id = if meter_index == 0 {
-                    "meter-numerator".to_owned()
-                } else {
-                    format!("meter-numerator-{meter_index}")
-                };
-                let denominator_id = if meter_index == 0 {
-                    "meter-denominator".to_owned()
-                } else {
-                    format!("meter-denominator-{meter_index}")
-                };
-                let meter_x = if is_system_start { x - 34 } else { x };
-                scene.add_path(
-                    DrawLayer::Event,
-                    numerator_id,
-                    None,
-                    Vec::new(),
-                    PathGeometry::new(
-                        Some((meter_x, 30)),
-                        time_signature_glyph_path(meter.beats),
-                        PathStyle::FilledGlyph,
-                    )
-                    .scaled(2.0)
-                    .rotated_180_if(meter.beats == 10),
-                );
-                notation_bounds.push(ComponentBounds::filled(
-                    f64::from(meter_x),
-                    30.0,
-                    f64::from(meter_x + 24),
-                    66.0,
-                ));
-                scene.add_path(
-                    DrawLayer::Event,
-                    denominator_id,
-                    None,
-                    Vec::new(),
-                    PathGeometry::new(
-                        Some((meter_x, 70)),
-                        time_signature_glyph_path(meter.beat_type),
-                        PathStyle::FilledGlyph,
-                    )
-                    .scaled(2.0)
-                    .rotated_180_if(meter.beat_type == 10),
-                );
-                notation_bounds.push(ComponentBounds::filled(
-                    f64::from(meter_x),
-                    70.0,
-                    f64::from(meter_x + 24),
-                    106.0,
-                ));
-                x += 28;
-                meter_index += 1;
-            }
-            active_meter = Some(meter);
+        if let Some(meter) = measure
+            .meter
+            .filter(|_| measure.meter_notated.first().copied().unwrap_or(false))
+        {
+            let numerator_id = if meter_index == 0 {
+                "meter-numerator".to_owned()
+            } else {
+                format!("meter-numerator-{meter_index}")
+            };
+            let denominator_id = if meter_index == 0 {
+                "meter-denominator".to_owned()
+            } else {
+                format!("meter-denominator-{meter_index}")
+            };
+            let meter_x = if is_system_start {
+                x - TIME_SIGNATURE_LEFT_OFFSET
+            } else {
+                x
+            };
+            scene.add_path(
+                DrawLayer::Event,
+                numerator_id,
+                None,
+                Vec::new(),
+                PathGeometry::new(
+                    Some((meter_x, 30)),
+                    time_signature_glyph_path(meter.beats),
+                    PathStyle::FilledGlyph,
+                )
+                .scaled(2.0)
+                .rotated_180_if(meter.beats == 10),
+            );
+            notation_bounds.push(ComponentBounds::filled(
+                f64::from(meter_x),
+                30.0,
+                f64::from(meter_x + 24),
+                66.0,
+            ));
+            scene.add_path(
+                DrawLayer::Event,
+                denominator_id,
+                None,
+                Vec::new(),
+                PathGeometry::new(
+                    Some((meter_x, 70)),
+                    time_signature_glyph_path(meter.beat_type),
+                    PathStyle::FilledGlyph,
+                )
+                .scaled(2.0)
+                .rotated_180_if(meter.beat_type == 10),
+            );
+            notation_bounds.push(ComponentBounds::filled(
+                f64::from(meter_x),
+                70.0,
+                f64::from(meter_x + 24),
+                106.0,
+            ));
+            x += TIME_SIGNATURE_ADVANCE;
+            meter_index += 1;
         }
         let event_origin_x = x;
         measure_origins.push(event_origin_x);
@@ -13390,7 +13466,11 @@ fn render_part_svg(
                             && measure_index + 1 < start + multiple_rest.count as usize
                     })
             });
-        if !inside_multiple_rest_span {
+        let explicit_right_barline = measure
+            .barlines
+            .iter()
+            .find(|barline| barline.location == "right");
+        if !inside_multiple_rest_span && explicit_right_barline.is_none() {
             scene.add_path(
                 DrawLayer::Barline,
                 format!("barline-{}", measure_index + 1),
@@ -13402,6 +13482,45 @@ fn render_part_svg(
                     PathStyle::StaffLine,
                 ),
             );
+        }
+        if !inside_multiple_rest_span {
+            if let Some(barline) = explicit_right_barline
+                .filter(|barline| !barline.repeat_start && !barline.repeat_end)
+            {
+                let strokes = repeat_barline_strokes(
+                    Some(barline.style.as_deref().unwrap_or("regular")),
+                    false,
+                    barline_x,
+                );
+                let stroke_count = strokes.len();
+                for (stroke_index, (styled_line_x, style, path)) in strokes.into_iter().enumerate()
+                {
+                    let is_final_stroke = stroke_index + 1 == stroke_count;
+                    scene.add_path(
+                        DrawLayer::Barline,
+                        if is_final_stroke {
+                            format!("barline-{}", measure_index + 1)
+                        } else {
+                            format!("barline-style-{measure_index}-{stroke_index}")
+                        },
+                        None,
+                        Vec::new(),
+                        if is_final_stroke {
+                            PathGeometry::new(None, format!("M{styled_line_x} 27.5V108.5"), style)
+                        } else {
+                            PathGeometry::new(Some((styled_line_x, 0)), path, style)
+                        },
+                    );
+                    notation_bounds.push(ComponentBounds::stroked(
+                        f64::from(styled_line_x),
+                        27.5,
+                        f64::from(styled_line_x),
+                        108.5,
+                        3.0,
+                    ));
+                    right = right.max(styled_line_x + 2);
+                }
+            }
         }
         for repeat in measure
             .barlines
@@ -13665,31 +13784,93 @@ fn render_part_svg(
                 Vec::new(),
                 PathGeometry::new(
                     None,
-                    format!("M12 {staff_y}H{system_barline}"),
+                    format!("M{STAFF_START_X} {staff_y}H{system_barline}"),
                     PathStyle::StaffLine,
                 ),
             );
         }
-        for (label, y, tone) in [("octave-5", 49, 5), ("octave-4", 69, 4)] {
-            let id = if system_index == 0 {
-                label.to_owned()
-            } else {
-                format!("system-{system_index}-{label}")
-            };
-            scene.add_path(
-                DrawLayer::Staff,
-                id,
-                None,
-                Vec::new(),
-                PathGeometry::new(Some((26, y)), glyph_path(tone), PathStyle::FilledGlyph),
-            );
+        if system_index > 0 {
+            let system_start_measure = system_layout
+                .and_then(|layout| layout.starts.get(system_index).copied())
+                .expect("later System has a corresponding starting Measure");
+            let explicit_left_barline = part.measures[system_start_measure]
+                .barlines
+                .iter()
+                .find(|barline| barline.location == "left");
+            let starts_with_repeat_barline = explicit_left_barline
+                .is_some_and(|barline| barline.repeat_start || barline.repeat_end);
+            if !starts_with_repeat_barline {
+                let strokes = explicit_left_barline
+                    .map(|barline| {
+                        repeat_barline_strokes(
+                            Some(barline.style.as_deref().unwrap_or("regular")),
+                            false,
+                            STAFF_START_X,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        repeat_barline_strokes(Some("regular"), false, STAFF_START_X)
+                    });
+                let stroke_count = strokes.len();
+                for (stroke_index, (barline_x, style, path)) in strokes.into_iter().enumerate() {
+                    let is_final_stroke = stroke_index + 1 == stroke_count;
+                    scene.add_path(
+                        DrawLayer::Barline,
+                        if is_final_stroke {
+                            format!("system-{system_index}-start-barline")
+                        } else {
+                            format!("system-{system_index}-start-barline-style-{stroke_index}")
+                        },
+                        None,
+                        Vec::new(),
+                        if is_final_stroke {
+                            PathGeometry::new(None, format!("M{barline_x} 27.5V108.5"), style)
+                        } else {
+                            PathGeometry::new(Some((barline_x, 0)), path, style)
+                        },
+                    );
+                }
+            }
+        }
+        if system_index == 0 {
+            for (label, y, tone) in [("octave-5", 49, 5), ("octave-4", 69, 4)] {
+                scene.add_path(
+                    DrawLayer::Staff,
+                    label.to_owned(),
+                    None,
+                    Vec::new(),
+                    PathGeometry::new(
+                        Some((DOZENAL_CLEF_X, y)),
+                        glyph_path(tone),
+                        PathStyle::FilledGlyph,
+                    ),
+                );
+            }
         }
         let system_bounds = &mut system_notation_bounds[system_index];
         system_bounds.extend([28.0, 68.0, 108.0].into_iter().map(|staff_y| {
-            ComponentBounds::stroked(12.0, staff_y, f64::from(system_barline), staff_y, 1.0)
+            ComponentBounds::stroked(
+                f64::from(STAFF_START_X),
+                staff_y,
+                f64::from(system_barline),
+                staff_y,
+                1.0,
+            )
         }));
-        system_bounds.push(ComponentBounds::filled(26.0, 49.0, 38.0, 67.0));
-        system_bounds.push(ComponentBounds::filled(26.0, 69.0, 38.0, 87.0));
+        if system_index == 0 {
+            system_bounds.push(ComponentBounds::filled(
+                f64::from(DOZENAL_CLEF_X),
+                49.0,
+                f64::from(DOZENAL_CLEF_X + 12),
+                67.0,
+            ));
+            system_bounds.push(ComponentBounds::filled(
+                f64::from(DOZENAL_CLEF_X),
+                69.0,
+                f64::from(DOZENAL_CLEF_X + 12),
+                87.0,
+            ));
+        }
     }
     let span_labels = add_note_span_paths(
         span_anchors,
@@ -14631,8 +14812,10 @@ mod tests {
 
     #[test]
     fn justified_systems_expand_gaps_proportionally() {
+        let system_start_event_xs = [92; 5];
         let layout = plan_system_layout(
             &[150, 200, 280, 480, 530],
+            &system_start_event_xs,
             SystemAlignment::Justified,
             340,
             &[],
@@ -14648,23 +14831,49 @@ mod tests {
 
     #[test]
     fn short_system_alignment_offsets_the_system_without_justifying_it() {
+        let system_start_event_xs = [92; 2];
         for (alignment, expected_offset) in [
             (SystemAlignment::Left, 0),
             (SystemAlignment::Justified, 0),
             (SystemAlignment::Centered, 44),
             (SystemAlignment::Right, 88),
         ] {
-            let layout = plan_system_layout(&[150, 200], alignment, 300, &[], &[], &[])
-                .expect("each measure fits");
+            let layout = plan_system_layout(
+                &[150, 200],
+                &system_start_event_xs,
+                alignment,
+                300,
+                &[],
+                &[],
+                &[],
+            )
+            .expect("each measure fits");
             assert_eq!(layout.x_offsets, [expected_offset]);
             assert_eq!(layout.gap_expansions, [0, 0]);
         }
     }
 
     #[test]
+    fn unannotated_system_start_uses_available_width_for_measure_packing() {
+        let layout = plan_system_layout(
+            &[150, 300, 450, 600, 750],
+            &[92, 26, 26, 26, 26],
+            SystemAlignment::Left,
+            680,
+            &[1],
+            &[],
+            &[],
+        )
+        .expect("the unannotated System should fit four measures");
+
+        assert_eq!(layout.starts, [0, 1]);
+        assert_eq!(layout.system_start_event_xs, [92, 26]);
+    }
+
+    #[test]
     fn system_planner_rejects_an_overwide_measure() {
         assert!(matches!(
-            plan_system_layout(&[1000], SystemAlignment::Left, 680, &[], &[], &[]),
+            plan_system_layout(&[1000], &[92], SystemAlignment::Left, 680, &[], &[], &[]),
             Err(error) if error.contains("measure 1 is") && error.contains("maximum System width")
         ));
     }

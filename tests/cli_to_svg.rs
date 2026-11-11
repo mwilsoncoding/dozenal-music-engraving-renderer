@@ -5768,6 +5768,68 @@ fn renders_root_position_and_bass_tone_chord_symbols() {
 }
 
 #[test]
+fn transposes_harmony_for_transposing_instrument_parts() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("transposed-harmony.musicxml");
+    let fixture = r#"<?xml version="1.0"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>B-flat Trumpet</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions></attributes>
+      <harmony><root><root-step>C</root-step></root><kind>minor</kind><bass><bass-step>E</bass-step><bass-alter>-1</bass-alter></bass></harmony>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>
+    </measure>
+    <measure number="2">
+      <attributes><transpose><diatonic>-1</diatonic><chromatic>-2</chromatic></transpose></attributes>
+      <harmony><root><root-step>D</root-step></root><kind>minor</kind><bass><bass-step>F</bass-step></bass></harmony>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>
+    </measure>
+  </part>
+</score-partwise>"#;
+    fs::write(&input, fixture).expect("write transposed-harmony score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "transposed-harmony score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("transposed-harmony.svg")).expect("read SVG");
+    for symbol_index in 0..2 {
+        assert!(
+            svg.lines().any(|line| {
+                line.contains(&format!("id=\"chord-symbol-{symbol_index}-root\""))
+                    && line.contains("data-chord-role=\"root\" data-tone=\"0\"")
+            }),
+            "C minor and written D minor on a B-flat trumpet should both have dozenal root 0: {svg}"
+        );
+        for tone in [7] {
+            assert!(
+                svg.lines().any(|line| {
+                    line.contains(&format!("id=\"chord-symbol-{symbol_index}-tone-"))
+                        && line.contains(&format!("data-chord-role=\"tone\" data-tone=\"{tone}\""))
+                }),
+                "transposed minor chord {symbol_index} should contain dozenal tone {tone}: {svg}"
+            );
+        }
+        assert!(
+            svg.lines().any(|line| {
+                line.contains(&format!("id=\"chord-symbol-{symbol_index}-bass\""))
+                    && line.contains("data-chord-role=\"bass\" data-tone=\"3\"")
+            }),
+            "C minor/E-flat and written D minor/F on a B-flat trumpet should both have dozenal bass tone 3: {svg}"
+        );
+    }
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn warns_and_omits_valid_but_unsupported_harmony_kinds() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
@@ -7852,6 +7914,222 @@ fn renders_no_transposition_fixture_with_correct_measure_barlines() {
     );
     let svg = fs::read_to_string(directory.join("no-transposition.svg")).expect("read SVG");
     assert_measure_barline_layout(&svg);
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_clef_and_time_signature_only_where_notated() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("notated-clef-meter.musicxml");
+    let fixture = include_str!("../reference/original-bb-trumpet-12-bar.musicxml");
+    fs::write(&input, fixture).expect("write notated clef and meter score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "clef and meter score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("notated-clef-meter.svg")).expect("read SVG");
+    assert_eq!(
+        svg.lines()
+            .filter(|line| line.contains("id=\"meter-numerator"))
+            .count(),
+        1,
+        "the time signature is notated only once, so it should render only once: {svg}"
+    );
+    assert_eq!(
+        svg.lines()
+            .filter(|line| line.contains("id=\"meter-denominator"))
+            .count(),
+        1,
+        "the time signature is notated only once, so it should render only once: {svg}"
+    );
+    assert_eq!(
+        svg.lines()
+            .filter(|line| line.contains("id=\"") && line.contains("octave-"))
+            .count(),
+        2,
+        "the Dozenal Clef should appear only at the beginning of the score: {svg}"
+    );
+    let re_notated_fixture = fixture.replace(
+        "<measure number=\"5\">",
+        "<measure number=\"5\"><attributes><time><beats>4</beats><beat-type>4</beat-type></time></attributes>",
+    );
+    assert_ne!(re_notated_fixture, fixture, "measure 5 should be found");
+    fs::write(&input, re_notated_fixture).expect("write explicitly re-notated meter score");
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI for explicitly re-notated meter");
+    assert!(
+        output.status.success(),
+        "explicitly re-notated meter score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("notated-clef-meter.svg")).expect("read SVG");
+    assert_eq!(
+        svg.lines()
+            .filter(|line| line.contains("id=\"meter-numerator"))
+            .count(),
+        2,
+        "an explicitly repeated time signature should still render: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn later_system_starts_with_barline_and_aligns_content_to_clef_position() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("unannotated-system.musicxml");
+    let fixture = r#"<?xml version="1.0"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Music</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>
+    </measure>
+    <measure number="2">
+      <print new-system="yes"/>
+      <harmony><root><root-step>C</root-step></root><kind>minor</kind></harmony>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>
+    </measure>
+  </part>
+</score-partwise>"#;
+    fs::write(&input, fixture).expect("write minimal system-spacing score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "system-spacing score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("unannotated-system.svg")).expect("read SVG");
+    let second_system_start_barline = svg
+        .lines()
+        .find(|line| line.contains("id=\"system-1-start-barline\""))
+        .expect("the second System should begin with a barline");
+    assert!(
+        second_system_start_barline.contains("d=\"M12 27.5V108.5\""),
+        "the second System barline should be at the left edge of the Staff: {second_system_start_barline}"
+    );
+    let second_system_first_tonehead = svg
+        .lines()
+        .find(|line| line.contains("data-event=\"1\""))
+        .expect("first Tonehead on the second System");
+    assert_eq!(
+        path_translation_f64(second_system_first_tonehead).0,
+        26.0,
+        "the first in-measure content on a later System should align with the Dozenal Clef position"
+    );
+    let second_system_chord_root = svg
+        .lines()
+        .find(|line| line.contains("data-chord-role=\"root\""))
+        .expect("Chord Symbol on the second System");
+    assert_eq!(
+        path_translation_f64(second_system_chord_root).0,
+        26.0,
+        "Chord Symbols should align with the first in-measure note"
+    );
+
+    let re_notated_fixture = fixture.replace(
+        "<print new-system=\"yes\"/>",
+        "<print new-system=\"yes\"/><attributes><time><beats>4</beats><beat-type>4</beat-type></time></attributes>",
+    );
+    assert_ne!(
+        re_notated_fixture, fixture,
+        "the forced System break should exist"
+    );
+    fs::write(&input, re_notated_fixture).expect("write re-notated system-spacing score");
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "re-notated system-spacing score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("unannotated-system.svg")).expect("read SVG");
+    let second_system_meter = svg
+        .lines()
+        .find(|line| line.contains("id=\"meter-numerator-1\""))
+        .expect("re-notated time signature on the second System");
+    assert_eq!(
+        path_translation_f64(second_system_meter).0,
+        26.0,
+        "a re-notated time signature should use the first-system clef position when no clef is present"
+    );
+    let second_system_first_tonehead = svg
+        .lines()
+        .find(|line| line.contains("data-event=\"1\""))
+        .expect("first Tonehead on the second System");
+    assert_eq!(
+        path_translation_f64(second_system_first_tonehead).0,
+        88.0,
+        "the time signature should reserve its own width before the first Tonehead"
+    );
+    let second_system_start_barline = svg
+        .lines()
+        .find(|line| line.contains("id=\"system-1-start-barline\""))
+        .expect("re-notated second System should still begin with a barline");
+    assert!(
+        second_system_start_barline.contains("d=\"M12 27.5V108.5\""),
+        "the re-notated System barline should remain at the left edge of the Staff: {second_system_start_barline}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn renders_explicit_light_heavy_non_repeat_barline() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("light-heavy-barline.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "</measure>",
+        "<barline location=\"right\"><bar-style>light-heavy</bar-style></barline></measure>",
+    );
+    fs::write(&input, fixture).expect("write light-heavy barline score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "light-heavy barline score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("light-heavy-barline.svg")).expect("read SVG");
+    let light_stroke = svg
+        .lines()
+        .find(|line| line.contains("id=\"barline-style-0-0\""))
+        .expect("light barline stroke");
+    let heavy_stroke = svg
+        .lines()
+        .find(|line| line.contains("id=\"barline-1\""))
+        .expect("heavy barline stroke");
+    assert!(
+        light_stroke.contains("stroke-width=\"1.5\"")
+            && heavy_stroke.contains("stroke-width=\"3\""),
+        "light-heavy should render adjacent light and heavy strokes: {svg}"
+    );
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
