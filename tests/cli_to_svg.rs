@@ -89,6 +89,52 @@ fn wraps_complete_measures_into_systems() {
 }
 
 #[test]
+fn justified_trumpet_systems_match_the_first_system_width() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("justified-trumpet.musicxml");
+    fs::write(
+        &input,
+        include_str!("../reference/original-bb-trumpet-12-bar.musicxml"),
+    )
+    .expect("write trumpet score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--system-alignment")
+        .arg("justified")
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "justified trumpet score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("justified-trumpet.svg")).expect("read SVG");
+    let staff_endpoints = svg
+        .lines()
+        .filter(|line| line.contains("staff-line-1\""))
+        .map(|line| {
+            line.split_once('H')
+                .and_then(|(_, endpoint)| endpoint.split('"').next())
+                .and_then(|endpoint| endpoint.parse::<i32>().ok())
+                .expect("System staff endpoint")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        staff_endpoints.len() >= 3,
+        "the trumpet score should have at least three Systems: {staff_endpoints:?}"
+    );
+    assert_eq!(
+        &staff_endpoints[1..3],
+        &[staff_endpoints[0]; 2],
+        "the second and third Systems should reach the first System's right edge: {staff_endpoints:?}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn exports_composed_pages_as_vector_pdf_with_metadata() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
