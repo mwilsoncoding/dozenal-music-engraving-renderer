@@ -23,7 +23,7 @@ struct Tone {
 struct VoiceId(Option<String>);
 
 type VoiceState<T> = Vec<(VoiceId, T)>;
-type TiePath = (Tone, i32, i32);
+type TiePath = (Tone, usize, usize, usize, i32, i32);
 type BeamStart = (i32, i32);
 type BeamedStem = (String, i32, i32);
 type BeamEventPosition = (usize, usize);
@@ -702,6 +702,22 @@ struct Score {
     parts: Vec<Part>,
     warnings: Vec<String>,
     page_layout_hint: Option<PageLayoutHint>,
+    work_title: Option<String>,
+    work_number: Option<String>,
+    movement_title: Option<String>,
+}
+
+impl Score {
+    fn title(&self) -> Option<&str> {
+        self.work_title
+            .as_deref()
+            .filter(|title| !title.is_empty())
+            .or_else(|| {
+                self.movement_title
+                    .as_deref()
+                    .filter(|title| !title.is_empty())
+            })
+    }
 }
 
 #[derive(Clone)]
@@ -717,6 +733,7 @@ struct CliOptions {
     input_staff_mode: InputStaffMode,
     system_alignment: SystemAlignment,
     page_size: PageSize,
+    scale: f64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -788,6 +805,9 @@ struct RenderedSvg {
 
 const PAGE_MARGIN: i32 = 57;
 const PAGE_GUTTER: i32 = 24;
+const SCORE_TITLE_VERTICAL_RESERVE: i32 = 8;
+const SCORE_TITLE_FONT_SIZE: f64 = 24.0;
+const SCORE_TITLE_BASELINE_OFFSET: i32 = 24;
 
 fn main() {
     if let Err(message) = run() {
@@ -803,6 +823,13 @@ fn run() -> Result<(), String> {
     let score = parse_score_with_mode(&source, options.input_staff_mode)
         .map_err(|error| format!("{}: {error}", options.input_path.display()))?;
     let mut warnings = score.warnings.clone();
+    let input_title = options
+        .input_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let output_title = score.title().unwrap_or(&input_title).to_owned();
     let output_path = options.output_path.unwrap_or_else(|| {
         let mut path = options.input_path.clone();
         path.set_extension("svg");
@@ -825,6 +852,7 @@ fn run() -> Result<(), String> {
                 &mut warnings,
                 options.system_alignment,
                 page_size,
+                options.scale,
             )?;
             vec![(output_path, svg)]
         }
@@ -844,6 +872,7 @@ fn run() -> Result<(), String> {
                     &mut warnings,
                     options.system_alignment,
                     page_size,
+                    options.scale,
                 )?;
                 outputs.push((path, svg));
             }
@@ -860,14 +889,7 @@ fn run() -> Result<(), String> {
     for (path, rendered) in rendered_outputs {
         let output = match output_format {
             OutputFormat::Svg => rendered.svg.into_bytes(),
-            OutputFormat::Pdf => {
-                let title = options
-                    .input_path
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                render_pdf(&rendered, &title)?
-            }
+            OutputFormat::Pdf => render_pdf(&rendered, &output_title)?,
         };
         fs::write(&path, output)
             .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
@@ -947,6 +969,7 @@ fn parse_args() -> Result<CliOptions, String> {
     let mut input_staff_mode = None;
     let mut system_alignment = None;
     let mut page_size = None;
+    let mut scale = None;
 
     while let Some(argument) = args.next() {
         if argument == "--output" {
@@ -1021,6 +1044,20 @@ fn parse_args() -> Result<CliOptions, String> {
                     }
                 },
             );
+        } else if argument == "--scale" {
+            if scale.is_some() {
+                return Err("--scale may only be specified once".to_owned());
+            }
+            let value = args
+                .next()
+                .ok_or_else(|| "--scale requires a positive finite multiplier".to_owned())?
+                .to_string_lossy()
+                .parse::<f64>()
+                .map_err(|_| "--scale requires a positive finite multiplier".to_owned())?;
+            if !value.is_finite() || value <= 0.0 {
+                return Err("--scale requires a positive finite multiplier".to_owned());
+            }
+            scale = Some(value);
         } else if argument.to_string_lossy().starts_with('-') {
             return Err(format!("unsupported option {}", argument.to_string_lossy()));
         } else if input.replace(PathBuf::from(argument)).is_some() {
@@ -1029,7 +1066,7 @@ fn parse_args() -> Result<CliOptions, String> {
     }
 
     let input = input.ok_or_else(|| {
-        "usage: domunor INPUT [--output FILE.svg|FILE.pdf] [--input-staff-mode combine|separate] [--system-alignment justified|left|right|centered] [--page-size a4|letter]".to_owned()
+        "usage: domunor INPUT [--output FILE.svg|FILE.pdf] [--input-staff-mode combine|separate] [--system-alignment justified|left|right|centered] [--page-size a4|letter] [--scale S]".to_owned()
     })?;
     Ok(CliOptions {
         input_path: input,
@@ -1037,6 +1074,7 @@ fn parse_args() -> Result<CliOptions, String> {
         input_staff_mode: input_staff_mode.unwrap_or(InputStaffMode::Combine),
         system_alignment: system_alignment.unwrap_or(SystemAlignment::Justified),
         page_size: page_size.unwrap_or(PageSize::A4),
+        scale: scale.unwrap_or(1.0),
     })
 }
 
@@ -1196,6 +1234,9 @@ fn score_for_input_staff(score: &Score, staff_number: u32) -> Score {
         parts,
         warnings: score.warnings.clone(),
         page_layout_hint: score.page_layout_hint.clone(),
+        work_title: score.work_title.clone(),
+        work_number: score.work_number.clone(),
+        movement_title: score.movement_title.clone(),
     }
 }
 
@@ -1963,19 +2004,105 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
             "unsupported shape: <score-partwise> must contain <part-list> and Parts".to_owned(),
         ));
     };
-    if part_list_index + 1 >= root_children.len()
-        || root_children[..part_list_index]
-            .iter()
-            .any(|child| elements[*child].name != "defaults")
-        || root_children[..part_list_index].len() > 1
-    {
+    if part_list_index + 1 >= root_children.len() {
         return Err(element_diagnostic(
             &elements[root],
-            "unsupported score-partwise child before <part-list>".to_owned(),
+            "unsupported shape: <score-partwise> must contain Parts after <part-list>".to_owned(),
         ));
     }
+    let mut work_title = None;
+    let mut work_number = None;
+    let mut movement_title = None;
+    let mut defaults = None;
+    let mut previous_root_order = 0;
+    let mut saw_work = false;
+    for child in &root_children[..part_list_index] {
+        let element = &elements[*child];
+        let root_order = match element.name.as_str() {
+            "work" => {
+                if saw_work {
+                    return Err(element_diagnostic(
+                        element,
+                        "duplicate <work> metadata".to_owned(),
+                    ));
+                }
+                saw_work = true;
+                require_no_attributes(element)?;
+                require_container_text(element)?;
+                for work_child in &element.children {
+                    let child_element = &elements[*work_child];
+                    match child_element.name.as_str() {
+                        "work-number" => {
+                            if work_number.is_some() {
+                                return Err(element_diagnostic(
+                                    child_element,
+                                    "duplicate <work-number>".to_owned(),
+                                ));
+                            }
+                            work_number = Some(leaf_text(child_element)?.trim().to_owned());
+                        }
+                        "work-title" => {
+                            if work_title.is_some() {
+                                return Err(element_diagnostic(
+                                    child_element,
+                                    "duplicate <work-title>".to_owned(),
+                                ));
+                            }
+                            let value = leaf_text(child_element)?.trim().to_owned();
+                            validate_score_title_glyphs(child_element, &value)?;
+                            work_title = Some(value);
+                        }
+                        _ => {
+                            return Err(element_diagnostic(
+                                child_element,
+                                format!("unsupported <work> child <{}>", child_element.name),
+                            ));
+                        }
+                    };
+                }
+                1
+            }
+            "movement-title" => {
+                if movement_title.is_some() {
+                    return Err(element_diagnostic(
+                        element,
+                        "duplicate <movement-title>".to_owned(),
+                    ));
+                }
+                let value = leaf_text(element)?.trim().to_owned();
+                validate_score_title_glyphs(element, &value)?;
+                movement_title = Some(value);
+                2
+            }
+            "defaults" => {
+                if defaults.is_some() {
+                    return Err(element_diagnostic(
+                        element,
+                        "duplicate <defaults>".to_owned(),
+                    ));
+                }
+                defaults = Some(*child);
+                3
+            }
+            _ => {
+                return Err(element_diagnostic(
+                    element,
+                    format!(
+                        "unsupported score-partwise child <{}> before <part-list>",
+                        element.name
+                    ),
+                ));
+            }
+        };
+        if root_order <= previous_root_order {
+            return Err(element_diagnostic(
+                element,
+                "score-partwise metadata is out of order".to_owned(),
+            ));
+        }
+        previous_root_order = root_order;
+    }
     let mut warnings = Vec::new();
-    let defaults = root_children[..part_list_index].first().copied();
     let note_size_scales = defaults
         .map(|defaults| parse_note_size_defaults(&elements, defaults, &mut warnings))
         .transpose()?
@@ -3304,7 +3431,23 @@ fn parse_score_with_mode(source: &[u8], input_staff_mode: InputStaffMode) -> Res
         parts,
         warnings,
         page_layout_hint: page_size_hint,
+        work_title,
+        work_number,
+        movement_title,
     })
+}
+
+fn validate_score_title_glyphs(element: &Element, title: &str) -> Result<(), String> {
+    if let Some(character) = title
+        .chars()
+        .find(|character| !noto_sans_glyphs::supports(*character))
+    {
+        return Err(element_diagnostic(
+            element,
+            format!("score title contains unsupported character {character:?}"),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_tremolo_pairs(
@@ -10032,7 +10175,8 @@ fn event_geometry(
     event: &Event,
     x: i32,
     active_beams: &[Option<(i32, i32)>; 5],
-    pending_ties: &[(Tone, i32, i32)],
+    pending_ties: &[TiePath],
+    system_index: usize,
     stems_up: bool,
 ) -> EventGeometry {
     let mut primary = Vec::new();
@@ -10251,17 +10395,21 @@ fn event_geometry(
         if !tone_event.tie_stop {
             continue;
         }
-        let Some((_, start_x, start_y)) = pending_ties
+        let Some((_, start_system, _, _, start_tone_x, start_y)) = pending_ties
             .iter()
-            .find(|(pending_tone, _, _)| *pending_tone == tone_event.tone)
+            .find(|(pending_tone, _, _, _, _, _)| *pending_tone == tone_event.tone)
         else {
             continue;
         };
+        if *start_system != system_index {
+            continue;
+        }
+        let start_x = start_tone_x + 8;
         let end_x = tone_xs[tone_index] + 5;
         incoming.push(ComponentBounds::stroked(
-            f64::from((*start_x).min(*start_x + 10).min(end_x - 10).min(end_x)),
+            f64::from(start_x.min(start_x + 10).min(end_x - 10).min(end_x)),
             f64::from(*start_y),
-            f64::from((*start_x).max(*start_x + 10).max(end_x - 10).max(end_x)),
+            f64::from(start_x.max(start_x + 10).max(end_x - 10).max(end_x)),
             f64::from(*start_y + 9),
             1.5,
         ));
@@ -11565,13 +11713,15 @@ struct PageLayoutOptions<'a> {
     default_page_size: PageSize,
     system_bounds: &'a [VerticalBounds],
     content_top: i32,
+    scale: f64,
 }
 
 fn plan_page_layout(
     system_layout: &mut SystemLayout,
     options: PageLayoutOptions<'_>,
 ) -> Result<Vec<PageSize>, String> {
-    let system_height = options.part_count as i32 * SYSTEM_ROW_HEIGHT;
+    let system_height =
+        (options.part_count as f64 * f64::from(SYSTEM_ROW_HEIGHT) / options.scale).ceil() as i32;
     let mut page_sizes = vec![options.default_page_size];
     let mut system_pages = Vec::new();
     let mut system_offsets = Vec::new();
@@ -11594,7 +11744,9 @@ fn plan_page_layout(
         let requested_size =
             options.page_size_before_system[system_index].unwrap_or(inherited_page_size);
         let page_height = requested_size.dimensions().height;
-        let printable_height = page_height - options.content_top - PAGE_MARGIN;
+        let printable_height = ((page_height - options.content_top - PAGE_MARGIN) as f64
+            / options.scale)
+            .floor() as i32;
         if occupied_height > printable_height {
             return Err(format!(
                 "System {} is {occupied_height} units high and cannot fit within the printable Page height of {printable_height} units",
@@ -11629,7 +11781,8 @@ fn plan_page_layout(
         page_top += page_height + PAGE_GUTTER;
     }
     for (system_index, (page, offset)) in system_pages.into_iter().zip(system_offsets).enumerate() {
-        system_layout.system_y_offsets[system_index] = page_tops[page] + offset;
+        system_layout.system_y_offsets[system_index] =
+            (f64::from(page_tops[page]) / options.scale).round() as i32 + offset;
     }
     Ok(page_sizes)
 }
@@ -11639,6 +11792,7 @@ fn render_svg_with_alignment(
     warnings: &mut Vec<String>,
     alignment: SystemAlignment,
     page_size: PageSize,
+    scale: f64,
 ) -> Result<RenderedSvg, String> {
     let provisional = score
         .parts
@@ -11820,11 +11974,15 @@ fn render_svg_with_alignment(
             }
         })
         .collect::<Vec<_>>();
+    let planning_width = (f64::from(printable_width) / scale).floor();
+    if planning_width > f64::from(i32::MAX) {
+        return Err("--scale is too small to lay out the score".to_owned());
+    }
     let mut system_layout = plan_system_layout(
         &measure_barline_positions,
         &system_start_event_xs,
         alignment,
-        printable_width,
+        planning_width as i32,
         &explicit_system_breaks,
         &prohibited_system_breaks,
         &measure_advance_expansions,
@@ -11871,13 +12029,25 @@ fn render_svg_with_alignment(
             )
         })
         .collect::<Vec<_>>();
-    let content_top = PAGE_MARGIN
+    let mut content_top = PAGE_MARGIN
         - system_bounds
             .iter()
             .map(|bounds| bounds.top)
             .min()
             .unwrap_or(0)
-            .min(0);
+            .min(0)
+        + if score.title().is_some() {
+            SCORE_TITLE_VERTICAL_RESERVE
+        } else {
+            0
+        };
+    if score.title().is_some() {
+        let minimum_content_top = (f64::from(PAGE_MARGIN + SCORE_TITLE_BASELINE_OFFSET)
+            + f64::from(SCORE_TITLE_VERTICAL_RESERVE)
+            - 28.0 * scale)
+            .ceil() as i32;
+        content_top = content_top.max(minimum_content_top);
+    }
     let page_sizes = plan_page_layout(
         &mut system_layout,
         PageLayoutOptions {
@@ -11888,6 +12058,7 @@ fn render_svg_with_alignment(
             default_page_size: page_size,
             system_bounds: &system_bounds,
             content_top,
+            scale,
         },
     )?;
     let rendered = score
@@ -11937,6 +12108,10 @@ fn render_svg_with_alignment(
     let mut svg = String::new();
     writeln!(svg, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{page_width_mm}\" height=\"{physical_height}\" viewBox=\"0 0 {page_width} {height}\" role=\"img\">")
         .expect("writing to a String cannot fail");
+    if let Some(title) = score.title() {
+        writeln!(svg, "<title>{}</title>", escape_svg_attribute(title))
+            .expect("writing to a String cannot fail");
+    }
     writeln!(svg, "<rect id=\"background\" x=\"0\" y=\"0\" width=\"{page_width}\" height=\"{height}\" fill=\"#e5e5e5\"/>")
         .expect("writing to a String cannot fail");
     let mut page_top = 0;
@@ -11959,9 +12134,12 @@ fn render_svg_with_alignment(
         writeln!(svg, "<rect id=\"page-{}\" class=\"page\" x=\"0\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#fff\"/>", page_index + 1, page.top, page.width, page.height)
             .expect("writing to a String cannot fail");
     }
+    if let Some(title) = score.title() {
+        write_score_title(&mut svg, title, page_sizes[0].dimensions().width);
+    }
     writeln!(
         svg,
-        "<g transform=\"translate({content_left} {content_top})\">"
+        "<g transform=\"translate({content_left} {content_top}) scale({scale})\">"
     )
     .expect("writing to a String cannot fail");
     for (part_index, (part, rendered_part)) in score.parts.iter().zip(rendered).enumerate() {
@@ -12015,9 +12193,42 @@ fn render_svg_with_alignment(
 
 #[cfg(test)]
 fn render_svg(score: &Score, warnings: &mut Vec<String>) -> String {
-    render_svg_with_alignment(score, warnings, SystemAlignment::Left, PageSize::A4)
+    render_svg_with_alignment(score, warnings, SystemAlignment::Left, PageSize::A4, 1.0)
         .expect("score fits the configured System width")
         .svg
+}
+
+fn write_score_title(svg: &mut String, title: &str, page_width: i32) {
+    let glyphs = title
+        .chars()
+        .map(|character| {
+            noto_sans_glyphs::glyph(character)
+                .expect("score title glyphs were validated while parsing")
+        })
+        .collect::<Vec<_>>();
+    let scale = SCORE_TITLE_FONT_SIZE / noto_sans_glyphs::UNITS_PER_EM;
+    let text_width = glyphs
+        .iter()
+        .map(|glyph| glyph.advance * scale)
+        .sum::<f64>();
+    let x = f64::from(PAGE_MARGIN) + (f64::from(page_width - PAGE_MARGIN * 2) - text_width) / 2.0;
+    let baseline = PAGE_MARGIN + SCORE_TITLE_BASELINE_OFFSET;
+    for (glyph_index, glyph) in glyphs.iter().enumerate() {
+        if glyph.path.is_empty() {
+            continue;
+        }
+        let glyph_x = x + glyphs[..glyph_index]
+            .iter()
+            .map(|previous| previous.advance * scale)
+            .sum::<f64>();
+        writeln!(
+            svg,
+            "<path id=\"score-title-{glyph_index}\" class=\"score-title\" data-value=\"{}\" transform=\"translate({glyph_x:.2} {baseline}) scale({scale:.4})\" d=\"{}\" fill=\"#171717\" fill-rule=\"evenodd\"/>",
+            escape_svg_attribute(title),
+            glyph.path
+        )
+        .expect("writing to a String cannot fail");
+    }
 }
 
 fn system_y_offset(
@@ -12421,6 +12632,7 @@ fn render_part_svg(
                 x,
                 &active_beams_for_event,
                 &pending_ties_for_event,
+                system_index,
                 stems_up,
             );
             for (previous_onset, previous_is_grace, previous_geometry) in &placed_event_geometries {
@@ -12436,6 +12648,7 @@ fn render_part_svg(
                             x,
                             &active_beams_for_event,
                             &pending_ties_for_event,
+                            system_index,
                             stems_up,
                         );
                     }
@@ -13007,28 +13220,64 @@ fn render_part_svg(
                     } else if let Some(position) = pending_tie_paths[tie_state_index]
                         .1
                         .iter()
-                        .position(|(pending_tone, _, _)| *pending_tone == tone)
+                        .position(|(pending_tone, _, _, _, _, _)| *pending_tone == tone)
                     {
-                        let (_, start_x, start_y) =
-                            pending_tie_paths[tie_state_index].1.remove(position);
-                        let end_x = tone_x + 5;
-                        scene.add_path(
-                            DrawLayer::Tie,
-                            format!("tie-{index}-{tone_index}"),
-                            Some(PathClass::Tie),
-                            Vec::new(),
-                            PathGeometry::new(
-                                None,
-                                format!(
-                                    "M{start_x} {start_y}C{} {} {} {} {end_x} {start_y}",
-                                    start_x + 10,
-                                    start_y + 9,
-                                    end_x - 10,
-                                    start_y + 9
+                        let (
+                            _,
+                            start_system,
+                            start_event_index,
+                            start_tone_index,
+                            start_tone_x,
+                            start_y,
+                        ) = pending_tie_paths[tie_state_index].1.remove(position);
+                        if start_system != system_index {
+                            scene.set_system_y_offset(system_y_offset(
+                                system_layout,
+                                start_system,
+                                part_index,
+                                part_count,
+                            ));
+                            add_partial_tie_path(
+                                &mut scene,
+                                format!("tie-start-partial-{start_event_index}-{start_tone_index}"),
+                                start_tone_x,
+                                start_y,
+                                true,
+                            );
+                            scene.set_system_y_offset(system_y_offset(
+                                system_layout,
+                                system_index,
+                                part_index,
+                                part_count,
+                            ));
+                            add_partial_tie_path(
+                                &mut scene,
+                                format!("tie-stop-partial-{index}-{tone_index}"),
+                                tone_x,
+                                tie_y,
+                                false,
+                            );
+                        } else {
+                            let start_x = start_tone_x + 8;
+                            let end_x = tone_x + 5;
+                            scene.add_path(
+                                DrawLayer::Tie,
+                                format!("tie-{index}-{tone_index}"),
+                                Some(PathClass::Tie),
+                                Vec::new(),
+                                PathGeometry::new(
+                                    None,
+                                    format!(
+                                        "M{start_x} {start_y}C{} {} {} {} {end_x} {start_y}",
+                                        start_x + 10,
+                                        start_y + 9,
+                                        end_x - 10,
+                                        start_y + 9
+                                    ),
+                                    PathStyle::MediumOutline,
                                 ),
-                                PathStyle::MediumOutline,
-                            ),
-                        );
+                            );
+                        }
                         view_bottom = view_bottom.max(start_y + 10);
                     }
                 }
@@ -13042,9 +13291,14 @@ fn render_part_svg(
                     );
                     view_bottom = view_bottom.max(tie_y + 10);
                 } else if tone_event.tie_start {
-                    pending_tie_paths[tie_state_index]
-                        .1
-                        .push((tone, tone_x + 8, tie_y));
+                    pending_tie_paths[tie_state_index].1.push((
+                        tone,
+                        system_index,
+                        index,
+                        tone_index,
+                        tone_x,
+                        tie_y,
+                    ));
                 }
                 view_top = view_top.min(octave_y - 20);
                 view_bottom = view_bottom.max(octave_y + 37);

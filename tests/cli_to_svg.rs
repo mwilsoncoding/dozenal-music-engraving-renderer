@@ -135,6 +135,101 @@ fn justified_trumpet_systems_match_the_first_system_width() {
 }
 
 #[test]
+fn render_scale_changes_system_breaks_without_scaling_page_geometry() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("scaled-trumpet.musicxml");
+    fs::write(
+        &input,
+        include_str!("../reference/original-bb-trumpet-12-bar.musicxml"),
+    )
+    .expect("write trumpet score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--scale")
+        .arg("0.5")
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "scaled trumpet score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("scaled-trumpet.svg")).expect("read SVG");
+    let system_count = svg
+        .lines()
+        .filter(|line| line.contains("-staff-line-1\""))
+        .count();
+    assert!(
+        system_count < 4,
+        "reducing the scale should allow more measures per System: {system_count} Systems"
+    );
+    assert!(
+        svg.contains("transform=\"translate(57 77) scale(0.5)\""),
+        "scaled score content should be anchored at the printable-area top-left: {svg}"
+    );
+    assert!(
+        svg.contains("width=\"210mm\" height=\""),
+        "the physical Page width should not be scaled"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_invalid_render_scale_values() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("invalid-scale.musicxml");
+    fs::write(&input, include_str!("fixtures/minimal.musicxml"))
+        .expect("write invalid-scale score");
+
+    for value in ["0", "-1", "NaN", "inf", "not-a-number"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+            .arg(&input)
+            .arg("--scale")
+            .arg(value)
+            .output()
+            .expect("run CLI");
+        assert!(
+            !output.status.success(),
+            "scale {value:?} should be rejected"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("--scale requires a positive finite multiplier"),
+            "scale {value:?} should have a clear scale diagnostic"
+        );
+        assert!(!directory.join("invalid-scale.svg").exists());
+    }
+
+    let missing = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--scale")
+        .output()
+        .expect("run CLI");
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr)
+        .contains("--scale requires a positive finite multiplier"));
+
+    let duplicate = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--scale")
+        .arg("0.8")
+        .arg("--scale")
+        .arg("0.9")
+        .output()
+        .expect("run CLI");
+    assert!(!duplicate.status.success());
+    assert!(
+        String::from_utf8_lossy(&duplicate.stderr).contains("--scale may only be specified once")
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn exports_composed_pages_as_vector_pdf_with_metadata() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
@@ -1528,6 +1623,83 @@ fn renders_the_note_spans_example_through_the_cli() {
     assert!(
         span_y("glissando-1-0-system-0") < span_y("slide-2-1-system-0"),
         "number-1 dotted glissando should be above number-2 dashed slide: {svg}"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn splits_ties_at_system_breaks_into_handles_facing_the_barline() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("tie-system-break.musicxml");
+    let fixture = r#"<?xml version="1.0"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Music</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><notations><tied type="start"/></notations></note>
+    </measure>
+    <measure number="2">
+      <print new-system="yes"/>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><notations><tied type="stop"/></notations></note>
+    </measure>
+  </part>
+</score-partwise>"#;
+    fs::write(&input, fixture).expect("write cross-System tie score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "cross-System tie score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("tie-system-break.svg")).expect("read SVG");
+    let tie_start = svg
+        .lines()
+        .find(|line| line.contains("id=\"tie-start-partial-0-0\""))
+        .expect("tie start should have a partial handle on the first System");
+    let tie_stop = svg
+        .lines()
+        .find(|line| line.contains("id=\"tie-stop-partial-1-0\""))
+        .expect("tie stop should have a partial handle on the second System");
+    assert!(
+        !svg.contains("id=\"tie-1-0\""),
+        "do not draw a tie across Systems: {svg}"
+    );
+    let start_path = tie_start
+        .split(" d=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    let stop_path = tie_stop
+        .split(" d=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    assert!(
+        start_path.starts_with("M100 ") && start_path.ends_with("116 87"),
+        "tie-start handle should trail right toward the ending barline: {tie_start}"
+    );
+    assert!(
+        stop_path.starts_with("M18 ") && stop_path.ends_with("34 87"),
+        "tie-stop handle should trail left toward the starting barline: {tie_stop}"
+    );
+    assert!(
+        !tie_start.contains("transform=\"translate"),
+        "tie-start handle should remain on the first System: {tie_start}"
+    );
+    assert!(
+        tie_stop.contains("transform=\"translate(0 160)\""),
+        "tie-stop handle should remain on the second System: {tie_stop}"
     );
 
     fs::remove_dir_all(directory).expect("remove test directory");
@@ -8138,6 +8310,198 @@ fn later_system_starts_with_barline_and_aligns_content_to_clef_position() {
         second_system_start_barline.contains("d=\"M12 27.5V108.5\""),
         "the re-notated System barline should remain at the left edge of the Staff: {second_system_start_barline}"
     );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn engraves_work_title_from_musicxml_score_metadata() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("titled-score.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<part-list>",
+        "<work><work-title>Mr. P.C.</work-title><work-number>7</work-number></work><movement-title>Fallback title</movement-title><part-list>",
+    );
+    fs::write(&input, &fixture).expect("write titled score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "titled score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("titled-score.svg")).expect("read SVG");
+    assert!(svg.contains("<title>Mr. P.C.</title>"), "{svg}");
+    let title = svg
+        .lines()
+        .find(|line| line.contains("class=\"score-title\""))
+        .expect("engraved score title");
+    assert!(title.contains("data-value=\"Mr. P.C.\""), "{title}");
+    assert!(
+        !svg.contains("data-value=\"7\""),
+        "work number is not engraved"
+    );
+    let title_y = path_translation_f64(title).1;
+    let staff_top = path_translation_f64(
+        svg.lines()
+            .find(|line| line.starts_with("<g transform=\"translate("))
+            .expect("score content group"),
+    )
+    .1 + 28.0;
+    assert!(
+        title_y < staff_top,
+        "the score title should be above the first System: title y={title_y}, staff y={staff_top}"
+    );
+
+    let pdf_path = directory.join("titled-score.pdf");
+    let pdf_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--output")
+        .arg(&pdf_path)
+        .output()
+        .expect("run PDF CLI");
+    assert!(
+        pdf_output.status.success(),
+        "titled PDF export failed: {}",
+        String::from_utf8_lossy(&pdf_output.stderr)
+    );
+    let pdf = fs::read(pdf_path).expect("read titled PDF");
+    let pdf_text = String::from_utf8_lossy(&pdf);
+    assert!(pdf_text.contains("/Title (Mr. P.C.)"), "{pdf_text}");
+
+    let number_first_fixture = fixture.replace(
+        "<work-title>Mr. P.C.</work-title><work-number>7</work-number>",
+        "<work-number>7</work-number><work-title>Mr. P.C.</work-title>",
+    );
+    fs::write(&input, number_first_fixture).expect("write number-first work metadata");
+    let number_first_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run number-first CLI");
+    assert!(
+        number_first_output.status.success(),
+        "number-first work metadata failed: {}",
+        String::from_utf8_lossy(&number_first_output.stderr)
+    );
+
+    let scaled_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--scale")
+        .arg("0.5")
+        .output()
+        .expect("run scaled CLI");
+    assert!(
+        scaled_output.status.success(),
+        "scaled title render failed: {}",
+        String::from_utf8_lossy(&scaled_output.stderr)
+    );
+    let scaled_svg =
+        fs::read_to_string(directory.join("titled-score.svg")).expect("read scaled SVG");
+    let scaled_title = scaled_svg
+        .lines()
+        .find(|line| line.contains("class=\"score-title\""))
+        .expect("scaled render's title");
+    assert_eq!(
+        scaled_title
+            .split(" transform=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next(),
+        title
+            .split(" transform=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next(),
+        "the title stays at natural size and position when the score is scaled"
+    );
+    let scaled_content_group = scaled_svg
+        .lines()
+        .find(|line| line.starts_with("<g transform=\"translate("))
+        .expect("scaled score content group");
+    let scaled_staff_top = path_translation_f64(scaled_content_group).1 + 28.0 * 0.5;
+    assert!(
+        scaled_staff_top >= path_translation_f64(scaled_title).1 + 8.0,
+        "the title should not overlap the scaled first System"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn uses_movement_title_when_work_title_is_absent() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("movement-title.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<part-list>",
+        "<movement-title>Movement &amp; Only</movement-title><part-list>",
+    ).replace(
+        "</part>",
+        "<measure number=\"2\"><print new-page=\"yes\"/><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note></measure></part>",
+    );
+    fs::write(&input, fixture).expect("write movement-title score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "movement-title score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("movement-title.svg")).expect("read SVG");
+    assert!(svg.contains("<title>Movement &amp; Only</title>"), "{svg}");
+    assert!(svg.contains("data-value=\"Movement &amp; Only\""), "{svg}");
+    assert_eq!(svg.matches("class=\"page\"").count(), 2, "{svg}");
+    assert_eq!(svg.matches("class=\"score-title\"").count(), 13, "{svg}");
+
+    let pdf_path = directory.join("movement-title.pdf");
+    let pdf_output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .arg("--output")
+        .arg(&pdf_path)
+        .output()
+        .expect("run PDF CLI");
+    assert!(
+        pdf_output.status.success(),
+        "movement-title PDF export failed: {}",
+        String::from_utf8_lossy(&pdf_output.stderr)
+    );
+    let pdf = fs::read(pdf_path).expect("read movement-title PDF");
+    assert!(String::from_utf8_lossy(&pdf).contains("/Title (Movement & Only)"));
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn rejects_score_titles_with_unsupported_glyphs() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("unsupported-title.musicxml");
+    let fixture = include_str!("fixtures/minimal.musicxml").replace(
+        "<part-list>",
+        "<work><work-title>Bad 🎵</work-title></work><part-list>",
+    );
+    fs::write(&input, fixture).expect("write unsupported-title score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostic.contains("score title contains unsupported character"),
+        "{diagnostic}"
+    );
+    assert!(!directory.join("unsupported-title.svg").exists());
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }

@@ -32,6 +32,17 @@ print-level dimensions apply to the Page they begin, and omitted dimensions
 inherit the score defaults. These hints
 take precedence over `--page-size`. Custom dimensions and explicit margins warn
 and use renderer defaults.
+Use `--scale S` to uniformly scale score content by a positive finite
+multiplier (`1.0` is natural size) while keeping Page dimensions and margins
+fixed. The scale is applied when determining automatic System breaks and when
+rendering; scaled System bounds also determine Page composition.
+MusicXML `<work><work-title>` and `<movement-title>` provide a score title.
+The work title takes precedence; the movement title is used when no work title
+is present. A selected title is engraved, centered above the first System on
+the first Page, and included in SVG and PDF title metadata. PDF metadata falls
+back to the input filename when neither title is present. `<work-number>` is
+accepted as metadata but is not engraved. The title uses the bundled text
+glyph repertoire and remains at natural size when `--scale` is used.
 
 This MVP accepts uncompressed, no-namespace MusicXML 4.0
 `score-partwise` scores with one or more Parts, each represented by one Dozenal
