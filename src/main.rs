@@ -11607,14 +11607,14 @@ fn plan_system_layout(
                     measure + 1
                 ));
             }
-            ranges.push((start, measure, width, !explicit_break));
+            ranges.push((start, measure, width));
             start = measure;
             width = measure_width;
         } else {
             width = next_width;
         }
     }
-    ranges.push((start, barline_positions.len(), width, false));
+    ranges.push((start, barline_positions.len(), width));
 
     let mut starts = Vec::with_capacity(ranges.len());
     let mut measure_systems = vec![0; barline_positions.len()];
@@ -11622,7 +11622,7 @@ fn plan_system_layout(
     let mut system_start_event_xs = Vec::with_capacity(ranges.len());
     let mut x_offsets = vec![0; ranges.len()];
     let mut gap_expansions = vec![0; barline_positions.len()];
-    for (system_index, (system_start, system_end, system_width, ended_by_width)) in
+    for (system_index, (system_start, system_end, system_width)) in
         ranges.iter().copied().enumerate()
     {
         starts.push(system_start);
@@ -11663,7 +11663,7 @@ fn plan_system_layout(
         }
 
         if alignment == SystemAlignment::Justified
-            && ended_by_width
+            && system_index + 1 < ranges.len()
             && system_end > system_start + 1
         {
             let extra_width = max_width - system_width;
@@ -15090,6 +15090,24 @@ mod tests {
         assert_eq!(layout.starts, [0, 3, 4]);
         assert_eq!(&layout.gap_expansions[..3], [18, 30, 0]);
         assert_eq!(&layout.local_barline_positions[..3], [150, 218, 328]);
+    }
+
+    #[test]
+    fn justified_explicit_system_breaks_expand_nonfinal_systems() {
+        let layout = plan_system_layout(
+            &[150, 200, 250, 300],
+            &[92; 4],
+            SystemAlignment::Justified,
+            340,
+            &[2],
+            &[],
+            &[],
+        )
+        .expect("each measure fits");
+
+        assert_eq!(layout.starts, [0, 2]);
+        assert_eq!(layout.gap_expansions[0], 128);
+        assert_eq!(layout.gap_expansions[2], 0);
     }
 
     #[test]
