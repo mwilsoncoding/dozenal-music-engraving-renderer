@@ -93,11 +93,8 @@ fn justified_trumpet_systems_match_the_first_system_width() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
     let input = directory.join("justified-trumpet.musicxml");
-    fs::write(
-        &input,
-        include_str!("../reference/original-bb-trumpet-12-bar.musicxml"),
-    )
-    .expect("write trumpet score");
+    fs::write(&input, include_str!("../examples/mr-pc/mr-pc.musicxml"))
+        .expect("write trumpet score");
 
     let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
         .arg(&input)
@@ -139,11 +136,8 @@ fn render_scale_changes_system_breaks_without_scaling_page_geometry() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
     let input = directory.join("scaled-trumpet.musicxml");
-    fs::write(
-        &input,
-        include_str!("../reference/original-bb-trumpet-12-bar.musicxml"),
-    )
-    .expect("write trumpet score");
+    fs::write(&input, include_str!("../examples/mr-pc/mr-pc.musicxml"))
+        .expect("write trumpet score");
 
     let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
         .arg(&input)
@@ -165,9 +159,18 @@ fn render_scale_changes_system_breaks_without_scaling_page_geometry() {
         system_count < 4,
         "reducing the scale should allow more measures per System: {system_count} Systems"
     );
+    let score_group = svg
+        .lines()
+        .find(|line| line.starts_with("<g transform=\"translate("))
+        .expect("scaled score content group");
+    let (score_left, score_top) = path_translation_f64(score_group);
+    assert_eq!(
+        score_left, 57.0,
+        "scaled score content should stay aligned to the printable left margin"
+    );
     assert!(
-        svg.contains("transform=\"translate(57 77) scale(0.5)\""),
-        "scaled score content should be anchored at the printable-area top-left: {svg}"
+        score_top >= 77.0,
+        "score content should start below the printable top margin and title: {score_top}"
     );
     assert!(
         svg.contains("width=\"210mm\" height=\""),
@@ -423,7 +426,7 @@ fn musicxml_new_page_no_rejects_an_automatic_page_break() {
     let input = directory.join("prohibited-page-break.musicxml");
     let measures = (1..=10)
         .map(|number| {
-            let print = if number == 7 {
+            let print = if number == 8 {
                 "<print new-system=\"yes\" new-page=\"no\"/>"
             } else {
                 "<print new-system=\"yes\"/>"
@@ -1299,7 +1302,7 @@ fn renders_a_note_span_across_a_page_boundary_at_system_offset() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
     let input = directory.join("cross-page-slur.musicxml");
-    let measures = (1..=96)
+    let measures = (1..=192)
         .map(|number| {
             let divisions = if number == 1 {
                 "<attributes><divisions>1</divisions></attributes>"
@@ -1308,8 +1311,8 @@ fn renders_a_note_span_across_a_page_boundary_at_system_offset() {
             };
             let span = match number {
                 1 => "<notations><slur type=\"start\" number=\"1\"/></notations>",
-                49 => "<notations><slur type=\"continue\" number=\"1\"/></notations>",
-                96 => "<notations><slur type=\"stop\" number=\"1\"/></notations>",
+                97 => "<notations><slur type=\"continue\" number=\"1\"/></notations>",
+                192 => "<notations><slur type=\"stop\" number=\"1\"/></notations>",
                 _ => "",
             };
             format!(
@@ -1365,7 +1368,7 @@ fn composes_systems_onto_multiple_a4_pages() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
     let input = directory.join("pages.musicxml");
-    let measures = (1..=96)
+    let measures = (1..=384)
         .map(|number| {
             let divisions = if number == 1 {
                 "<attributes><divisions>1</divisions></attributes>"
@@ -1392,11 +1395,14 @@ fn composes_systems_onto_multiple_a4_pages() {
         String::from_utf8_lossy(&output.stderr)
     );
     let svg = fs::read_to_string(directory.join("pages.svg")).expect("read SVG");
-    assert!(svg.contains("width=\"210mm\" height=\"600.35mm\""), "{svg}");
-    assert!(svg.contains("viewBox=\"0 0 794 2270\""), "{svg}");
-    assert_eq!(svg.matches("class=\"page\"").count(), 2, "{svg}");
+    assert!(
+        svg.contains("width=\"210mm\" height=\"1207.05mm\""),
+        "{svg}"
+    );
+    assert!(svg.contains("viewBox=\"0 0 794 4564\""), "{svg}");
+    assert_eq!(svg.matches("class=\"page\"").count(), 4, "{svg}");
     assert!(svg.contains("fill=\"#e5e5e5\""), "{svg}");
-    assert_eq!(svg.matches("class=\"tonehead\"").count(), 96, "{svg}");
+    assert_eq!(svg.matches("class=\"tonehead\"").count(), 384, "{svg}");
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
@@ -1698,7 +1704,7 @@ fn splits_ties_at_system_breaks_into_handles_facing_the_barline() {
         "tie-start handle should remain on the first System: {tie_start}"
     );
     assert!(
-        tie_stop.contains("transform=\"translate(0 160)\""),
+        tie_stop.contains("transform=\"translate(0 136)\""),
         "tie-stop handle should remain on the second System: {tie_stop}"
     );
 
@@ -8141,7 +8147,7 @@ fn renders_clef_and_time_signature_only_where_notated() {
     let directory = scratch_dir();
     fs::create_dir_all(&directory).expect("create test directory");
     let input = directory.join("notated-clef-meter.musicxml");
-    let fixture = include_str!("../reference/original-bb-trumpet-12-bar.musicxml");
+    let fixture = include_str!("../examples/mr-pc/mr-pc.musicxml");
     fs::write(&input, fixture).expect("write notated clef and meter score");
 
     let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
@@ -8428,6 +8434,48 @@ fn engraves_work_title_from_musicxml_score_metadata() {
     assert!(
         scaled_staff_top >= path_translation_f64(scaled_title).1 + 8.0,
         "the title should not overlap the scaled first System"
+    );
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn leaves_clearance_between_title_and_first_system_chord_symbol() {
+    let directory = scratch_dir();
+    fs::create_dir_all(&directory).expect("create test directory");
+    let input = directory.join("title-chord-clearance.musicxml");
+    fs::write(&input, include_str!("../examples/mr-pc/mr-pc.musicxml"))
+        .expect("write trumpet title-and-chord score");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_domunor"))
+        .arg(&input)
+        .output()
+        .expect("run CLI");
+    assert!(
+        output.status.success(),
+        "title-and-chord score failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(directory.join("title-chord-clearance.svg")).expect("read SVG");
+    let title = svg
+        .lines()
+        .find(|line| line.contains("class=\"score-title\""))
+        .expect("engraved title");
+    let title_baseline = path_translation_f64(title).1;
+    let content_group_y = svg
+        .lines()
+        .find(|line| line.starts_with("<g transform=\"translate("))
+        .map(|line| path_translation_f64(line).1)
+        .expect("score content group");
+    let first_chord_root = svg
+        .lines()
+        .find(|line| line.contains("id=\"chord-symbol-0-root\""))
+        .expect("first-System Chord Symbol root");
+    let chord_symbol_top = content_group_y + path_translation_f64(first_chord_root).1 + 2.0;
+    assert!(
+        chord_symbol_top - title_baseline >= 13.0,
+        "leave at least 12 units between visible title ink and the first Chord Symbol: title baseline={title_baseline}, chord top={chord_symbol_top}, gap={}",
+        chord_symbol_top - title_baseline - 1.0
     );
 
     fs::remove_dir_all(directory).expect("remove test directory");

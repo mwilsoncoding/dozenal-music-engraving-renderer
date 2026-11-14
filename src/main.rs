@@ -508,6 +508,7 @@ const TIME_SIGNATURE_LEFT_OFFSET: i32 = 34;
 const SYSTEM_START_RIGHT_PADDING: i32 = 8;
 const SYSTEM_MAX_WIDTH: i32 = 680;
 const SYSTEM_ROW_HEIGHT: i32 = 160;
+const MIN_SYSTEM_CLEARANCE: i32 = 8;
 const NOTE_SPAN_TONEHEAD_INSET: i32 = 8;
 
 struct SystemLayout {
@@ -805,9 +806,10 @@ struct RenderedSvg {
 
 const PAGE_MARGIN: i32 = 57;
 const PAGE_GUTTER: i32 = 24;
-const SCORE_TITLE_VERTICAL_RESERVE: i32 = 8;
 const SCORE_TITLE_FONT_SIZE: f64 = 24.0;
 const SCORE_TITLE_BASELINE_OFFSET: i32 = 24;
+const SCORE_TITLE_CHORD_CLEARANCE: f64 = 12.0;
+const CHORD_SYMBOL_TOP: i32 = -20;
 
 fn main() {
     if let Err(message) = run() {
@@ -10787,7 +10789,7 @@ fn add_chord_symbol(
     right: &mut i32,
     view_top: &mut i32,
 ) -> i32 {
-    const ROOT_TOP: i32 = -20;
+    const ROOT_TOP: i32 = CHORD_SYMBOL_TOP;
     const SMALL_DIGIT_X: i32 = 22;
     const TONE_SPACING: i32 = 13;
     let root_id = format!("chord-symbol-{index}-root");
@@ -10855,7 +10857,7 @@ fn add_chord_symbol(
 fn chord_symbol_bounds(x: i32, width: i32, offset_x: f64) -> ComponentBounds {
     ComponentBounds::filled(
         f64::from(x) + offset_x,
-        -20.0,
+        f64::from(CHORD_SYMBOL_TOP),
         f64::from(x + width) + offset_x,
         14.0,
     )
@@ -11709,7 +11711,6 @@ struct PageLayoutOptions<'a> {
     page_break_before: &'a [bool],
     prohibited_page_break_before: &'a [bool],
     page_size_before_system: &'a [Option<PageSize>],
-    part_count: usize,
     default_page_size: PageSize,
     system_bounds: &'a [VerticalBounds],
     content_top: i32,
@@ -11720,8 +11721,6 @@ fn plan_page_layout(
     system_layout: &mut SystemLayout,
     options: PageLayoutOptions<'_>,
 ) -> Result<Vec<PageSize>, String> {
-    let system_height =
-        (options.part_count as f64 * f64::from(SYSTEM_ROW_HEIGHT) / options.scale).ceil() as i32;
     let mut page_sizes = vec![options.default_page_size];
     let mut system_pages = Vec::new();
     let mut system_offsets = Vec::new();
@@ -11734,7 +11733,7 @@ fn plan_page_layout(
         .zip(options.system_bounds.iter().copied())
         .enumerate()
     {
-        let occupied_height = system_height.max(bounds.bottom);
+        let occupied_height = bounds.bottom;
         let forced_break = system_index > 0 && options.page_break_before[system_start];
         let inherited_page_size = if forced_break {
             options.default_page_size
@@ -11771,7 +11770,12 @@ fn plan_page_layout(
         }
         system_pages.push(page);
         system_offsets.push(used_height);
-        used_height += occupied_height;
+        if let Some(next_bounds) = options.system_bounds.get(system_index + 1) {
+            let visual_clearance_step = bounds.bottom + MIN_SYSTEM_CLEARANCE - next_bounds.top;
+            used_height += occupied_height.max(visual_clearance_step);
+        } else {
+            used_height += occupied_height;
+        }
     }
     let mut page_tops = Vec::with_capacity(page_sizes.len());
     let mut page_top = 0;
@@ -12014,10 +12018,7 @@ fn render_svg_with_alignment(
     let system_bounds = (0..system_layout.starts.len())
         .map(|system_index| {
             measured_systems.iter().enumerate().fold(
-                VerticalBounds {
-                    top: 0,
-                    bottom: score.parts.len() as i32 * SYSTEM_ROW_HEIGHT,
-                },
+                VerticalBounds { top: 0, bottom: 0 },
                 |bounds, (part_index, part)| {
                     let part_bounds = part.system_vertical_bounds[system_index];
                     let part_offset = part_index as i32 * SYSTEM_ROW_HEIGHT;
@@ -12035,16 +12036,12 @@ fn render_svg_with_alignment(
             .map(|bounds| bounds.top)
             .min()
             .unwrap_or(0)
-            .min(0)
-        + if score.title().is_some() {
-            SCORE_TITLE_VERTICAL_RESERVE
-        } else {
-            0
-        };
-    if score.title().is_some() {
+            .min(0);
+    if let Some(title) = score.title() {
         let minimum_content_top = (f64::from(PAGE_MARGIN + SCORE_TITLE_BASELINE_OFFSET)
-            + f64::from(SCORE_TITLE_VERTICAL_RESERVE)
-            - 28.0 * scale)
+            + score_title_ink_bottom_offset(title)
+            + SCORE_TITLE_CHORD_CLEARANCE
+            - f64::from(CHORD_SYMBOL_TOP) * scale)
             .ceil() as i32;
         content_top = content_top.max(minimum_content_top);
     }
@@ -12054,7 +12051,6 @@ fn render_svg_with_alignment(
             page_break_before: &page_break_before,
             prohibited_page_break_before: &prohibited_page_break_before,
             page_size_before_system: &page_size_before_system,
-            part_count: score.parts.len(),
             default_page_size: page_size,
             system_bounds: &system_bounds,
             content_top,
@@ -12229,6 +12225,19 @@ fn write_score_title(svg: &mut String, title: &str, page_width: i32) {
         )
         .expect("writing to a String cannot fail");
     }
+}
+
+fn score_title_ink_bottom_offset(title: &str) -> f64 {
+    let scale = SCORE_TITLE_FONT_SIZE / noto_sans_glyphs::UNITS_PER_EM;
+    title
+        .chars()
+        .map(|character| {
+            noto_sans_glyphs::glyph(character)
+                .expect("score title glyphs were validated while parsing")
+                .bounds[3]
+                * scale
+        })
+        .fold(0.0, f64::max)
 }
 
 fn system_y_offset(
@@ -15060,8 +15069,8 @@ fn time_signature_glyph_path(value: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        glyph_path, parse_score, plan_system_layout, render_part_svg, render_svg, Meter,
-        SystemAlignment,
+        glyph_path, parse_score, plan_page_layout, plan_system_layout, render_part_svg, render_svg,
+        Meter, PageLayoutOptions, PageSize, SystemAlignment, SystemLayout, VerticalBounds,
     };
 
     #[test]
@@ -15081,6 +15090,93 @@ mod tests {
         assert_eq!(layout.starts, [0, 3, 4]);
         assert_eq!(&layout.gap_expansions[..3], [18, 30, 0]);
         assert_eq!(&layout.local_barline_positions[..3], [150, 218, 328]);
+    }
+
+    #[test]
+    fn adjacent_systems_keep_clearance_between_visual_bounds() {
+        let mut layout = SystemLayout {
+            starts: vec![0, 1],
+            measure_systems: Vec::new(),
+            local_barline_positions: Vec::new(),
+            system_start_event_xs: Vec::new(),
+            x_offsets: Vec::new(),
+            gap_expansions: Vec::new(),
+            system_y_offsets: vec![0; 2],
+        };
+        let system_bounds = [
+            VerticalBounds {
+                top: -20,
+                bottom: 128,
+            },
+            VerticalBounds {
+                top: -30,
+                bottom: 128,
+            },
+        ];
+
+        plan_page_layout(
+            &mut layout,
+            PageLayoutOptions {
+                page_break_before: &[false, false],
+                prohibited_page_break_before: &[false, false],
+                page_size_before_system: &[None, None],
+                default_page_size: PageSize::A4,
+                system_bounds: &system_bounds,
+                content_top: 0,
+                scale: 1.0,
+            },
+        )
+        .expect("Systems fit on the Page");
+
+        let clearance = layout.system_y_offsets[1] + system_bounds[1].top
+            - layout.system_y_offsets[0]
+            - system_bounds[0].bottom;
+        assert!(
+            clearance >= 8,
+            "visual bounds should have at least 8 units of clearance, got {clearance}"
+        );
+    }
+
+    #[test]
+    fn adjacent_systems_use_minimum_clearance_when_visual_bounds_allow_it() {
+        let mut layout = SystemLayout {
+            starts: vec![0, 1],
+            measure_systems: Vec::new(),
+            local_barline_positions: Vec::new(),
+            system_start_event_xs: Vec::new(),
+            x_offsets: Vec::new(),
+            gap_expansions: Vec::new(),
+            system_y_offsets: vec![0; 2],
+        };
+        let system_bounds = [
+            VerticalBounds {
+                top: 0,
+                bottom: 128,
+            },
+            VerticalBounds {
+                top: 0,
+                bottom: 128,
+            },
+        ];
+
+        plan_page_layout(
+            &mut layout,
+            PageLayoutOptions {
+                page_break_before: &[false, false],
+                prohibited_page_break_before: &[false, false],
+                page_size_before_system: &[None, None],
+                default_page_size: PageSize::A4,
+                system_bounds: &system_bounds,
+                content_top: 0,
+                scale: 1.0,
+            },
+        )
+        .expect("Systems fit on the Page");
+
+        let clearance = layout.system_y_offsets[1] + system_bounds[1].top
+            - layout.system_y_offsets[0]
+            - system_bounds[0].bottom;
+        assert_eq!(clearance, 8);
     }
 
     #[test]
